@@ -461,6 +461,25 @@ describe('approvals', () => {
     expect((await stateOf(observe, 1)).stages.brainstorming?.approval).toMatchObject({ source: 'unverified', ref: url });
   });
 
+  it('ignores owner commands on a PR that links several tasks', async () => {
+    const h = setup();
+    h.tracker.seedTask(pausedOn(1));
+    h.tracker.prs.push({
+      issue: 1,
+      number: 51,
+      url: 'https://github.test/pull/51',
+      merged: false,
+      baseRef: 'main',
+      body: 'Related to #1, #2\nScope: partial',
+    });
+    const url = comment(h, 51, '/approve', AFTER);
+    const result = await reconcile(h.ctx, {});
+    expect(result.actions).toEqual([
+      { issue: 1, kind: 'ignored_approval', detail: `/approve (${url}): PR #51 links several tasks` },
+    ]);
+    expect((await stateOf(h, 1)).status).toBe('paused');
+  });
+
   describe('agent logins (`agents` in the config)', () => {
     const AGENT = 'agent-bot';
     const withAgents = (config: Config): Config => ({ ...config, agents: [AGENT] });

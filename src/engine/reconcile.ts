@@ -105,6 +105,7 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
     getTask: issue => inner.getTask(issue),
     listComments: (issue, sinceIso) => inner.listComments(issue, sinceIso),
     listTaskPrs: issue => inner.listTaskPrs(issue),
+    getPr: pr => inner.getPr(pr),
     isOnDefaultBranch: sha => inner.isOnDefaultBranch(sha),
     createIssue: write('createIssue', (title, body, labels) => inner.createIssue(title, body, labels)),
     addToBoard: write('addToBoard', issue => inner.addToBoard(issue)),
@@ -128,8 +129,8 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
  * 3. owner commands in comments on the issue and its PRs, oldest first, become `stage_approved`
  *    (for the phase the task is paused in, waiting on the owner), `accepted`, `confirmed_ran` or
  *    `cancelled`, checked by `validateCommentApproval` like `sdlc approve`. A comment already
- *    recorded as an approval is skipped silently; any other command that does not count is an
- *    `ignored_approval` saying why;
+ *    recorded as an approval is skipped silently; any other command that does not count (including
+ *    one on a PR that links more than this task) is an `ignored_approval` saying why;
  * 4. a task awaiting deployment gets `targets_deployed` for the targets deployment evidence
  *    satisfies. When a cancellation or the deployments end the task in this run, the cancel or
  *    delivery report is posted before the state is written, unless a trusted author (tracker
@@ -314,12 +315,26 @@ function describeApproval(command: ApprovalCommand, approval: Approval, state: T
   return `/${command.action} by ${approval.by} (${approval.ref})${unverified}: ${outcome}`;
 }
 
-/** Step 3: owner commands on the issue and its PRs, oldest first. */
+/** Whether the PR's body links exactly one issue, `issue`: only then do its comments speak for that task. */
+const linksOnly = (pr: PrInfo, issue: number): boolean => {
+  const linked = parsePrBody(pr.body).issues;
+  return linked.length === 1 && linked[0] === issue;
+};
+
+/**
+ * Step 3: owner commands on the issue and its PRs, oldest first. A command on a PR whose body links
+ * more than this one task is ignored.
+ */
 async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void> {
   const { ctx, task } = t;
   const comments: IssueComment[] = [];
+  /** Comments on a PR that links other tasks too: they cannot be told to be meant for this one. */
+  const sharedPr = new Map<IssueComment, number>();
   for (const thread of [task.issue, ...prs.map(pr => pr.number)]) {
-    comments.push(...(await trackerStep('listComments', task.issue, () => ctx.tracker.listComments(thread))));
+    const read = await trackerStep('listComments', task.issue, () => ctx.tracker.listComments(thread));
+    const pr = prs.find(candidate => candidate.number === thread);
+    if (pr && !linksOnly(pr, task.issue)) for (const comment of read) sharedPr.set(comment, pr.number);
+    comments.push(...read);
   }
   // In observe mode an agent's command is recorded as unverified, so it is checked like an owner's.
   const deciders = ctx.cfg.mode === 'observe' ? [...ctx.cfg.owners, ...ctx.cfg.agents] : ctx.cfg.owners;
@@ -332,6 +347,8 @@ async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void>
     if (recordedRefs(t.state).has(normalizeCommentUrl(comment.url))) continue;
     const ignore = (why: string): void => t.push('ignored_approval', `/${action} (${comment.url}): ${why}`);
     try {
+      const shared = sharedPr.get(comment);
+      if (shared !== undefined) throw new ApprovalRefusedError(`PR #${shared} links several tasks`);
       const state = t.state;
       if (state.status === 'done') throw new TransitionError('the task is already done');
       const pausedOnOwner = state.status === 'paused' && state.waitingOn === 'owner';

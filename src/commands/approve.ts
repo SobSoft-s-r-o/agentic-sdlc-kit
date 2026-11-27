@@ -8,6 +8,7 @@ import {
   validateCommentApproval,
   type ApprovalAction,
 } from '../core/approvals.js';
+import { parsePrBody } from '../core/prBody.js';
 import { renderCancelReport } from '../core/summary.js';
 import type { Approval, Phase, TaskEvent, TaskState } from '../core/types.js';
 import type { IssueComment, PrInfo } from '../tracker/types.js';
@@ -38,8 +39,32 @@ export interface ApproveInput {
   unverified?: boolean;
 }
 
-/** The comment `url` on the task issue or one of its PRs; the PRs are only listed when the issue does not hold it. */
-async function findComment(
+/** The thread (issue or PR number) a comment URL points into, when the URL says. */
+const threadOf = (url: string): number | undefined => {
+  const match = /\/(?:issues|pull)\/(\d+)#issuecomment-/.exec(url);
+  return match ? Number(match[1]) : undefined;
+};
+
+/**
+ * Throws unless a comment on `pr` can speak for `issue`: the PR's body must link `issue` and no other
+ * task, or the command cannot be told to be meant for this one.
+ */
+export function assertPrSpeaksFor(pr: PrInfo, issue: number, url: string): void {
+  const linked = parsePrBody(pr.body).issues;
+  if (!linked.includes(issue)) throw new Error(`comment ${url} is on PR #${pr.number}, which is not linked to #${issue}`);
+  if (linked.length > 1) {
+    throw new Error(
+      `PR #${pr.number} links several tasks (${linked.map(n => `#${n}`).join(', ')}); post the command on the task issue`,
+    );
+  }
+}
+
+/**
+ * The comment `url` on the task issue or one of its PRs. When the URL names a PR, that PR is read
+ * directly (no search index) and must link this task only; otherwise the issue is searched, then the
+ * task's PRs.
+ */
+export async function findComment(
   ctx: CommandContext,
   issue: number,
   url: string,
@@ -50,14 +75,29 @@ async function findComment(
     const comments = await trackerStep('listComments', issue, () => ctx.tracker.listComments(thread));
     return comments.find(comment => normalizeCommentUrl(comment.url) === wanted);
   };
+  const notFound = (): Error => new Error(`comment ${url} was not found on #${issue} or its pull requests`);
+
+  const thread = threadOf(url);
+  if (thread !== undefined && thread !== issue) {
+    const pr = await trackerStep('getPr', issue, () => ctx.tracker.getPr(thread));
+    if (!pr) throw notFound();
+    assertPrSpeaksFor(pr, issue, url);
+    const found = await onThread(thread);
+    if (found) return found;
+    throw notFound();
+  }
 
   const onIssue = await onThread(issue);
   if (onIssue) return onIssue;
+  if (thread !== undefined) throw notFound();
   for (const pr of await listPrs()) {
     const onPr = await onThread(pr.number);
-    if (onPr) return onPr;
+    if (onPr) {
+      assertPrSpeaksFor(pr, issue, url);
+      return onPr;
+    }
   }
-  throw new Error(`comment ${url} was not found on #${issue} or its pull requests`);
+  throw notFound();
 }
 
 /**

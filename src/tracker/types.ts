@@ -94,6 +94,8 @@ export interface Tracker {
   setLabels(issue: number, add: string[], remove: string[]): Promise<void>;
   syncFields(issue: number, fields: BoardFields): Promise<void>;
   listTaskPrs(issue: number): Promise<PrInfo[]>;
+  /** Reads one pull request directly (not through search); `undefined` when `pr` is not a pull request. */
+  getPr(pr: number): Promise<PrInfo | undefined>;
   /** Successful deployments to `environment`, newest first, at most `limit`. */
   listSuccessfulDeployments(environment: string, limit: number): Promise<DeploymentInfo[]>;
   /**

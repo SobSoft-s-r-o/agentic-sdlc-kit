@@ -42,6 +42,16 @@ const MINUTE = 60_000;
 /** The login the Actions runner comments as; its state comments count like the tracker's own. */
 const ACTIONS_BOT = 'github-actions[bot]';
 
+const toPrInfo = ({ number, url, merged, mergeSha, mergedAt, baseRef, body }: FakePr): PrInfo => ({
+  number,
+  url,
+  merged,
+  ...(mergeSha !== undefined && { mergeSha }),
+  ...(mergedAt !== undefined && { mergedAt }),
+  baseRef,
+  body,
+});
+
 const maxOf = (numbers: number[]): number => numbers.reduce((max, n) => Math.max(max, n), 0);
 
 /**
@@ -237,17 +247,14 @@ export class FakeTracker implements Tracker {
 
   async listTaskPrs(issue: number): Promise<PrInfo[]> {
     this.begin('listTaskPrs');
-    return this.prs
-      .filter(pr => pr.issue === issue)
-      .map(({ number, url, merged, mergeSha, mergedAt, baseRef, body }) => ({
-        number,
-        url,
-        merged,
-        ...(mergeSha !== undefined && { mergeSha }),
-        ...(mergedAt !== undefined && { mergedAt }),
-        baseRef,
-        body,
-      }));
+    return this.prs.filter(pr => pr.issue === issue).map(toPrInfo);
+  }
+
+  /** Any PR by number, whatever `issue` it is filed under (as `gh pr view` reads it directly). */
+  async getPr(pr: number): Promise<PrInfo | undefined> {
+    this.begin('getPr');
+    const found = this.prs.find(candidate => candidate.number === pr);
+    return found && toPrInfo(found);
   }
 
   /** Newest first by creation time, ties broken by id. */

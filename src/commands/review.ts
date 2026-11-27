@@ -26,9 +26,10 @@ export async function reviewHandoff(
   input: { pr: number; targets?: string[] },
 ): Promise<TaskState> {
   const loaded = await loadTask(ctx, issue);
-  const prs = await trackerStep('listTaskPrs', issue, () => ctx.tracker.listTaskPrs(issue));
-  const pr = prs.find(candidate => candidate.number === input.pr);
-  if (!pr) {
+  // Read directly: the PR search index can lag behind a PR opened moments ago.
+  const pr = await trackerStep('getPr', issue, () => ctx.tracker.getPr(input.pr));
+  if (!pr) throw new Error(`PR #${input.pr} was not found`);
+  if (!parsePrBody(pr.body).issues.includes(issue)) {
     throw new Error(`PR #${input.pr} is not linked to #${issue} (add "Related to #${issue}" to its body)`);
   }
 

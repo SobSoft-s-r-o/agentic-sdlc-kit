@@ -23,6 +23,8 @@ import { GhError, ghJson, graphql, type GhRunner } from './gh.js';
 
 /** What `gh api` prints when GitHub refuses to edit a comment: not the author's, or no longer there. */
 const EDIT_REFUSED = /\bHTTP (?:403|404)\b/;
+/** What `gh pr view` prints for a number that is not a pull request. */
+const PR_NOT_FOUND = /could not resolve to a pullrequest|no pull requests? found/i;
 /** `gh issue list` and `gh pr list` cap their output; reaching the cap means results may be missing. */
 const ISSUE_LIST_LIMIT = 500;
 const PR_LIST_LIMIT = 100;
@@ -239,6 +241,16 @@ const toIssueComment = (c: RestComment): IssueComment => ({
   updatedAt: c.updated_at ?? c.created_at,
 });
 
+const toPrInfo = (pr: PrRow): PrInfo => ({
+  number: pr.number,
+  url: pr.url,
+  merged: pr.mergedAt !== null,
+  ...(pr.mergeCommit && { mergeSha: pr.mergeCommit.oid }),
+  ...(pr.mergedAt !== null && { mergedAt: pr.mergedAt }),
+  baseRef: pr.baseRefName,
+  body: pr.body ?? '',
+});
+
 const toDeploymentInfo = (d: DeploymentRow): DeploymentInfo => ({
   id: d.id,
   sha: d.sha,
@@ -415,15 +427,20 @@ export class GitHubTracker implements Tracker {
     return rows
       .filter(pr => parsePrBody(pr.body ?? '').issues.includes(issue))
       .sort((a, b) => a.number - b.number)
-      .map(pr => ({
-        number: pr.number,
-        url: pr.url,
-        merged: pr.mergedAt !== null,
-        ...(pr.mergeCommit && { mergeSha: pr.mergeCommit.oid }),
-        ...(pr.mergedAt !== null && { mergedAt: pr.mergedAt }),
-        baseRef: pr.baseRefName,
-        body: pr.body ?? '',
-      }));
+      .map(toPrInfo);
+  }
+
+  /** `gh pr view`: no search index, so a PR opened seconds ago is found too. */
+  async getPr(pr: number): Promise<PrInfo | undefined> {
+    try {
+      const row = await ghJson<PrRow>(this.run, [
+        'pr', 'view', String(pr), '--repo', this.repo, '--json', 'number,url,mergedAt,mergeCommit,baseRefName,body',
+      ]);
+      return toPrInfo(row);
+    } catch (error) {
+      if (error instanceof GhError && PR_NOT_FOUND.test(error.stderr)) return undefined;
+      throw error;
+    }
   }
 
   /**

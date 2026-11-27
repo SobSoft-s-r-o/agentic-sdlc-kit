@@ -507,6 +507,22 @@ describe('reviewHandoff', () => {
     expect((await stateOf(h.tracker, issue)).status).toBe('in_progress');
   });
 
+  it('reads the given PR directly, so a PR the search index has not caught up with still counts', async () => {
+    const h = setup();
+    const issue = await newTask(h);
+    // Linked by its body, but the PR search does not list it yet.
+    linkPr(h.tracker, 0, 50, 'Related to #1\nTargets: web');
+    expect(await h.tracker.listTaskPrs(issue)).toEqual([]);
+    const state = await reviewHandoff(h.ctx, issue, { pr: 50 });
+    expect(state).toMatchObject({ status: 'in_review', prs: [{ number: 50, scope: 'final' }], targets: ['web'] });
+  });
+
+  it('refuses a PR number that is not a pull request', async () => {
+    const h = setup();
+    const issue = await newTask(h);
+    await expect(reviewHandoff(h.ctx, issue, { pr: 77 })).rejects.toThrow('PR #77 was not found');
+  });
+
   it('refuses a Scope line with no recognised value, naming the accepted ones', async () => {
     const h = setup();
     const issue = await newTask(h);
@@ -559,8 +575,8 @@ describe('reviewHandoff', () => {
   it('names a failed PR lookup', async () => {
     const h = setup();
     const issue = await newTask(h);
-    h.tracker.failNext('listTaskPrs');
-    await expect(reviewHandoff(h.ctx, issue, { pr: 50 })).rejects.toThrow(/listTaskPrs failed for #1/);
+    h.tracker.failNext('getPr');
+    await expect(reviewHandoff(h.ctx, issue, { pr: 50 })).rejects.toThrow(/getPr failed for #1/);
   });
 });
 
@@ -620,6 +636,36 @@ describe('approve sources', () => {
 
     const state = await approve(h.ctx, issue, { action: 'approve', commentUrl: url });
     expect(state.stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: url });
+  });
+
+  it("reads the comment's PR directly, so a PR the search index has not caught up with still counts", async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    linkPr(h.tracker, 0, 50, 'Related to #1');
+    const url = ownerComment(h.tracker, 50, AFTER);
+    const state = await approve(h.ctx, issue, { action: 'approve', commentUrl: url });
+    expect(state.stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: url });
+  });
+
+  it('refuses a comment on a PR that links several tasks', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    linkPr(h.tracker, issue, 50, 'Related to #1, #7');
+    const url = ownerComment(h.tracker, 50, AFTER);
+    await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
+      'PR #50 links several tasks (#1, #7); post the command on the task issue',
+    );
+    expect((await stateOf(h.tracker, issue)).status).toBe('paused');
+  });
+
+  it('refuses a comment on a PR that is not linked to the task', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    linkPr(h.tracker, 7, 50, 'Related to #7');
+    const url = ownerComment(h.tracker, 50, AFTER);
+    await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
+      `comment ${url} is on PR #50, which is not linked to #1`,
+    );
   });
 
   it('refuses a comment by someone who is not an owner', async () => {

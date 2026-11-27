@@ -784,6 +784,33 @@ describe('GitHubTracker pull requests', () => {
     });
   });
 
+  it('getPr reads one PR directly, without the search index', async () => {
+    const view = ['pr', 'view', '35', '--repo', 'acme/shop', '--json', 'number,url,mergedAt,mergeCommit,baseRefName,body'];
+    const row = {
+      number: 35, url: 'https://github.com/acme/shop/pull/35', mergedAt: '2026-11-22T09:00:00Z',
+      mergeCommit: { oid: 'c'.repeat(40) }, baseRefName: 'main', body: 'Related to #12',
+    };
+    const { tracker } = trackerFor([ok(view, JSON.stringify(row))]);
+    expect(await tracker.getPr(35)).toEqual({
+      number: 35,
+      url: 'https://github.com/acme/shop/pull/35',
+      merged: true,
+      mergeSha: 'c'.repeat(40),
+      mergedAt: '2026-11-22T09:00:00Z',
+      baseRef: 'main',
+      body: 'Related to #12',
+    });
+  });
+
+  it('getPr answers undefined for a number that is not a PR, and rejects on other failures', async () => {
+    const { tracker } = trackerFor([
+      failing(['pr', 'view', '9'], 'GraphQL: Could not resolve to a PullRequest with the number of 9. (repository.pullRequest)'),
+      failing(['pr', 'view', '9'], 'HTTP 502: Bad Gateway'),
+    ]);
+    expect(await tracker.getPr(9)).toBeUndefined();
+    await expect(tracker.getPr(9)).rejects.toBeInstanceOf(GhError);
+  });
+
   it('refuses to answer when the PR search may have been cut off', async () => {
     const many = Array.from({ length: 100 }, (_, i) => ({
       number: i + 1, url: 'u', mergedAt: null, mergeCommit: null, baseRefName: 'main', body: 'Related to #12',
