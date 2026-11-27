@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadConfigFromString, type Config } from '../../src/config/schema.js';
+import { ConfigError } from '../../src/core/taskTypes.js';
 import { GhError } from '../../src/github/gh.js';
 import {
   createGitRunner,
@@ -139,6 +140,36 @@ describe('ensureLabels', () => {
       { match: ['label', 'create'], code: 1, stderr: 'HTTP 403: Resource not accessible' },
     ]);
     await expect(ensureLabels(broken, cfgOf(), { dryRun: false })).rejects.toBeInstanceOf(GhError);
+  });
+
+  const customType = (id: string): Config =>
+    cfgOf(`task_types:
+  enabled: [tooling]
+  custom:
+    - id: ${id}
+      label: Long one
+      phases: [intake, planning, implementation, review, delivery]
+      ends_on: merge
+`);
+
+  it('refuses a type id whose label exceeds GitHub\'s 50 characters, naming the type, before any gh call', async () => {
+    const id = `a${'b'.repeat(45)}`; // "type:" + 46 characters = 51
+    expect(`type:${id}`).toHaveLength(51);
+    const run = fakeGh([]);
+    const failure = await ensureLabels(run, customType(id), { dryRun: false }).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(ConfigError);
+    expect((failure as Error).message).toContain(`"${id}"`);
+    expect((failure as Error).message).toMatch(/50/);
+    expect(run.calls).toEqual([]);
+    // A dry run checks too.
+    await expect(ensureLabels(fakeGh([]), customType(id), { dryRun: true })).rejects.toBeInstanceOf(ConfigError);
+  });
+
+  it('accepts a type id whose label is exactly 50 characters', async () => {
+    const id = `a${'b'.repeat(44)}`; // "type:" + 45 characters = 50
+    const run = fakeGh([{ match: ['label', 'list'], stdout: '[]' }, ...Array.from({ length: 4 }, () => ({ match: ['label', 'create'] }))]);
+    const { created } = await ensureLabels(run, customType(id), { dryRun: false });
+    expect(created).toContain(`type:${id}`);
   });
 
   it('fails when the labels cannot be listed', async () => {

@@ -21,10 +21,18 @@ on:
 
 jobs:
   reconcile:
-    # A comment only matters when it is a command such as /approve or /accept.
-    if: github.event_name != 'issue_comment' || startsWith(github.event.comment.body, '/')
+    # React only to what can change a task:
+    # - a comment that is a command such as /approve or /accept;
+    # - a pull request from this repository: a fork's run gets no repository secrets
+    #   and would only fail, so merges of fork PRs are picked up by the hourly schedule;
+    # - a deployment that succeeded.
+    if: >-
+      (github.event_name != 'issue_comment' || startsWith(github.event.comment.body, '/'))
+      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success')
     runs-on: ubuntu-latest
-    # One run at a time; a run that is waiting finishes instead of being cancelled.
+    timeout-minutes: 15
+    # One run at a time: a run in progress finishes; a newer waiting run replaces an older waiting one.
     concurrency:
       group: sdlc-reconcile
       cancel-in-progress: false
@@ -39,7 +47,11 @@ jobs:
             echo "::error::Add the SDLC_TOKEN secret (a token with repo and project scopes); see INSTALL.md"
             exit 1
           fi
+      # Always read sdlc.config.yaml from the default branch, never from a pull request's
+      # merge ref, so every run uses the configuration that has been merged.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20

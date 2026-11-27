@@ -1,5 +1,6 @@
 import { execFile, type ExecFileException } from 'node:child_process';
 import { typeRegistry, type Config } from '../config/schema.js';
+import { ConfigError } from '../core/taskTypes.js';
 import { GhError, ghJson, type GhRunner } from '../github/gh.js';
 
 /**
@@ -18,8 +19,9 @@ export const HOOKS_PATH = '.sdlc/githooks';
 
 const DRY_RUN = 'dry run: ';
 
-/** GitHub limits a label description to 100 characters. */
+/** GitHub limits a label description to 100 characters and a label name to 50. */
 const DESCRIPTION_LIMIT = 100;
+const NAME_LIMIT = 50;
 
 /** The error text of a failed `gh` call; `gh` writes it to stderr, sometimes with the body on stdout. */
 const failureText = (result: { stdout: string; stderr: string }): string =>
@@ -41,14 +43,17 @@ interface LabelSpec {
   description: string;
 }
 
+/** Every label, checked before any `gh` call: a name GitHub would refuse is a config problem, named here. */
 function labelSpecs(cfg: Config): LabelSpec[] {
-  const types = [...typeRegistry(cfg).values()].map(
-    (def): LabelSpec => ({
-      name: `type:${def.id}`,
-      color: '1d76db',
-      description: `Task type: ${def.label}`.slice(0, DESCRIPTION_LIMIT),
-    }),
-  );
+  const types = [...typeRegistry(cfg).values()].map((def): LabelSpec => {
+    const name = `type:${def.id}`;
+    if (name.length > NAME_LIMIT) {
+      throw new ConfigError(
+        `task type "${def.id}" is too long for its GitHub label: "${name}" is ${name.length} characters and GitHub allows ${NAME_LIMIT}; shorten the type id`,
+      );
+    }
+    return { name, color: '1d76db', description: `Task type: ${def.label}`.slice(0, DESCRIPTION_LIMIT) };
+  });
   return [
     { name: 'sdlc:task', color: '0e8a16', description: 'Tracked by agentic-sdlc-kit' },
     { name: 'sdlc:partial', color: 'fbca04', description: 'A partial PR landed; the task stays open' },
@@ -68,6 +73,7 @@ export async function ensureLabels(
   opts: ProvisionOptions,
 ): Promise<{ created: string[]; existing: string[] }> {
   const repo = cfg.github.repo;
+  const specs = labelSpecs(cfg);
   const listed = await ghJson<Array<{ name: string }> | undefined>(run, [
     'label', 'list', '--repo', repo, '--json', 'name', '--limit', '500',
   ]);
@@ -75,7 +81,7 @@ export async function ensureLabels(
 
   const created: string[] = [];
   const existing: string[] = [];
-  for (const spec of labelSpecs(cfg)) {
+  for (const spec of specs) {
     if (have.has(spec.name.toLowerCase())) {
       existing.push(spec.name);
       continue;

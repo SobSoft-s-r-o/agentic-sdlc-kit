@@ -62,6 +62,7 @@ interface Workflow {
     {
       if?: string;
       'runs-on': string;
+      'timeout-minutes': number;
       concurrency: { group: string; 'cancel-in-progress': boolean };
       permissions: Record<string, string>;
       steps: Step[];
@@ -153,13 +154,33 @@ describe('renderGithub workflow', () => {
     expect(text).toMatch(/^\s*#.*search lag/im);
   });
 
-  it('has one job: serialised runs, a command-only comment filter and read-only contents', () => {
+  it('has one job: serialised runs, a time limit and read-only contents', () => {
     const { doc, job } = workflowOf(render(cfgOf(FULL)));
     expect(Object.keys(doc.jobs)).toHaveLength(1);
     expect(job.concurrency).toEqual({ group: 'sdlc-reconcile', 'cancel-in-progress': false });
     expect(job.permissions).toEqual({ contents: 'read' });
     expect(job['runs-on']).toBe('ubuntu-latest');
-    expect(job.if).toBe("github.event_name != 'issue_comment' || startsWith(github.event.comment.body, '/')");
+    expect(job['timeout-minutes']).toBe(15);
+  });
+
+  it('describes the concurrency queue as GitHub runs it', () => {
+    const { text } = workflowOf(render(cfgOf(FULL)));
+    expect(text).toMatch(/^\s*#.*a run in progress finishes; a newer waiting run replaces an older waiting one/im);
+    expect(text).not.toMatch(/waiting run finishes instead of being cancelled/i);
+  });
+
+  it('only runs for a command comment, a same-repository PR and a successful deployment', () => {
+    const { job } = workflowOf(render(cfgOf(FULL)));
+    expect(job.if).toBe(
+      "(github.event_name != 'issue_comment' || startsWith(github.event.comment.body, '/'))" +
+        " && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)" +
+        " && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success')",
+    );
+  });
+
+  it('says that merges of fork PRs are picked up by the hourly schedule', () => {
+    const { text } = workflowOf(render(cfgOf(FULL)));
+    expect(text).toMatch(/^\s*#.*fork.*hourly schedule/im);
   });
 
   it('checks the token first, then checks out, sets up Node 20 and runs reconcile through npx at kit_ref', () => {
@@ -167,10 +188,19 @@ describe('renderGithub workflow', () => {
     expect(job.steps).toHaveLength(4);
     const [check, checkout, node, reconcile] = job.steps as [Step, Step, Step, Step];
     expect(check.run).toContain('::error::Add the SDLC_TOKEN secret (a token with repo and project scopes); see INSTALL.md');
-    expect(checkout).toEqual({ uses: 'actions/checkout@v4' });
+    expect(checkout).toEqual({
+      uses: 'actions/checkout@v4',
+      with: { ref: '${{ github.event.repository.default_branch }}' },
+    });
     expect(node).toEqual({ uses: 'actions/setup-node@v4', with: { 'node-version': 20 } });
     expect(reconcile.run).toBe('npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3 reconcile');
     expect(reconcile.env).toEqual({ GH_TOKEN: '${{ secrets.SDLC_TOKEN }}' });
+  });
+
+  it('checks out the default branch and says why, so the configuration it reads is the merged one', () => {
+    const { text } = workflowOf(render(cfgOf(FULL)));
+    expect(text).toMatch(/^\s*#.*default branch/im);
+    expect(text).toMatch(/^\s*#.*sdlc\.config\.yaml/im);
   });
 
   it('follows kit_ref', () => {
