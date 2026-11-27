@@ -798,7 +798,26 @@ describe('robustness', () => {
     expect(dry.errors).toBe(0);
 
     const real = await reconcile(h.ctx, {});
-    expect(dry.actions).toEqual(real.actions);
+    // The same actions, except that a report a dry run did not post says it would be posted.
+    const wouldPost = /^would post (delivery report|cancel report) /;
+    expect(dry.actions.map(a => ({ ...a, detail: a.detail.replace(wouldPost, '$1 posted ') }))).toEqual(real.actions);
+  });
+
+  it('says a dry run would post the delivery and cancel reports, not that it posted them', async () => {
+    const h = setup();
+    h.tracker.seedTask(awaiting(1));
+    deployedToWeb(h);
+    h.tracker.seedTask(pausedOn(2));
+    comment(h, 2, '/cancel not needed', AFTER);
+
+    const dry = await reconcile(h.ctx, { dryRun: true });
+
+    const reports = dry.actions.filter(a => a.kind === 'delivery_report' || a.kind === 'cancel_report');
+    expect(reports.map(a => [a.issue, a.kind, a.detail])).toEqual([
+      [1, 'delivery_report', expect.stringMatching(/^would post delivery report \(/)],
+      [2, 'cancel_report', 'would post cancel report (not needed)'],
+    ]);
+    expect(dry.actions.some(a => a.detail.includes('posted'))).toBe(false);
   });
 
   it('keeps going after one task fails', async () => {

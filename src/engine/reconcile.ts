@@ -455,8 +455,9 @@ async function postOutcomeReport(t: TaskRun, deliveredNow: boolean): Promise<boo
   if (!t.dryRun) {
     await trackerStep('postComment', task.issue, () => ctx.tracker.postComment(task.issue, report), 'the state was not changed');
   }
-  if (cancelled) t.push('cancel_report', `cancel report posted (${cancelReasonOf(t.state)})`);
-  else t.push('delivery_report', `delivery report posted (${(t.state.deliveredBy ?? []).join(', ')})`);
+  const posted = (what: string): string => (t.dryRun ? `would post ${what}` : `${what} posted`);
+  if (cancelled) t.push('cancel_report', `${posted('cancel report')} (${cancelReasonOf(t.state)})`);
+  else t.push('delivery_report', `${posted('delivery report')} (${(t.state.deliveredBy ?? []).join(', ')})`);
   return true;
 }
 
