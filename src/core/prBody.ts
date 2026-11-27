@@ -3,7 +3,7 @@ const RELATED_LINE = /^[ \t]*(?:[-*][ \t]+)?related[ \t]+to[ \t]+(#\d+(?:[ \t]*,
 /** Any `Scope:` line, optionally as a bullet, whatever follows the colon. */
 const SCOPE_LINE = /^[ \t]*(?:[-*][ \t]+)?scope[ \t]*:(.*)$/gim;
 const SCOPE_VALUE = /^[ \t]*(partial|final)\b/i;
-const TARGETS_LINE = /^[ \t]*targets[ \t]*:(.*)$/gim;
+const TARGETS_LINE = /^[ \t]*(?:[-*][ \t]+)?targets[ \t]*:(.*)$/gim;
 
 export interface PrBodyInfo {
   issues: number[];

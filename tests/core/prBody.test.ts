@@ -107,6 +107,12 @@ describe('parsePrBody', () => {
     expect(parsePrBody('* scope: partial')).toMatchObject({ scope: 'partial', scopeRecognized: true });
   });
 
+  it('accepts a bullet before the Targets key', () => {
+    expect(parsePrBody('- Targets: web, api').targets).toEqual(['web', 'api']);
+    expect(parsePrBody('Related to #3\n* targets: web').targets).toEqual(['web']);
+    expect(parsePrBody('- the targets: web').targets).toEqual([]);
+  });
+
   it('does not read a value from the next line', () => {
     expect(parsePrBody('Scope:\npartial')).toMatchObject({ scope: 'final', scopeRecognized: false });
   });
