@@ -1,0 +1,49 @@
+# Managed by agentic-sdlc-kit: `sdlc upgrade` overwrites edits to this file.
+# Brings tasks, the board and issues in line with merges, approvals and deployments.
+name: sdlc-reconcile
+
+on:
+  pull_request:
+    types: [closed]
+  deployment_status:
+  release:
+    types: [published]
+  issue_comment:
+    types: [created]
+  issues:
+    types: [closed, reopened]
+  # Keep the hourly schedule. Reconcile must run at least once per closed_lookback_days
+  # period, and an event it missed (GitHub search lag after a merge, a skipped run) is
+  # picked up by the next scheduled run.
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+jobs:
+  reconcile:
+    # A comment only matters when it is a command such as /approve or /accept.
+    if: github.event_name != 'issue_comment' || startsWith(github.event.comment.body, '/')
+    runs-on: ubuntu-latest
+    # One run at a time; a run that is waiting finishes instead of being cancelled.
+    concurrency:
+      group: sdlc-reconcile
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Check SDLC_TOKEN
+        env:
+          SDLC_TOKEN: $\{{ secrets.SDLC_TOKEN }}
+        run: |
+          if [ -z "$SDLC_TOKEN" ]; then
+            echo "::error::Add the SDLC_TOKEN secret (a token with repo and project scopes); see INSTALL.md"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Reconcile
+        env:
+          GH_TOKEN: $\{{ secrets.SDLC_TOKEN }}
+        run: {{kit.npx}} reconcile

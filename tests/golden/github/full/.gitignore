@@ -1,0 +1,6 @@
+.sdlc/cache/
+.worktrees/
+.env
+.env.*
+!.env.example
+graphify-out/
