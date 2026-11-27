@@ -42,7 +42,10 @@ export type RoleDef = {
   returns: string;
   /** One line: when the role stops and hands back instead of guessing. */
   escalateWhen: string;
-  /** The role prompt, as written in the file; `{{returns}}` and the like are filled in at render time. */
+  /**
+   * The role prompt, as written in the file; `{{returns}}` and the like are filled in at render
+   * time, and the shared rule lines are appended when it does not end with them.
+   */
   body: string;
   source: 'built-in' | 'custom';
   /** Where it was read from: `agents/<role>.md` in the templates, or `.sdlc/agents/custom/<role>.md`. */
@@ -150,7 +153,22 @@ export function modelFor(cfg: Config, harness: Harness, tier: Tier): string | un
 const optional = (key: string, value: string | undefined): Record<string, string> =>
   value === undefined ? {} : { [key]: value };
 
-/** The role prompt with `returns`, `escalate_when` and the other header fields filled in, ending in one newline. */
+/**
+ * The three lines every role prompt ends with: the built-in templates carry them, and a custom
+ * prompt that does not end with them gets them appended (see `promptOf`).
+ */
+const SHARED_RULES = [
+  '- Never spawn further agents.',
+  '- Never launch another AI CLI or model (claude, codex, gemini, aider, cursor, ollama, ...) as a helper.',
+  '- Report back in this shape: {{returns}}',
+].join('\n');
+
+/**
+ * The role prompt with `returns`, `escalate_when` and the other header fields filled in, ending in
+ * the shared rule lines and one newline. A prompt that already ends with the rule lines (whole
+ * lines, in this order, `returns` filled in) is left as it is; otherwise they are appended after a
+ * blank line, so a custom role cannot drop them and rendering never repeats them.
+ */
 function promptOf(def: RoleDef): string {
   const data = {
     role: def.role,
@@ -161,7 +179,10 @@ function promptOf(def: RoleDef): string {
     escalate_when: def.escalateWhen,
   };
   // A template error starts with this name, so it says which role's prompt is wrong.
-  return `${renderTemplate(def.body, data, `role "${def.role}" (${def.file})`).replace(/\s+$/, '')}\n`;
+  const text = renderTemplate(def.body, data, `role "${def.role}" (${def.file})`).replace(/\s+$/, '');
+  const rules = renderTemplate(SHARED_RULES, data, 'shared role rules');
+  const complete = text === rules || text.endsWith(`\n${rules}`);
+  return `${complete ? text : `${text}\n\n${rules}`}\n`;
 }
 
 /** The Markdown agent file shared by Claude and Gemini: front matter, then the prompt. */

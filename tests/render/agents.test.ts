@@ -60,6 +60,9 @@ const SHARED_RULES = [
   '- Report back in this shape: {{returns}}',
 ].join('\n');
 
+/** The shared rule lines as the `role()` helper's custom role renders them (`returns` filled in). */
+const RENDERED_RULES = SHARED_RULES.replace('{{returns}}', 'a short report');
+
 const customRole = (name: string, header: Record<string, string> = {}, body = 'You are a custom role.\n'): string => {
   const fields: Record<string, string> = {
     role: name,
@@ -410,7 +413,7 @@ describe('renderAgents', () => {
   describe('custom roles', () => {
     it('render like built-ins in every harness', () => {
       const fs = memoryFs({
-        [customPath('qa-lead')]: customRole('qa-lead', { tier: 'fast', can_edit: 'false' }, 'You lead QA. Never edit files.\n\n- Never spawn further agents.\n- Report back in this shape: {{returns}}\n'),
+        [customPath('qa-lead')]: customRole('qa-lead', { tier: 'fast', can_edit: 'false' }, 'You lead QA. Never edit files.\n'),
       });
       const { roles } = loadRoles(fs);
       const claude = renderAgents(cfgWith(), 'claude', roles);
@@ -422,13 +425,65 @@ describe('renderAgents', () => {
         model: 'haiku',
         disallowedTools: 'Edit, Write, NotebookEdit',
       });
-      expect(body).toBe('You lead QA. Never edit files.\n\n- Never spawn further agents.\n- Report back in this shape: a short report\n');
+      expect(body).toBe(`You lead QA. Never edit files.\n\n${RENDERED_RULES}\n`);
       expect(byPath(renderAgents(cfgWith(), 'codex', roles), '.codex/agents/sdlc-qa-lead.toml').content).toContain(
         'name = "sdlc-qa-lead"',
       );
       expect(byPath(renderAgents(cfgWith(), 'gemini', roles), '.gemini/agents/sdlc-qa-lead.md').content).toContain(
         'name: sdlc-qa-lead',
       );
+    });
+
+    describe('shared rule lines', () => {
+      const paths = {
+        claude: '.claude/agents/sdlc-qa.md',
+        codex: '.codex/agents/sdlc-qa.toml',
+        gemini: '.gemini/agents/sdlc-qa.md',
+      } as const;
+      const rendered = (harness: keyof typeof paths, body: string): string =>
+        byPath(renderAgents(cfgWith(), harness, [role('qa', { body })]), paths[harness]).content;
+      /** The prompt as the harness file holds it. */
+      const promptIn = (harness: keyof typeof paths, content: string): string =>
+        harness === 'codex'
+          ? content.slice(content.indexOf('developer_instructions = """\n') + 'developer_instructions = """\n'.length, -'"""\n'.length)
+          : parseFrontMatter(content).body;
+
+      it.each(['claude', 'codex', 'gemini'] as const)('%s: a prompt without them gets them appended', harness => {
+        const prompt = promptIn(harness, rendered(harness, 'You are the QA lead.\n\nHow to work:\n- Test.\n'));
+        expect(prompt).toBe(`You are the QA lead.\n\nHow to work:\n- Test.\n\n${RENDERED_RULES}\n`);
+      });
+
+      it.each(['claude', 'codex', 'gemini'] as const)('%s: a prompt that already ends with them is not changed', harness => {
+        // once with the placeholder, once with the text already filled in
+        for (const rules of [SHARED_RULES, RENDERED_RULES]) {
+          const body = `You are the QA lead.\n\n${rules}\n`;
+          expect(promptIn(harness, rendered(harness, body))).toBe(`You are the QA lead.\n\n${RENDERED_RULES}\n`);
+        }
+      });
+
+      it('adds them once however often the output is used as the prompt again', () => {
+        const first = promptIn('claude', rendered('claude', 'Do the work.\n'));
+        const second = promptIn('claude', rendered('claude', first));
+        expect(second).toBe(first);
+        expect(first.split('Never spawn further agents').length - 1).toBe(1);
+      });
+
+      it('adds all three lines when only some of them end the prompt, or they do not start a line', () => {
+        const partial = 'Do the work.\n\n- Never spawn further agents.\n- Report back in this shape: {{returns}}\n';
+        expect(promptIn('claude', rendered('claude', partial))).toBe(`${partial.replace('{{returns}}', 'a short report').trimEnd()}\n\n${RENDERED_RULES}\n`);
+        const inline = `See: ${SHARED_RULES}\n`;
+        expect(promptIn('claude', rendered('claude', inline)).endsWith(`\n\n${RENDERED_RULES}\n`)).toBe(true);
+      });
+
+      it('end the prompt of every built-in role the same way, nothing appended', () => {
+        for (const def of builtinRoles()) {
+          const prompt = promptIn('claude', byPath(renderAgents(cfgWith(), 'claude', [def]), `.claude/agents/sdlc-${def.role}.md`).content);
+          expect(prompt.split('Never spawn further agents').length - 1, def.role).toBe(1);
+          expect(prompt.trimEnd().split('\n').slice(-3).join('\n'), def.role).toBe(
+            RENDERED_RULES.replace('a short report', def.returns),
+          );
+        }
+      });
     });
 
     it('an override renders instead of the built-in, at the same path', () => {
@@ -450,7 +505,7 @@ describe('renderAgents', () => {
     it('can write a literal {{ with a backslash', () => {
       const custom = [role('qa', { body: 'Write \\{{ in the text.\n' })];
       const { body } = parseFrontMatter(byPath(renderAgents(cfgWith(), 'claude', custom), '.claude/agents/sdlc-qa.md').content);
-      expect(body).toBe('Write {{ in the text.\n');
+      expect(body.startsWith('Write {{ in the text.\n\n- Never spawn further agents.')).toBe(true);
     });
   });
 });
