@@ -24,7 +24,7 @@ import {
 import { trustedLogins } from '../core/trust.js';
 import type { Approval, TaskEvent, TaskState, TaskTypeDef } from '../core/types.js';
 import type { IssueComment, PrInfo, TaskScan, TrackedTask, Tracker } from '../tracker/types.js';
-import { DEPLOYMENT_LOOKBACK, satisfiedTargets } from './deployments.js';
+import { DEPLOYMENT_LOOKBACK, firstContaining, mergeShasOf, satisfiedTargets } from './deployments.js';
 
 export interface ReconcileAction {
   /** The task issue; 0 for a failure that concerns no single task (listing the tasks). */
@@ -382,23 +382,26 @@ async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void>
 }
 
 /**
- * When the evidence behind `urls` was created: the newest of the satisfying deployments (or
- * releases) of `targets`, read from the run's cached lists; `undefined` when none is found.
+ * When the evidence for `targets` was created: per target, the newest deployment (or release)
+ * that contains every merge commit, matched the same way `satisfiedTargets` found it (several
+ * deployments may share one link), read from the run's cached lists; the newest of those, or
+ * `undefined` when none is found.
  */
-async function evidenceTime(t: TaskRun, targets: string[], urls: string[]): Promise<string | undefined> {
-  const wanted = new Set(urls);
+async function evidenceTime(t: TaskRun, targets: string[]): Promise<string | undefined> {
+  const { tracker } = t.ctx;
+  const shas = mergeShasOf(t.state);
   const times: string[] = [];
   for (const name of targets) {
     const target = targetByName(t.ctx.cfg, name);
     const deployments = await trackerStep('listSuccessfulDeployments', t.task.issue, () =>
-      t.ctx.tracker.listSuccessfulDeployments(target.environment, DEPLOYMENT_LOOKBACK),
+      tracker.listSuccessfulDeployments(target.environment, DEPLOYMENT_LOOKBACK),
     );
-    const deployment = deployments.find(d => wanted.has(d.url));
+    const deployment = await trackerStep('isAncestor', t.task.issue, () => firstContaining(tracker, shas, deployments));
     if (deployment) {
       times.push(deployment.createdAt);
     } else if (target.deploy.via === 'release') {
-      const releases = await trackerStep('listReleases', t.task.issue, () => t.ctx.tracker.listReleases(DEPLOYMENT_LOOKBACK));
-      const release = releases.find(r => wanted.has(r.url));
+      const releases = await trackerStep('listReleases', t.task.issue, () => tracker.listReleases(DEPLOYMENT_LOOKBACK));
+      const release = await trackerStep('isAncestor', t.task.issue, () => firstContaining(tracker, shas, releases));
       if (release) times.push(release.publishedAt);
     }
   }
@@ -417,7 +420,7 @@ async function applyDeployments(t: TaskRun): Promise<boolean> {
   const found = await trackerStep('satisfiedTargets', task.issue, () => satisfiedTargets(ctx.tracker, ctx.cfg, state));
   if (found.targets.length === 0) return false;
 
-  const at = (await evidenceTime(t, found.targets, found.urls)) ?? ctx.now();
+  const at = (await evidenceTime(t, found.targets)) ?? ctx.now();
   const event: TaskEvent = { kind: 'targets_deployed', targets: found.targets, deploymentUrls: found.urls };
   if (!applyOrReport(t, event, at)) return false;
   t.push('targets_deployed', `${found.targets.join(', ')} deployed (${found.urls.join(', ')})`);

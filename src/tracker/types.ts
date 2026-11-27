@@ -83,6 +83,7 @@ export interface DeploymentInfo {
   id: number;
   sha: string;
   environment: string;
+  /** A page a person can open: the environment URL, else the log URL, else the environment on GitHub. */
   url: string;
   createdAt: string;
 }

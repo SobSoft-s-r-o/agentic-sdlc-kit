@@ -43,6 +43,8 @@ const FETCH_CONCURRENCY = 8;
  * status to deployments that had succeeded, so a past success stays visible.
  */
 const SUCCEEDED = new Set(['success', 'inactive']);
+/** Statuses read per deployment, newest first: the first decides success, the newest success gives the link. */
+const RECENT_STATUSES = 10;
 /** What a GraphQL write says when a field or option id no longer exists on the board. */
 const STALE_ID_ERROR =
   /could not resolve to a node|\b(?:field|option)\b[^.\n]*\b(?:not found|does not exist|invalid|unknown)\b|\b(?:invalid|unknown)\b[^.\n]*\b(?:field|option)\b/i;
@@ -262,13 +264,24 @@ const toPrInfo = (pr: PrRow): PrInfo => ({
   body: pr.body ?? '',
 });
 
-const toDeploymentInfo = (d: DeploymentRow): DeploymentInfo => ({
-  id: d.id,
-  sha: d.sha,
-  environment: d.environment,
-  url: d.url,
-  createdAt: d.created_at,
-});
+interface DeploymentStatusRow {
+  state: string;
+  environment_url?: string;
+  log_url?: string;
+}
+
+/**
+ * The deployment with a link a person can open, never the REST API URL: the `environment_url` of
+ * its newest success status, else that status's `log_url`, else the environment's page on GitHub.
+ */
+function toDeploymentInfo(d: DeploymentRow, repo: string, statuses: readonly DeploymentStatusRow[] = []): DeploymentInfo {
+  const success = statuses.find(s => s.state === 'success');
+  const url =
+    success?.environment_url ||
+    success?.log_url ||
+    `https://github.com/${repo}/deployments/${encodeURIComponent(d.environment)}`;
+  return { id: d.id, sha: d.sha, environment: d.environment, url, createdAt: d.created_at };
+}
 
 function findOption(options: Record<string, string>, value: string): string | undefined {
   const wanted = value.trim().toLowerCase();
@@ -486,9 +499,10 @@ export class GitHubTracker implements Tracker {
             (page > 1 ? `&page=${page}` : ''),
         ])) ?? [];
       const batch = rows.slice(0, limit - examined);
-      const states = await mapInChunks(batch, FETCH_CONCURRENCY, d => this.latestState(d.id));
+      const statuses = await mapInChunks(batch, FETCH_CONCURRENCY, d => this.recentStatuses(d.id));
       batch.forEach((deployment, i) => {
-        if (SUCCEEDED.has(states[i] ?? '')) found.push(toDeploymentInfo(deployment));
+        const recent = statuses[i] ?? [];
+        if (SUCCEEDED.has(recent[0]?.state ?? '')) found.push(toDeploymentInfo(deployment, this.repo, recent));
       });
       examined += batch.length;
       if (rows.length < perPage) break;
@@ -583,15 +597,18 @@ export class GitHubTracker implements Tracker {
     if (typeof created?.id !== 'number') {
       throw new Error(`GitHub did not create the deployment: ${JSON.stringify(created)}`);
     }
+    let status: DeploymentStatusRow | undefined;
     try {
-      await this.send('POST', `repos/${this.repo}/deployments/${created.id}/statuses`, { state: 'success' });
+      status = await this.send<DeploymentStatusRow>('POST', `repos/${this.repo}/deployments/${created.id}/statuses`, {
+        state: 'success',
+      });
     } catch (error) {
       throw new Error(
         `Deployment ${created.id} was created but marking it successful failed: ${(error as Error).message}`,
         { cause: error },
       );
     }
-    return toDeploymentInfo(created);
+    return toDeploymentInfo(created, this.repo, status ? [status] : []);
   }
 
   // --- internals -------------------------------------------------------------------------------
@@ -696,12 +713,12 @@ export class GitHubTracker implements Tracker {
     return { tracked, untracked };
   }
 
-  private async latestState(deployment: number): Promise<string | undefined> {
-    const statuses = await ghJson<{ state: string }[] | undefined>(this.run, [
+  private async recentStatuses(deployment: number): Promise<DeploymentStatusRow[]> {
+    const statuses = await ghJson<DeploymentStatusRow[] | undefined>(this.run, [
       'api',
-      `repos/${this.repo}/deployments/${deployment}/statuses?per_page=1`,
+      `repos/${this.repo}/deployments/${deployment}/statuses?per_page=${RECENT_STATUSES}`,
     ]);
-    return statuses?.[0]?.state;
+    return statuses ?? [];
   }
 
   // --- board -----------------------------------------------------------------------------------

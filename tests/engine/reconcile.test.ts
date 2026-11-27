@@ -121,7 +121,7 @@ const issueOf = (h: Harness, n: number) => h.tracker.issues.find(i => i.number =
 const visible = (h: Harness, thread: number) =>
   h.tracker.comments.filter(c => c.issue === thread && !c.body.startsWith(STATE_MARKER));
 const kinds = (actions: ReconcileAction[]) => actions.map(a => a.kind);
-const NON_MUTATING = new Set(['ignored_approval', 'skipped_unknown_type', 'error']);
+const NON_MUTATING = new Set(['ignored_approval', 'skipped_unknown_type', 'untracked', 'error']);
 const mutating = (actions: ReconcileAction[]) => actions.filter(a => !NON_MUTATING.has(a.kind));
 
 describe('merged PRs', () => {
@@ -379,6 +379,28 @@ describe('issue open state', () => {
     expect(issueOf(h, 1).open).toBe(true);
     expect(issueOf(h, 2)).toMatchObject({ open: false, closeReason: 'completed' });
     expect(issueOf(h, 3)).toMatchObject({ open: false, closeReason: 'not_planned' });
+  });
+});
+
+describe('deployment evidence time', () => {
+  it('times the event by the deployment that contains the merges, when deployments share one link', async () => {
+    const h = setup();
+    h.tracker.seedTask(awaiting(1));
+    h.tracker.ancestors.add(`${A}>${B}`);
+    const link = 'https://github.test/deployments/production-web';
+    h.tracker.deployments.push({ id: 1, sha: B, environment: 'production-web', url: link, createdAt: DEPLOYED });
+    // A later rollback to a commit without the merge, behind the same link.
+    h.tracker.deployments.push({
+      id: 2,
+      sha: 'c'.repeat(40),
+      environment: 'production-web',
+      url: link,
+      createdAt: '2026-03-28T00:00:00.000Z',
+    });
+
+    await reconcile(h.ctx, {});
+
+    expect(await stateOf(h, 1)).toMatchObject({ status: 'done', updatedAt: DEPLOYED, deliveredBy: [link] });
   });
 });
 

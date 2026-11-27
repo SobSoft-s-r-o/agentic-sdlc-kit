@@ -889,7 +889,7 @@ describe('GitHubTracker deployments', () => {
     `repos/acme/shop/deployments?environment=${environment}&per_page=${perPage}${page ? `&page=${page}` : ''}`,
   ];
   const statuses = (id: number, name: string): FakeGhStep =>
-    fromFixture(['api', `repos/acme/shop/deployments/${id}/statuses?per_page=1`], name);
+    fromFixture(['api', `repos/acme/shop/deployments/${id}/statuses?per_page=10`], name);
 
   it('listSuccessfulDeployments filters by latest status', async () => {
     const { tracker } = trackerFor([
@@ -905,9 +905,22 @@ describe('GitHubTracker deployments', () => {
       id: 903,
       sha: 'cccccccccccccccccccccccccccccccccccccccc',
       environment: 'production-web',
-      url: 'https://api.github.com/repos/acme/shop/deployments/903',
+      url: 'https://shop.acme.test',
       createdAt: '2026-11-25T12:00:00Z',
     });
+  });
+
+  it("links a deployment to a page a person can open: the success status's environment_url, else its log_url, else the environment", async () => {
+    const { tracker } = trackerFor([
+      fromFixture(deployments('production-web', 10), 'deployments.json'),
+      statuses(904, 'deployment-statuses-904.json'),
+      statuses(903, 'deployment-statuses-903.json'),
+      statuses(902, 'deployment-statuses-902.json'),
+      statuses(901, 'deployment-statuses-901.json'),
+    ]);
+    const listed = await tracker.listSuccessfulDeployments('production-web', 10);
+    expect(listed.map(d => d.url)).toEqual(['https://shop.acme.test', 'https://github.com/acme/shop/actions/runs/42']);
+    expect(listed.every(d => !d.url.includes('api.github.com'))).toBe(true);
   });
 
   it('only looks at the newest `limit` deployments', async () => {
@@ -932,12 +945,13 @@ describe('GitHubTracker deployments', () => {
     const state = (name: string) => JSON.stringify([{ id: 1, state: name }]);
     const { run, tracker } = trackerFor([
       ok(deployments('production-web', 100), JSON.stringify(first)),
-      ...first.map(d => ok(['api', `repos/acme/shop/deployments/${d.id}/statuses?per_page=1`], state(d.id === 950 ? 'success' : 'failure'))),
+      ...first.map(d => ok(['api', `repos/acme/shop/deployments/${d.id}/statuses?per_page=10`], state(d.id === 950 ? 'success' : 'failure'))),
       ok(deployments('production-web', 100, 2), JSON.stringify(second)),
-      ...second.map(d => ok(['api', `repos/acme/shop/deployments/${d.id}/statuses?per_page=1`], state(d.id === 899 ? 'success' : 'failure'))),
+      ...second.map(d => ok(['api', `repos/acme/shop/deployments/${d.id}/statuses?per_page=10`], state(d.id === 899 ? 'success' : 'failure'))),
     ]);
     const listed = await tracker.listSuccessfulDeployments('production-web', 103);
     expect(listed.map(d => d.id)).toEqual([950, 899]);
+    expect(listed[0]!.url).toBe('https://github.com/acme/shop/deployments/production-web');
     expect(run.calls).toHaveLength(1 + 100 + 1 + 3);
   });
 
@@ -964,7 +978,7 @@ describe('GitHubTracker deployments', () => {
       id: 905,
       sha,
       environment: 'production-web',
-      url: 'https://api.github.com/repos/acme/shop/deployments/905',
+      url: 'https://github.com/acme/shop/deployments/production-web',
       createdAt: '2026-11-27T15:00:00Z',
     });
     expect(body(run, 0)).toEqual({

@@ -28,7 +28,7 @@ export async function satisfiedTargets(
 ): Promise<{ targets: string[]; urls: string[] }> {
   // Resolved up front so that an unknown target is reported whatever the task's PRs look like.
   const pending = state.pendingTargets.map(name => targetByName(cfg, name));
-  const mergeShas = [...new Set(state.prs.flatMap(pr => (pr.mergeSha ? [pr.mergeSha] : [])))];
+  const mergeShas = mergeShasOf(state);
   if (mergeShas.length === 0) return { targets: [], urls: [] };
 
   // Read at most once, and only for a release target that no deployment satisfied.
@@ -51,8 +51,13 @@ export async function satisfiedTargets(
   return { targets, urls: [...urls] };
 }
 
+/** The merge commits of the task's merged PRs, without duplicates. */
+export const mergeShasOf = (state: TaskState): string[] => [
+  ...new Set(state.prs.flatMap(pr => (pr.mergeSha ? [pr.mergeSha] : []))),
+];
+
 /** The first of `candidates` (the newest) whose commit contains every one of `shas`. */
-async function firstContaining<T extends { sha: string }>(
+export async function firstContaining<T extends { sha: string }>(
   tracker: Tracker,
   shas: string[],
   candidates: readonly T[],
