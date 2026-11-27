@@ -296,8 +296,9 @@ describe('mcp.servers: [] (explicit opt-out)', () => {
 
 describe('renderMcp, user scope', () => {
   const COMMANDS: Record<Exclude<Harness, 'agents-md'>, { remote: string; local: string }> = {
+    // Every `$` is inside single quotes: the harness stores the reference, never the owner's token.
     claude: {
-      remote: `claude mcp add --scope user --transport http github ${GITHUB_URL} --header "Authorization: Bearer $GITHUB_PERSONAL_ACCESS_TOKEN"`,
+      remote: `claude mcp add --scope user --transport http github ${GITHUB_URL} --header 'Authorization: Bearer \${GITHUB_PERSONAL_ACCESS_TOKEN}'`,
       local: 'claude mcp add --scope user github -- docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server',
     },
     codex: {
@@ -305,8 +306,10 @@ describe('renderMcp, user scope', () => {
       local: 'codex mcp add github -- docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server',
     },
     gemini: {
-      remote: `gemini mcp add --scope user --transport http --header "Authorization: Bearer $GITHUB_PERSONAL_ACCESS_TOKEN" github ${GITHUB_URL}`,
-      local: 'gemini mcp add --scope user github docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server',
+      remote: `gemini mcp add --scope user --transport http --header 'Authorization: Bearer $GITHUB_PERSONAL_ACCESS_TOKEN' github ${GITHUB_URL}`,
+      // `--` keeps docker's own `-e` away from gemini, whose `-e` is `--env`; the variable is forwarded by reference.
+      local:
+        "gemini mcp add --scope user -e 'GITHUB_PERSONAL_ACCESS_TOKEN=$GITHUB_PERSONAL_ACCESS_TOKEN' github docker -- run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server",
     },
   };
 
@@ -314,16 +317,16 @@ describe('renderMcp, user scope', () => {
     it(`prints the exact ${harness} commands and writes no file`, () => {
       const remote = renderMcp(cfgWith(USER_SCOPE('github, context7, playwright')), harness);
       expect(remote.changes).toEqual([]);
-      const stdio = (name: string, args: string): string =>
+      const stdio = (name: string, command: string, args: string): string =>
         harness === 'gemini'
-          ? `gemini mcp add --scope user ${name} ${args}`
+          ? `gemini mcp add --scope user ${name} ${command} -- ${args}`
           : harness === 'codex'
-            ? `codex mcp add ${name} -- ${args}`
-            : `claude mcp add --scope user ${name} -- ${args}`;
+            ? `codex mcp add ${name} -- ${command} ${args}`
+            : `claude mcp add --scope user ${name} -- ${command} ${args}`;
       expect(remote.userCommands).toEqual([
         COMMANDS[harness].remote,
-        stdio('context7', 'npx -y @upstash/context7-mcp'),
-        stdio('playwright', 'npx @playwright/mcp@latest'),
+        stdio('context7', 'npx', '-y @upstash/context7-mcp'),
+        stdio('playwright', 'npx', '@playwright/mcp@latest'),
       ]);
 
       const local = renderMcp(cfgWith(USER_SCOPE('github', 'local')), harness);
@@ -331,6 +334,34 @@ describe('renderMcp, user scope', () => {
       expect(local.userCommands).toEqual([COMMANDS[harness].local]);
     });
   }
+
+  it('keeps every environment reference inside single quotes, so the owner shell cannot expand a token into the harness config', () => {
+    const printed: string[] = [];
+    for (const transport of ['remote', 'local']) {
+      for (const harness of ['claude', 'codex', 'gemini'] as const) {
+        printed.push(...renderMcp(cfgWith(USER_SCOPE('github, context7, playwright', transport)), harness).userCommands);
+      }
+    }
+    expect(printed.length).toBeGreaterThan(10);
+    for (const command of printed) {
+      const outsideSingleQuotes = command.replace(/'(?:[^']|'\\'')*'/g, '');
+      expect(outsideSingleQuotes, command).not.toContain('$');
+    }
+    // not vacuous: the references are there, quoted
+    const all = printed.join('\n');
+    expect(all).toContain("'Authorization: Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}'");
+    expect(all).toContain("'Authorization: Bearer $GITHUB_PERSONAL_ACCESS_TOKEN'");
+    expect(all).toContain("-e 'GITHUB_PERSONAL_ACCESS_TOKEN=$GITHUB_PERSONAL_ACCESS_TOKEN'");
+  });
+
+  it('puts the arguments of a gemini stdio server after "--" and leaves out the "--" when there are none', () => {
+    const catalog = parseMcpCatalog(
+      ['- id: bare', '  description: No arguments.', '  default: false', '  local: { command: bare-server, args: [] }'].join('\n'),
+    );
+    const cfg = cfgWithCustom(USER_SCOPE('bare'));
+    expect(renderMcp(cfg, 'gemini', catalog).userCommands).toEqual(['gemini mcp add --scope user bare bare-server']);
+    expect(renderMcp(cfg, 'codex', catalog).userCommands).toEqual(['codex mcp add bare -- bare-server']);
+  });
 });
 
 describe('golden files', () => {
@@ -411,6 +442,36 @@ describe('mcpNotes', () => {
     expect(mcpNotes(cfgWith(USER_SCOPE('github')))).toEqual(['export GITHUB_PERSONAL_ACCESS_TOKEN before starting your agent']);
     const agentsOnly = loadConfigFromString(HEADER.replace('[claude, codex, gemini, agents-md]', '[agents-md]'));
     expect(mcpNotes(agentsOnly)).toEqual([]);
+  });
+
+  it('tells a Codex user to add env_vars by hand when "codex mcp add" cannot forward a variable (user scope, local server with env)', () => {
+    const note =
+      'Codex cannot forward variables through "codex mcp add": add env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"] to [mcp_servers.github] in ~/.codex/config.toml';
+    expect(mcpNotes(cfgWith(USER_SCOPE('github, context7', 'local')))).toEqual([
+      'export GITHUB_PERSONAL_ACCESS_TOKEN before starting your agent',
+      note,
+    ]);
+    // remote github uses --bearer-token-env-var, servers without env need nothing, project scope writes env_vars itself
+    expect(mcpNotes(cfgWith(USER_SCOPE('github, context7', 'remote')))).toEqual([
+      'export GITHUB_PERSONAL_ACCESS_TOKEN before starting your agent',
+    ]);
+    expect(mcpNotes(cfgWith(USER_SCOPE('context7')))).toEqual([]);
+    expect(mcpNotes(cfgWith(LOCAL_GITHUB))).not.toContain(note);
+    // no Codex harness, no Codex note
+    const noCodex = loadConfigFromString(
+      `${HEADER.replace('[claude, codex, gemini, agents-md]', '[claude, gemini]')}${USER_SCOPE('github', 'local')}`,
+    );
+    expect(mcpNotes(noCodex)).toEqual(['export GITHUB_PERSONAL_ACCESS_TOKEN before starting your agent']);
+  });
+});
+
+describe('catalog defaults', () => {
+  it('the servers marked default in the catalog are what mcp.servers defaults to', () => {
+    const defaults = loadMcpCatalog()
+      .filter(def => def.default)
+      .map(def => def.id);
+    expect(defaults).toEqual(['github']);
+    expect(cfgWith().mcp.servers).toEqual(defaults);
   });
 });
 

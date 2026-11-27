@@ -151,12 +151,16 @@ function selected(cfg: Config, defs: readonly McpServerDef[]): Resolved[] {
 
 // --- Project scope: files -----------------------------------------------------------------------
 
+/** How a harness's own config refers to an environment variable: Claude `${VAR}`, Gemini `$VAR`. */
+const envRef = (harness: 'claude' | 'gemini', name: string): string =>
+  harness === 'claude' ? `\${${name}}` : `$${name}`;
+
 /**
  * One `mcpServers.<id>` object for a JSON file. Claude: `${VAR}`, remote = `type: "http"` + `url`.
  * Gemini: `$VAR`, remote = `httpUrl` and no `type`. Both: stdio = `command`, `args`, `env`.
  */
 function jsonServer(t: Resolved, harness: 'claude' | 'gemini'): Record<string, unknown> {
-  const ref = (name: string): string => (harness === 'claude' ? `\${${name}}` : `$${name}`);
+  const ref = (name: string): string => envRef(harness, name);
   if (t.kind === 'remote') {
     return {
       ...(harness === 'claude' ? { type: 'http', url: t.url } : { httpUrl: t.url }),
@@ -209,17 +213,24 @@ function shellWord(word: string): string {
 }
 
 /**
- * The command the owner runs for one server. The header value is double quoted on purpose: the
- * owner's shell expands the variable, the kit never sees it.
+ * The command the owner runs for one server. A credential is only ever passed as a reference the
+ * harness stores and expands itself, so every `$` sits inside single quotes (`shellWord` quotes any
+ * word that holds one): the owner's shell must not expand it, or the harness would write the token
+ * into the owner's own config file (`~/.claude.json`, `~/.gemini/settings.json`).
+ *
+ * Gemini's `mcp add` reads `-e` as `--env` and takes unknown options as arguments, so a local
+ * server's own arguments follow a `--`, and its environment is forwarded with `-e NAME=$NAME`, the
+ * same reference the project-scope settings file holds. Codex's `mcp add` cannot forward variables
+ * to a stdio server; `mcpNotes` tells the owner to add `env_vars` by hand.
  */
 function userCommand(harness: Exclude<Harness, 'agents-md'>, t: Resolved): string {
-  const header = (auth: Auth): string => `"${auth.header}: ${auth.scheme} $${auth.env}"`;
+  const header = (auth: Auth, ref: string): string => shellWord(`${auth.header}: ${auth.scheme} ${ref}`);
   let words: string[];
   if (t.kind === 'remote') {
     switch (harness) {
       case 'claude':
         words = ['claude', 'mcp', 'add', '--scope', 'user', '--transport', 'http', t.id, shellWord(t.url)];
-        if (t.auth) words.push('--header', header(t.auth));
+        if (t.auth) words.push('--header', header(t.auth, envRef('claude', t.auth.env)));
         break;
       case 'codex':
         words = ['codex', 'mcp', 'add', t.id, '--url', shellWord(t.url)];
@@ -227,7 +238,7 @@ function userCommand(harness: Exclude<Harness, 'agents-md'>, t: Resolved): strin
         break;
       case 'gemini':
         words = ['gemini', 'mcp', 'add', '--scope', 'user', '--transport', 'http'];
-        if (t.auth) words.push('--header', header(t.auth));
+        if (t.auth) words.push('--header', header(t.auth, envRef('gemini', t.auth.env)));
         words.push(t.id, shellWord(t.url));
         break;
     }
@@ -240,9 +251,14 @@ function userCommand(harness: Exclude<Harness, 'agents-md'>, t: Resolved): strin
       case 'codex':
         words = ['codex', 'mcp', 'add', t.id, '--', ...run];
         break;
-      case 'gemini':
-        words = ['gemini', 'mcp', 'add', '--scope', 'user', t.id, ...run];
+      case 'gemini': {
+        const [command = '', ...args] = run;
+        words = ['gemini', 'mcp', 'add', '--scope', 'user'];
+        for (const name of t.env) words.push('-e', shellWord(`${name}=${envRef('gemini', name)}`));
+        words.push(t.id, command);
+        if (args.length > 0) words.push('--', ...args);
         break;
+      }
     }
   }
   return words.join(' ');
@@ -286,7 +302,8 @@ export function renderMcp(
  * What the owner has to do before the servers work, as short fragments for the install summary:
  * export each variable the configured servers read (in either scope), and the one-time approval
  * Codex and Claude Code ask for the project files (project scope only; those files do not exist
- * in user scope). Nothing for a config whose harnesses are all AGENTS.md-only.
+ * in user scope), and, in user scope for Codex, the `env_vars` line its add command cannot write.
+ * Nothing for a config whose harnesses are all AGENTS.md-only.
  */
 export function mcpNotes(cfg: Config, defs: readonly McpServerDef[] = loadMcpCatalog()): string[] {
   // An AGENTS.md-only setup has no MCP file or command, so there is nothing to prepare.
@@ -301,6 +318,16 @@ export function mcpNotes(cfg: Config, defs: readonly McpServerDef[] = loadMcpCat
   if (cfg.mcp.scope === 'project' && servers.length > 0) {
     if (cfg.harnesses.includes('codex')) notes.push('Codex loads .codex/config.toml only for trusted projects');
     if (cfg.harnesses.includes('claude')) notes.push('approve the project MCP servers when Claude Code asks');
+  }
+  if (cfg.mcp.scope === 'user' && cfg.harnesses.includes('codex')) {
+    // `codex mcp add` has no way to forward a variable to a stdio server.
+    for (const t of servers) {
+      if (t.kind === 'local' && t.env.length > 0) {
+        notes.push(
+          `Codex cannot forward variables through "codex mcp add": add env_vars = [${t.env.map(tomlString).join(', ')}] to [mcp_servers.${t.id}] in ~/.codex/config.toml`,
+        );
+      }
+    }
   }
   return notes;
 }
