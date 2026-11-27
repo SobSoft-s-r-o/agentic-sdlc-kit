@@ -6,8 +6,10 @@ import type { GhRunner } from '../github/gh.js';
 export interface BoardCommandContext {
   run: GhRunner;
   config: Config;
-  /** Where output goes; defaults to stdout. */
+  /** Where results go; defaults to stdout. */
   out?: (text: string) => void;
+  /** Where progress notices go; defaults to stderr. */
+  err?: (text: string) => void;
 }
 
 const list = (names: string[]): string => names.join(', ');
@@ -42,6 +44,9 @@ export function formatEnsureResult(result: EnsureBoardResult, dryRun: boolean): 
   if (result.viewsManual.length > 0) {
     lines.push('Manual steps:', ...result.viewsManual.map(step => `  - ${step}`));
   }
+  if (result.viewsFailed.length > 0) {
+    lines.push('Failed views:', ...result.viewsFailed.map(f => `  - ${f.name}: ${f.error}`));
+  }
   return lines.join('\n');
 }
 
@@ -57,9 +62,24 @@ export function registerBoardCommand(
     .option('--dry-run', 'only query GitHub and print what would change')
     .option('--json', 'print machine-readable JSON')
     .action(async (options: { dryRun?: boolean; json?: boolean }) => {
-      const { run, config, out = text => process.stdout.write(`${text}\n`) } = await makeContext();
+      const {
+        run,
+        config,
+        out = text => process.stdout.write(`${text}\n`),
+        err = text => process.stderr.write(`${text}\n`),
+      } = await makeContext();
       const dryRun = options.dryRun === true;
-      const result = await ensureBoard(run, config, { dryRun });
+      const result = await ensureBoard(run, config, {
+        dryRun,
+        // Said immediately: if a later write fails, this is the number to put in the config.
+        onProjectCreated: project =>
+          err(
+            `Created project #${project.number}${project.url ? ` (${project.url})` : ''}; ` +
+              `set github.project.number: ${project.number} in sdlc.config.yaml before running this again`,
+          ),
+      });
       out(options.json ? JSON.stringify({ dryRun, ...result }, null, 2) : formatEnsureResult(result, dryRun));
+      // A view that failed to create is a failed GitHub write.
+      if (result.viewsFailed.length > 0) process.exitCode = 1;
     });
 }

@@ -326,6 +326,7 @@ describe('ensureBoard', () => {
       created: false,
       viewsCreated: [],
       viewsManual: [],
+      viewsFailed: [],
       viewsPlanned: ['Board', 'In flight', 'Awaiting deployment', 'Waiting on owner'],
     });
     expect(result.plan.createFields).toHaveLength(11);
@@ -481,18 +482,22 @@ describe('ensureBoard', () => {
     expect(run.calls).toHaveLength(1);
     expect(result.viewsCreated).toEqual([]);
     expect(result.viewsManual).toEqual([]);
+    expect(result.viewsFailed).toEqual([]);
     expect(result.viewsPlanned).toEqual([]);
   });
 
-  it('returns manual instructions for views the API cannot create', async () => {
+  it('returns manual instructions for views whose endpoint answers 404 or 410 (unsupported)', async () => {
     const script = emptyBoardScript();
-    // Board succeeds; the rest are rejected.
+    // Board succeeds; the rest are unsupported.
     script[14] = { match: ['POST'], stdout: '{"number":2}' };
-    for (const i of [15, 16, 17]) script[i] = { match: ['POST'], code: 1, stderr: 'HTTP 404: Not Found' };
+    script[15] = { match: ['POST'], code: 1, stderr: 'gh: Not Found (HTTP 404)' };
+    script[16] = { match: ['POST'], code: 1, stderr: 'gh: Gone (HTTP 410)' };
+    script[17] = { match: ['POST'], code: 1, stderr: 'HTTP 404: Not Found' };
     const run = fakeGh(script);
     const result = await ensureBoard(run, cfg, { dryRun: false });
 
     expect(result.viewsCreated).toEqual(['Board']);
+    expect(result.viewsFailed).toEqual([]);
     expect(result.viewsManual).toHaveLength(3);
     expect(result.viewsManual[0]).toContain('In flight');
     expect(result.viewsManual[0]).toContain('-status:Done');
@@ -502,16 +507,48 @@ describe('ensureBoard', () => {
     expect(result.viewsManual[2]).toContain('waiting-on:Owner');
   });
 
-  it('returns manual instructions for every view when the field list cannot be read', async () => {
+  it.each([
+    ['422', 'gh: Validation Failed (HTTP 422)'],
+    ['500', 'gh: Server Error (HTTP 500)'],
+    ['no HTTP status', 'connection reset by peer'],
+  ])('reports a view that fails with %s as failed, not manual, and still tries the others', async (_, stderr) => {
+    const script = emptyBoardScript();
+    script[15] = { match: ['POST'], code: 1, stderr };
+    const run = fakeGh(script);
+    const result = await ensureBoard(run, cfg, { dryRun: false });
+
+    expect(result.viewsCreated).toEqual(['Board', 'Awaiting deployment', 'Waiting on owner']);
+    expect(result.viewsManual).toEqual([]);
+    expect(result.viewsFailed).toEqual([{ name: 'In flight', error: stderr }]);
+  });
+
+  it('returns manual instructions for every view when the field list endpoint answers 404', async () => {
     const script = emptyBoardScript().slice(0, 13);
     script.push({ match: ['api'], code: 1, stderr: 'HTTP 404: Not Found' });
     const run = fakeGh(script);
     const result = await ensureBoard(run, cfg, { dryRun: false });
     expect(result.viewsCreated).toEqual([]);
     expect(result.viewsManual).toHaveLength(4);
+    expect(result.viewsFailed).toEqual([]);
   });
 
-  it('returns manual instructions for views that need a field missing from the REST field list', async () => {
+  it('reports every view as failed when the field list cannot be read for another reason', async () => {
+    const script = emptyBoardScript().slice(0, 13);
+    script.push({ match: ['api'], code: 1, stderr: 'gh: Server Error (HTTP 502)' });
+    const run = fakeGh(script);
+    const result = await ensureBoard(run, cfg, { dryRun: false });
+    expect(result.viewsCreated).toEqual([]);
+    expect(result.viewsManual).toEqual([]);
+    expect(result.viewsFailed.map(f => f.name)).toEqual([
+      'Board',
+      'In flight',
+      'Awaiting deployment',
+      'Waiting on owner',
+    ]);
+    expect(result.viewsFailed[0]?.error).toContain('HTTP 502');
+  });
+
+  it('reports views that need a field missing from the REST field list as failed', async () => {
     const script = emptyBoardScript();
     script[13] = {
       match: ['api'],
@@ -521,38 +558,101 @@ describe('ensureBoard', () => {
     const run = fakeGh([...script.slice(0, 15), script[17] as FakeGhStep]);
     const result = await ensureBoard(run, cfg, { dryRun: false });
     expect(result.viewsCreated).toEqual(['Board', 'Waiting on owner']);
-    expect(result.viewsManual).toHaveLength(2);
-    expect(result.viewsManual[0]).toContain('"Last update" is not on the board');
-    expect(result.viewsManual[1]).toContain('"Pending targets" is not on the board');
+    expect(result.viewsManual).toEqual([]);
+    expect(result.viewsFailed).toEqual([
+      { name: 'In flight', error: 'field "Last update" is missing from the project\'s field list' },
+      { name: 'Awaiting deployment', error: 'field "Pending targets" is missing from the project\'s field list' },
+    ]);
   });
 
-  it('creates a project linked to the repository when none is configured, then provisions it', async () => {
+  describe('when no project is configured', () => {
     const newCfg = configWith('{ owner: acme, owner_type: org }');
-    const fields = desiredFields(newCfg);
-    const run = fakeGh([
+    const createdUrl = 'https://github.com/orgs/acme/projects/12';
+    const createSteps = (): FakeGhStep[] => [
       gql({ owner: { id: 'O_acme' }, repo: { id: 'R_shop' } }),
-      gql({ createProjectV2: { projectV2: { id: 'PVT_new', number: 12 } } }),
-      gql({ node: { id: 'PVT_new', number: 12, title: 'shop SDLC tasks', fields: { nodes: builtinFields() }, views: { nodes: [{ name: 'View 1' }] } } }),
-      ...ALL_FIELD_NAMES.filter(n => n !== 'Status').map(createFieldStep),
-      updateFieldStep('F_status', [...STATUS_OPTION_INPUTS, ...Array(5).fill({ name: 'x' })]),
-      restFieldsStep('/orgs/acme/projectsV2/12/fields?per_page=100'),
-      ...[1, 2, 3, 4].map(() => ({ match: ['POST'], stdout: '{}' })),
-    ]);
-    const result = await ensureBoard(run, newCfg, { dryRun: false });
+      gql({ createProjectV2: { projectV2: { id: 'PVT_new', number: 12, url: createdUrl } } }),
+      gql({
+        node: {
+          id: 'PVT_new',
+          number: 12,
+          title: 'shop SDLC tasks',
+          fields: { nodes: builtinFields() },
+          views: { nodes: [{ name: 'View 1' }] },
+        },
+      }),
+    ];
 
-    expect(inputAt(run, 0).variables).toEqual({ owner: 'acme', repoOwner: 'acme', repoName: 'shop' });
-    expect(inputAt(run, 0).query).toContain('organization(login');
-    expect(inputAt(run, 1).variables.input).toEqual({
-      ownerId: 'O_acme',
-      repositoryId: 'R_shop',
-      title: 'shop SDLC tasks',
+    it('creates a project linked to the repository, announces it, then provisions it', async () => {
+      const run = fakeGh([
+        ...createSteps(),
+        ...ALL_FIELD_NAMES.filter(n => n !== 'Status').map(createFieldStep),
+        updateFieldStep('F_status', [...STATUS_OPTION_INPUTS, ...Array(5).fill({ name: 'x' })]),
+        restFieldsStep('/orgs/acme/projectsV2/12/fields?per_page=100'),
+        ...[1, 2, 3, 4].map(() => ({ match: ['POST'], stdout: '{}' })),
+      ]);
+      const announced: { number: number; id: string; url?: string }[] = [];
+      const callsWhenAnnounced: number[] = [];
+      const result = await ensureBoard(run, newCfg, {
+        dryRun: false,
+        onProjectCreated: project => {
+          announced.push(project);
+          callsWhenAnnounced.push(run.calls.length);
+        },
+      });
+
+      expect(inputAt(run, 0).variables).toEqual({ owner: 'acme', repoOwner: 'acme', repoName: 'shop' });
+      expect(inputAt(run, 0).query).toContain('organization(login');
+      expect(inputAt(run, 1).variables.input).toEqual({
+        ownerId: 'O_acme',
+        repositoryId: 'R_shop',
+        title: 'shop SDLC tasks',
+      });
+      expect(announced).toEqual([{ number: 12, id: 'PVT_new', url: createdUrl }]);
+      // Announced right after the project exists, before any field is written.
+      expect(callsWhenAnnounced).toEqual([3]);
+      expect(result).toMatchObject({ created: true, projectNumber: 12, projectId: 'PVT_new' });
+      expect(result.viewsCreated).toHaveLength(4);
+      // Every later write targets the project that was just created.
+      expect(inputAt(run, 3).variables.input.projectId).toBe('PVT_new');
+      expect(
+        run.calls.filter(c => c.includes('POST')).every(c => c.includes('/orgs/acme/projectsV2/12/views')),
+      ).toBe(true);
     });
-    expect(result).toMatchObject({ created: true, projectNumber: 12, projectId: 'PVT_new' });
-    expect(result.viewsCreated).toHaveLength(4);
-    // Every later write targets the project that was just created.
-    expect(inputAt(run, 3).variables.input.projectId).toBe('PVT_new');
-    expect(run.calls.filter(c => c.includes('POST')).every(c => c.includes('/orgs/acme/projectsV2/12/views'))).toBe(true);
-    expect(fields).toHaveLength(12);
+
+    it('names the created project and the config key to set when a later write fails', async () => {
+      const run = fakeGh([
+        ...createSteps(),
+        { match: ['graphql'], code: 1, stderr: 'gh: Server Error (HTTP 500)' },
+      ]);
+      const announced: number[] = [];
+      const error = await ensureBoard(run, newCfg, {
+        dryRun: false,
+        onProjectCreated: project => announced.push(project.number),
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(BoardError);
+      const boardError = error as BoardError;
+      expect(boardError.message).toContain('Project #12');
+      expect(boardError.message).toContain(createdUrl);
+      expect(boardError.message).toContain('created but provisioning failed');
+      expect(boardError.message).toContain('HTTP 500');
+      expect(boardError.message).toContain('github.project.number: 12');
+      expect(boardError.createdProject).toEqual({ number: 12, id: 'PVT_new', url: createdUrl });
+      expect(boardError.cause).toBeInstanceOf(Error);
+      expect(announced).toEqual([12]);
+      expect(run.calls).toHaveLength(4);
+    });
+
+    it('does not announce a project in a dry run, and a failure before creation has no created project', async () => {
+      const announced: number[] = [];
+      const dry = fakeGh([]);
+      await ensureBoard(dry, newCfg, { dryRun: true, onProjectCreated: p => announced.push(p.number) });
+      expect(announced).toEqual([]);
+
+      const failing = fakeGh([{ match: ['graphql'], code: 1, stderr: 'gh: Server Error (HTTP 500)' }]);
+      const error = await ensureBoard(failing, newCfg, { dryRun: false }).catch((e: unknown) => e);
+      expect(error).not.toBeInstanceOf(BoardError);
+    });
   });
 
   it('fails clearly when the configured project does not exist', async () => {

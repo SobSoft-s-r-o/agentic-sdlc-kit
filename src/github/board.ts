@@ -17,11 +17,22 @@ import { GhError, ghJson, graphql, type GhRunner } from './gh.js';
  */
 export const OPTION_UPDATE_PRESERVES_VALUES = true;
 
+/** A project this run created. */
+export interface CreatedProject {
+  number: number;
+  id: string;
+  url?: string;
+}
+
 /** A board that cannot be provisioned or used as configured. */
 export class BoardError extends Error {
-  constructor(message: string) {
-    super(message);
+  /** Set when this run had already created the project before failing. */
+  readonly createdProject?: CreatedProject;
+
+  constructor(message: string, options?: { cause?: unknown; createdProject?: CreatedProject }) {
+    super(message, options?.cause === undefined ? undefined : { cause: options.cause });
     this.name = 'BoardError';
+    this.createdProject = options?.createdProject;
   }
 }
 
@@ -204,7 +215,10 @@ async function fetchProjectById(run: GhRunner, id: string): Promise<ProjectSnaps
 }
 
 /** Creates the project, linked to the configured repository. */
-async function createProject(run: GhRunner, cfg: Config): Promise<ProjectSnapshot> {
+async function createProject(
+  run: GhRunner,
+  cfg: Config,
+): Promise<{ project: ProjectSnapshot; url?: string }> {
   const { owner, ownerType } = cfg.github.project;
   const [repoOwner, repoName] = cfg.github.repo.split('/') as [string, string];
   const root = ownerType === 'org' ? 'organization' : 'user';
@@ -218,14 +232,17 @@ async function createProject(run: GhRunner, cfg: Config): Promise<ProjectSnapsho
   );
   if (!ids.owner) throw new BoardError(`Project owner ${ownerType} "${owner}" not found`);
   if (!ids.repo) throw new BoardError(`Repository ${cfg.github.repo} not found`);
-  const created = await graphql<{ createProjectV2: { projectV2: { id: string; number: number } } }>(
+  const created = await graphql<{
+    createProjectV2: { projectV2: { id: string; number: number; url?: string } };
+  }>(
     run,
     `mutation($input: CreateProjectV2Input!) {
-      createProjectV2(input: $input) { projectV2 { id number } }
+      createProjectV2(input: $input) { projectV2 { id number url } }
     }`,
     { input: { ownerId: ids.owner.id, repositoryId: ids.repo.id, title: `${repoName} SDLC tasks` } },
   );
-  return fetchProjectById(run, created.createProjectV2.projectV2.id);
+  const { id, url } = created.createProjectV2.projectV2;
+  return { project: await fetchProjectById(run, id), url };
 }
 
 /** Ids of the given fields that have a value on at least one item of the project. */
@@ -382,6 +399,20 @@ function reasonOf(error: GhError): string {
   return text.split('\n')[0] ?? text;
 }
 
+/** HTTP 404/410: the endpoint does not exist for this owner or plan; anything else is a failure. */
+const isUnsupported = (error: GhError): boolean => /\bHTTP (404|410)\b/.test(error.stderr);
+
+export interface ViewFailure {
+  name: string;
+  error: string;
+}
+
+interface ViewOutcome {
+  viewsCreated: string[];
+  viewsManual: string[];
+  viewsFailed: ViewFailure[];
+}
+
 /** REST base path of the project; views and field ids for grouping/sorting live there. */
 function restBase(cfg: Config, number: number): string {
   const { owner, ownerType } = cfg.github.project;
@@ -393,16 +424,19 @@ function missingViews(project: ProjectSnapshot): ViewSpec[] {
   return VIEWS.filter(view => !existing.has(normalize(view.name)));
 }
 
-/** Creates the given views through the REST Projects API; what it cannot create is returned as manual steps. */
+/**
+ * Creates the given views through the REST Projects API. An endpoint that answers 404/410 is
+ * unsupported and yields manual steps; any other failure, or a needed field missing from the
+ * REST field list, is a failure.
+ */
 async function createViews(
   run: GhRunner,
   cfg: Config,
   project: ProjectSnapshot,
   views: ViewSpec[],
-): Promise<{ viewsCreated: string[]; viewsManual: string[] }> {
+): Promise<ViewOutcome> {
   const base = restBase(cfg, project.number);
-  const viewsCreated: string[] = [];
-  const viewsManual: string[] = [];
+  const outcome: ViewOutcome = { viewsCreated: [], viewsManual: [], viewsFailed: [] };
 
   let fieldIds: Map<string, number>;
   try {
@@ -414,7 +448,12 @@ async function createViews(
     fieldIds = new Map(fields.map(f => [normalize(f.name), f.id]));
   } catch (error) {
     if (!(error instanceof GhError)) throw error;
-    return { viewsCreated, viewsManual: views.map(v => manualView(v, reasonOf(error))) };
+    if (isUnsupported(error)) {
+      outcome.viewsManual.push(...views.map(v => manualView(v, reasonOf(error))));
+    } else {
+      outcome.viewsFailed.push(...views.map(v => ({ name: v.name, error: reasonOf(error) })));
+    }
+    return outcome;
   }
 
   const idOf = (key: FieldKey): number => fieldIds.get(normalize(FIELD_NAMES[key])) as number;
@@ -425,7 +464,10 @@ async function createViews(
     );
     const absent = needed.find(key => !fieldIds.has(normalize(FIELD_NAMES[key])));
     if (absent !== undefined) {
-      viewsManual.push(manualView(view, `field "${FIELD_NAMES[absent]}" is not on the board`));
+      outcome.viewsFailed.push({
+        name: view.name,
+        error: `field "${FIELD_NAMES[absent]}" is missing from the project's field list`,
+      });
       continue;
     }
     const body = {
@@ -438,13 +480,14 @@ async function createViews(
     };
     try {
       await ghJson(run, ['api', '-X', 'POST', `${base}/views`, '--input', '-'], body);
-      viewsCreated.push(view.name);
+      outcome.viewsCreated.push(view.name);
     } catch (error) {
       if (!(error instanceof GhError)) throw error;
-      viewsManual.push(manualView(view, reasonOf(error)));
+      if (isUnsupported(error)) outcome.viewsManual.push(manualView(view, reasonOf(error)));
+      else outcome.viewsFailed.push({ name: view.name, error: reasonOf(error) });
     }
   }
-  return { viewsCreated, viewsManual };
+  return outcome;
 }
 
 // --- ensureBoard -----------------------------------------------------------------------------
@@ -454,6 +497,8 @@ export interface EnsureBoardOptions {
   dryRun: boolean;
   /** Overrides {@link OPTION_UPDATE_PRESERVES_VALUES}; for tests. */
   optionUpdatesPreserveValues?: boolean;
+  /** Called as soon as this run has created the project, before anything else is written to it. */
+  onProjectCreated?: (project: CreatedProject) => void;
 }
 
 export interface EnsureBoardResult {
@@ -469,8 +514,10 @@ export interface EnsureBoardResult {
   /** Views that did not exist yet when the run started. */
   viewsPlanned: string[];
   viewsCreated: string[];
-  /** Manual instructions for views the API could not create. */
+  /** Manual instructions for views the API does not support (HTTP 404/410). */
   viewsManual: string[];
+  /** Views whose creation failed; a failed GitHub write, so the command exits non-zero. */
+  viewsFailed: ViewFailure[];
 }
 
 /** The fields a brand-new project starts with that matter here. */
@@ -488,7 +535,10 @@ const NEW_PROJECT_FIELDS: ExistingField[] = [
  * of existing single-selects and the missing views. Add-only: nothing is renamed, deleted or
  * reordered, and only the configured (or just created) project is written to. Throws BoardError
  * before any write (dry run included) when a field exists with another data type, or when option
- * updates are unsafe and the field already has values.
+ * updates are unsafe and the field already has values. A view the API refuses (other than with
+ * HTTP 404/410, which means unsupported) is reported in `viewsFailed`; the caller must exit
+ * non-zero. A failure after this run created the project throws a BoardError that carries the new
+ * project's number and URL (`createdProject`) and tells the user to configure it before retrying.
  */
 export async function ensureBoard(
   run: GhRunner,
@@ -499,7 +549,7 @@ export async function ensureBoard(
   const desired = desiredFields(cfg);
 
   let project: ProjectSnapshot;
-  let created = false;
+  let createdProject: CreatedProject | undefined;
   let wouldCreateProject = false;
   if (cfg.github.project.number !== undefined) {
     project = await fetchProject(run, cfg);
@@ -507,52 +557,70 @@ export async function ensureBoard(
     wouldCreateProject = true;
     project = { id: '', number: 0, fields: NEW_PROJECT_FIELDS, viewNames: [] };
   } else {
-    project = await createProject(run, cfg);
-    created = true;
+    const made = await createProject(run, cfg);
+    project = made.project;
+    createdProject = { number: project.number, id: project.id, url: made.url };
+    opts.onProjectCreated?.(createdProject);
   }
+  const created = createdProject !== undefined;
 
-  const plan = planBoardChanges(project.fields, desired);
-  if (plan.typeConflicts.length > 0) {
-    throw new BoardError(
-      `Board fields exist with another data type: ${plan.typeConflicts.join(', ')}. ` +
-        'Rename or delete them on the board, or point github.project.number at another board.',
-    );
-  }
-
-  if (!preservesValues && plan.addOptions.length > 0 && !created && !wouldCreateProject) {
-    const populated = await populatedFieldIds(
-      run,
-      project.id,
-      plan.addOptions.map(a => a.fieldId),
-    );
-    const names = plan.addOptions.filter(a => populated.has(a.fieldId)).map(a => a.fieldName);
-    if (names.length > 0) {
+  const provision = async (): Promise<EnsureBoardResult> => {
+    const plan = planBoardChanges(project.fields, desired);
+    if (plan.typeConflicts.length > 0) {
       throw new BoardError(
-        `Adding options to ${names.join(', ')} would clear values already set on items. ` +
-          'Refusing to change a populated field; create a new board and point github.project.number at it.',
+        `Board fields exist with another data type: ${plan.typeConflicts.join(', ')}. ` +
+          'Rename or delete them on the board, or point github.project.number at another board.',
       );
     }
-  }
 
-  const views = missingViews(project);
-  const base = {
-    projectNumber: project.number,
-    projectId: project.id,
-    created,
-    wouldCreateProject,
-    plan,
-    viewsPlanned: views.map(v => v.name),
+    if (!preservesValues && plan.addOptions.length > 0 && !created && !wouldCreateProject) {
+      const populated = await populatedFieldIds(
+        run,
+        project.id,
+        plan.addOptions.map(a => a.fieldId),
+      );
+      const names = plan.addOptions.filter(a => populated.has(a.fieldId)).map(a => a.fieldName);
+      if (names.length > 0) {
+        throw new BoardError(
+          `Adding options to ${names.join(', ')} would clear values already set on items. ` +
+            'Refusing to change a populated field; create a new board and point github.project.number at it.',
+        );
+      }
+    }
+
+    const views = missingViews(project);
+    const base = {
+      projectNumber: project.number,
+      projectId: project.id,
+      created,
+      wouldCreateProject,
+      plan,
+      viewsPlanned: views.map(v => v.name),
+    };
+    const noViews: ViewOutcome = { viewsCreated: [], viewsManual: [], viewsFailed: [] };
+    if (opts.dryRun) return { ...base, ...noViews };
+
+    for (const field of plan.createFields) await createField(run, project.id, field);
+    for (const change of plan.addOptions) {
+      const field = project.fields.find(f => f.id === change.fieldId) as ExistingField;
+      await appendOptions(run, field, change.missing);
+    }
+    return { ...base, ...(views.length > 0 ? await createViews(run, cfg, project, views) : noViews) };
   };
-  if (opts.dryRun) return { ...base, viewsCreated: [], viewsManual: [] };
 
-  for (const field of plan.createFields) await createField(run, project.id, field);
-  for (const change of plan.addOptions) {
-    const field = project.fields.find(f => f.id === change.fieldId) as ExistingField;
-    await appendOptions(run, field, change.missing);
+  if (!createdProject) return provision();
+  try {
+    return await provision();
+  } catch (error) {
+    // The project exists now; without its number in the config a rerun would create another one.
+    const where = `#${createdProject.number}${createdProject.url ? ` (${createdProject.url})` : ''}`;
+    throw new BoardError(
+      `Project ${where} was created but provisioning failed: ${(error as Error).message}. ` +
+        `Set github.project.number: ${createdProject.number} in sdlc.config.yaml before running ` +
+        '"sdlc board ensure" again, or a second project will be created.',
+      { cause: error, createdProject },
+    );
   }
-  const viewResult =
-    views.length > 0 ? await createViews(run, cfg, project, views) : { viewsCreated: [], viewsManual: [] };
-  return { ...base, ...viewResult };
 }
 
 // --- resolveFieldIds -------------------------------------------------------------------------
