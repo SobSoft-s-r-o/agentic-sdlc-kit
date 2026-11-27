@@ -21,6 +21,7 @@ const ago = (days: number, hours = 0): string => new Date(Date.parse(NOW) - days
 function setup(config: Config = cfg) {
   const tracker = new FakeTracker();
   tracker.owners = [...config.owners];
+  tracker.agents = [...config.agents];
   const ctx: CommandContext = { tracker, cfg: config, now: () => NOW, out: () => undefined };
   return { tracker, ctx };
 }

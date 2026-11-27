@@ -39,6 +39,7 @@ afterEach(() => {
 function setup(config: Config = cfg) {
   const tracker = new FakeTracker();
   tracker.owners = [...config.owners];
+  tracker.agents = [...config.agents];
   const out: unknown[] = [];
   const err: string[] = [];
   let tick = 0;
@@ -457,6 +458,65 @@ describe('approvals', () => {
     const url = comment(observe, 1, '/approve', AFTER);
     await reconcile(observe.ctx, {});
     expect((await stateOf(observe, 1)).stages.brainstorming?.approval).toMatchObject({ source: 'unverified', ref: url });
+  });
+
+  describe('agent logins (`agents` in the config)', () => {
+    const AGENT = 'agent-bot';
+    const withAgents = (config: Config): Config => ({ ...config, agents: [AGENT] });
+
+    it('reads state written by an agent login when the owner runs sdlc', async () => {
+      const h = setup(withAgents(enforceCfg));
+      h.tracker.login = OWNER;
+      h.tracker.seedTask(inReview(1, 'tooling'));
+      h.tracker.comments.find(c => c.issue === 1)!.author = AGENT;
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions.filter(a => a.kind === 'error')).toEqual([]);
+      expect((await h.tracker.getTask(1)).issue).toBe(1);
+    });
+
+    it("ignores an agent's /approve in enforce mode, even when another login runs sdlc", async () => {
+      const h = setup(withAgents(enforceCfg));
+      h.tracker.login = OWNER;
+      h.tracker.seedTask(pausedOn(1));
+      const url = comment(h, 1, '/approve', AFTER, AGENT);
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions[0]).toEqual({
+        issue: 1,
+        kind: 'ignored_approval',
+        detail: `/approve (${url}): comment ${url} is by ${AGENT}, an agent login (listed under \`agents\`); agents cannot approve`,
+      });
+      expect((await stateOf(h, 1)).status).toBe('paused');
+    });
+
+    it("records an agent's /approve as unverified in observe mode", async () => {
+      const h = setup(withAgents(cfg));
+      h.tracker.login = OWNER;
+      h.tracker.seedTask(pausedOn(1));
+      const url = comment(h, 1, '/approve', AFTER, AGENT);
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions[0]).toMatchObject({ kind: 'approval', detail: expect.stringMatching(/unverified/) });
+      expect((await stateOf(h, 1)).stages.brainstorming?.approval).toEqual({
+        source: 'unverified',
+        ref: url,
+        by: AGENT,
+        at: AFTER,
+      });
+    });
+
+    it('ignores owner comments in enforce mode when the login is unknown and no agents are listed', async () => {
+      const h = setup(enforceCfg);
+      vi.spyOn(h.tracker, 'authenticatedLogin').mockResolvedValue(undefined);
+      h.tracker.seedTask(pausedOn(1));
+      comment(h, 1, '/approve', AFTER);
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions[0]).toMatchObject({
+        kind: 'ignored_approval',
+        detail: expect.stringContaining(
+          'cannot tell owner from agent comments; list agent logins under `agents` in sdlc.config.yaml',
+        ),
+      });
+      expect((await stateOf(h, 1)).status).toBe('paused');
+    });
   });
 
   it('applies /accept for an analysis task with a published result', async () => {

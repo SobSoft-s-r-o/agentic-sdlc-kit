@@ -21,6 +21,7 @@ import {
   renderCancelReport,
   renderDeliveryReport,
 } from '../core/summary.js';
+import { trustedLogins } from '../core/trust.js';
 import type { Approval, TaskEvent, TaskState, TaskTypeDef } from '../core/types.js';
 import type { IssueComment, PrInfo, TrackedTask, Tracker } from '../tracker/types.js';
 import { DEPLOYMENT_LOOKBACK, satisfiedTargets } from './deployments.js';
@@ -287,7 +288,7 @@ function describeApproval(command: ApprovalCommand, approval: Approval, state: T
     ran: 'run confirmed',
     cancel: `cancelled: ${state.cancelReason ?? ''}`,
   }[command.action];
-  const unverified = approval.source === 'unverified' ? ' (unverified: own login)' : '';
+  const unverified = approval.source === 'unverified' ? ' (unverified: written by an agent login)' : '';
   return `/${command.action} by ${approval.by} (${approval.ref})${unverified}: ${outcome}`;
 }
 
@@ -298,7 +299,9 @@ async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void>
   for (const thread of [task.issue, ...prs.map(pr => pr.number)]) {
     comments.push(...(await trackerStep('listComments', task.issue, () => ctx.tracker.listComments(thread))));
   }
-  const parsed = parseApprovalCommands(comments, ctx.cfg.owners);
+  // In observe mode an agent's command is recorded as unverified, so it is checked like an owner's.
+  const deciders = ctx.cfg.mode === 'observe' ? [...ctx.cfg.owners, ...ctx.cfg.agents] : ctx.cfg.owners;
+  const parsed = parseApprovalCommands(comments, deciders);
   const commands = [...parsed, ...parsed.ignored].sort((a, b) => byTime(a.comment.createdAt, b.comment.createdAt));
   const login = () => trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin());
 
@@ -378,20 +381,15 @@ async function applyDeployments(t: TaskRun): Promise<boolean> {
   return (t.state as TaskState).status === 'done';
 }
 
-/** The Actions runner's login; its comments count like the tracker's own. */
-const ACTIONS_BOT = 'github-actions[bot]';
-
 /**
  * Whether a report starting with `heading` is already on the issue since the last reopen. Only
- * comments by trusted authors count (the tracker login, an owner, the Actions bot, any letter
- * case), so a forged heading from anyone else cannot suppress the real report.
+ * comments by trusted authors count (the tracker login, an owner, an agent, the Actions bot, any
+ * letter case), so a forged heading from anyone else cannot suppress the real report.
  */
 async function reportExists(t: TaskRun, heading: string): Promise<boolean> {
   const { ctx, task } = t;
   const login = await trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin());
-  const trusted = new Set(
-    [...ctx.cfg.owners, ACTIONS_BOT, ...(login === undefined ? [] : [login])].map(name => name.toLowerCase()),
-  );
+  const trusted = trustedLogins(ctx.cfg, login);
   const since = task.state.reopenedAt;
   const comments = await trackerStep('listComments', task.issue, () => ctx.tracker.listComments(task.issue, since));
   return comments.some(

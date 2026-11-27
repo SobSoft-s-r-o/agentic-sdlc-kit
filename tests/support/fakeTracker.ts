@@ -49,7 +49,7 @@ const maxOf = (numbers: number[]): number => numbers.reduce((max, n) => Math.max
  * it directly. Task state is stored as the real hidden state comment, so the fake exercises the
  * same render/parse format as production. All timestamps come from one fake clock that advances
  * one minute per use, starting at 2026-01-01T00:01:00.000Z. As in production, only a state-marker
- * comment written by `login`, one of `owners` or the Actions bot (compared case-insensitively) holds
+ * comment written by `login`, one of `owners` or `agents`, or the Actions bot (compared case-insensitively) holds
  * state, and when several do, the one updated last is the state; anyone else's is an ordinary comment.
  */
 export class FakeTracker implements Tracker {
@@ -71,6 +71,8 @@ export class FakeTracker implements Tracker {
   login = 'sdlc-bot';
   /** The configured owners; their state comments are trusted as well. */
   owners: string[] = [];
+  /** The configured agent logins; their state comments are trusted as well. */
+  agents: string[] = [];
 
   private pendingFailures = new Map<keyof Tracker, number>();
   private clock = 0;
@@ -351,11 +353,11 @@ export class FakeTracker implements Tracker {
   }
 
   /**
-   * The state comment: among the state-marker comments by a trusted author (`login`, an owner or
-   * the Actions bot, in any letter case), the one updated last; the newer id wins a tie.
+   * The state comment: among the state-marker comments by a trusted author (`login`, an owner, an
+   * agent or the Actions bot, in any letter case), the one updated last; the newer id wins a tie.
    */
   private findStateComment(issue: number): FakeComment | undefined {
-    const trusted = new Set([this.login, ...this.owners, ACTIONS_BOT].map(name => name.toLowerCase()));
+    const trusted = new Set([this.login, ...this.owners, ...this.agents, ACTIONS_BOT].map(name => name.toLowerCase()));
     return this.comments
       .filter(
         c =>

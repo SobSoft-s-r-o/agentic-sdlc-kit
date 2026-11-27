@@ -99,6 +99,13 @@ const RawConfigSchema = z
       }),
     }),
     owners: z.array(nonEmpty).min(1),
+    /**
+     * GitHub logins the agents write as (a bot account, or a GitHub App token's `<app>[bot]` login).
+     * Their state comments are trusted like the owners'; their comments never count as an owner
+     * approval. List the login of every token that runs `sdlc` and is not an owner, above all one
+     * whose own login the tool cannot read (an App or Actions token).
+     */
+    agents: z.array(nonEmpty).default([]),
     content_language: nonEmpty.default('en'),
     merge_policy: z.enum(['owner_only', 'agent_on_request']).default('owner_only'),
     quality_gate: z.array(nonEmpty).default([]),
@@ -118,6 +125,17 @@ const RawConfigSchema = z
       .prefault({}),
   })
   .superRefine((cfg, ctx) => {
+    const owners = new Set(cfg.owners.map(login => login.toLowerCase()));
+    cfg.agents.forEach((login, i) => {
+      if (owners.has(login.toLowerCase())) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['agents', i],
+          message: `"${login}" is also listed under owners; a login is either an owner or an agent`,
+        });
+      }
+    });
+
     const environments = resolveEnvironments(cfg.targets);
 
     const namesSeen = new Set<string>();
@@ -197,6 +215,7 @@ export const ConfigSchema = RawConfigSchema.transform(raw => {
       },
     },
     owners: raw.owners,
+    agents: raw.agents,
     contentLanguage: raw.content_language,
     mergePolicy: raw.merge_policy,
     qualityGate: raw.quality_gate,

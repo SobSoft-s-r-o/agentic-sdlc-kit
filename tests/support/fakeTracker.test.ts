@@ -224,6 +224,15 @@ describe('FakeTracker state', () => {
       expect((await tracker.listTrackedTasks()).map(t => t.issue)).toEqual([30]);
     });
 
+    it('trusts a configured agent login like an owner', async () => {
+      const tracker = new FakeTracker();
+      tracker.login = 'shop-owner';
+      tracker.agents = ['Agent-Bot'];
+      tracker.seedTask(task(30), { labels: ['sdlc:task'] });
+      tracker.comments.find(c => c.issue === 30)!.author = 'agent-bot';
+      expect((await tracker.listTrackedTasks()).map(t => t.issue)).toEqual([30]);
+    });
+
     it('does not trust an owner nobody configured', async () => {
       const tracker = new FakeTracker();
       tracker.seedTask(task(30), { labels: ['sdlc:task'] });

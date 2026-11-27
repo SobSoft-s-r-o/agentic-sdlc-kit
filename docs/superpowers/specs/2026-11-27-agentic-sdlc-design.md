@@ -193,6 +193,9 @@ github:
   repo: owner/name
   default_branch: main
   project: { owner: owner, owner_type: org, number: 7 }   # filled by init
+owners: [owner-login]    # GitHub logins whose comments count as owner approval
+agents: []               # logins agents write as (bot account, `<app>[bot]`): trusted for
+                         # state, never an owner approval; must not overlap owners
 content_language: en
 merge_policy: owner_only # owner_only | agent_on_request
 quality_gate: ["npm test"]
@@ -292,6 +295,10 @@ confirmation, merge instruction or cancellation counts only from one of two sour
    harnesses without hooks.
 Each recorded approval stores its source (prompt id or comment URL). In observe
 mode, an approval without either source is recorded but flagged as unverified.
+A comment by a login listed under `agents` (or by the tool's own login) never counts
+as the owner's: ignored in enforce mode, recorded as unverified in observe mode. In
+enforce mode, when the tool cannot read its own login and no `agents` are listed,
+comment approvals are ignored, since owner and agent comments cannot be told apart.
 `owners` (GitHub logins) is an install question.
 
 **Views** created: Board (by Status), "In flight" (table, not Done, sorted by Last

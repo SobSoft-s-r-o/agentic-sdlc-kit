@@ -49,6 +49,7 @@ afterEach(async () => {
 function setup(config: Config = cfg) {
   const tracker = new FakeTracker();
   tracker.owners = [...config.owners];
+  tracker.agents = [...config.agents];
   const out: unknown[] = [];
   const err: string[] = [];
   let tick = 0;
@@ -688,8 +689,8 @@ describe('approve sources', () => {
       const writes = h.tracker.writes;
 
       await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
-        `comment ${url} is authored by the agent's own login (SHOP-OWNER); ` +
-          'approve via prompt or run agents under a separate account',
+        `comment ${url} is authored by the agent's own login (SHOP-OWNER); approve via prompt, ` +
+          'or run agents under separate logins listed under `agents` in sdlc.config.yaml',
       );
 
       expect(await stateOf(h.tracker, issue)).toEqual(before);

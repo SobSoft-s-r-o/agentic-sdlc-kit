@@ -17,11 +17,10 @@ import type {
   Tracker,
   UntrackedIssue,
 } from '../tracker/types.js';
+import { trustedLogins } from '../core/trust.js';
 import { BoardError, FIELD_NAMES, resolveFieldIds, type FieldMap } from './board.js';
 import { GhError, ghJson, graphql, type GhRunner } from './gh.js';
 
-/** The login GitHub Actions comments as; its state comments are trusted like the user's own. */
-const ACTIONS_BOT = 'github-actions[bot]';
 /** What `gh api` prints when GitHub refuses to edit a comment: not the author's, or no longer there. */
 const EDIT_REFUSED = /\bHTTP (?:403|404)\b/;
 /** `gh issue list` and `gh pr list` cap their output; reaching the cap means results may be missing. */
@@ -566,18 +565,18 @@ export class GitHubTracker implements Tracker {
 
   /**
    * The logins whose state comments are trusted, lowercase: the authenticated user, the configured
-   * owners and the Actions bot. Owners and agents may run `sdlc` under different logins, and each
-   * must see the state the other wrote.
+   * owners and agents, and the Actions bot. Owners and agents may run `sdlc` under different
+   * logins, and each must see the state the other wrote.
    */
   private async trustedAuthors(): Promise<ReadonlySet<string>> {
     const login = await this.authenticatedLogin();
-    return new Set([...(login === undefined ? [] : [login]), ...this.cfg.owners, ACTIONS_BOT].map(n => n.toLowerCase()));
+    return trustedLogins(this.cfg, login);
   }
 
   /**
    * The login the tool comments as, looked up once per instance. A token that may not read
-   * `/user` (the Actions `GITHUB_TOKEN`) yields `undefined`: only the owners and the Actions bot
-   * are then trusted. Any other failure is not remembered, so the next call looks again.
+   * `/user` (the Actions `GITHUB_TOKEN`) yields `undefined`: only the owners, the agents and the
+   * Actions bot are then trusted. Any other failure is not remembered, so the next call looks again.
    */
   authenticatedLogin(): Promise<string | undefined> {
     if (!this.login) {

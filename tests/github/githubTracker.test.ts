@@ -282,6 +282,13 @@ describe('GitHubTracker login', () => {
     // Issue 17's is by an owner, who is always trusted.
     await expect(tracker.getTask(17)).resolves.toMatchObject({ stateCommentId: '5502' });
   });
+  it('trusts the state comments of a login listed under agents, whoever runs sdlc', async () => {
+    // The Actions token cannot read /user; issue 12's state comment is by octo-agent, an agent login.
+    const forbidden = failing(['api', 'user'], 'gh: Resource not accessible by integration (HTTP 403)');
+    const run = fakeGh([ok(['issue', 'view', '12'], fixture('issue-view-12.json')), forbidden, comments(12)]);
+    const tracker = new GitHubTracker(run, { ...cfg, agents: ['Octo-Agent'] }, { repoRoot });
+    await expect(tracker.getTask(12)).resolves.toMatchObject({ issue: 12, stateCommentId: '5003' });
+  });
 });
 
 describe('GitHubTracker.writeState', () => {

@@ -273,6 +273,19 @@ describe('parseConfig / loadConfig', () => {
     expect(messageOf(config({ header: noOwners }))).toContain('owners');
   });
 
+  it('defaults agents to an empty list and reads agent logins', () => {
+    expect(parseConfig(config()).agents).toEqual([]);
+    const header = HEADER.replace('owners: [shop-owner]', 'owners: [shop-owner]\nagents: [agent-bot, \"deploy-app[bot]\"]');
+    expect(parseConfig(config({ header })).agents).toEqual(['agent-bot', 'deploy-app[bot]']);
+  });
+
+  it('refuses a login listed both as owner and as agent, in any letter case', () => {
+    const header = HEADER.replace('owners: [shop-owner]', 'owners: [shop-owner]\nagents: [Shop-Owner]');
+    expect(messageOf(config({ header }))).toContain(
+      'agents[0]: "Shop-Owner" is also listed under owners; a login is either an owner or an agent',
+    );
+  });
+
   it('lists every issue path in a single ConfigError', () => {
     const header = HEADER.replace('acme/shop', 'nope').replace('owners: [shop-owner]', 'owners: []');
     const msg = messageOf(header + 'task_types:\n  enabled: [tooling]\n');

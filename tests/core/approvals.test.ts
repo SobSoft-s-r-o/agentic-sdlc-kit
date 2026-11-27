@@ -39,7 +39,7 @@ function check(overrides: Partial<CommentApprovalCheck>): CommentApprovalCheck {
     action: 'approve',
     phase: 'brainstorming',
     state: paused(),
-    cfg: { owners: ['Owner'], mode: 'observe' },
+    cfg: { owners: ['Owner'], agents: [], mode: 'observe' },
     login: async () => 'sdlc-bot',
     finalMergedAt: async () => undefined,
     ...overrides,
@@ -99,16 +99,60 @@ describe('validateCommentApproval', () => {
   it("refuses the tool's own login in enforce mode and records it unverified in observe mode", async () => {
     const own = comment('/approve', 'owner');
     await expect(
-      validateCommentApproval(check({ comment: own, login: async () => 'OWNER', cfg: { owners: ['owner'], mode: 'enforce' } })),
-    ).rejects.toThrow(/agent's own login/);
+      validateCommentApproval(
+        check({ comment: own, login: async () => 'OWNER', cfg: { owners: ['owner'], agents: [], mode: 'enforce' } }),
+      ),
+    ).rejects.toThrow(
+      `comment ${own.url} is authored by the agent's own login (OWNER); approve via prompt, ` +
+        'or run agents under separate logins listed under `agents` in sdlc.config.yaml',
+    );
     const { approval } = await validateCommentApproval(check({ comment: own, login: async () => 'owner' }));
     expect(approval).toMatchObject({ source: 'unverified', ref: own.url });
   });
 
-  it('skips the own-login check when the login is unknown', async () => {
-    const { approval } = await validateCommentApproval(
-      check({ login: async () => undefined, cfg: { owners: ['owner'], mode: 'enforce' } }),
+  describe('a comment by a login listed under agents', () => {
+    const agentsCfg = (mode: 'observe' | 'enforce') => ({ owners: ['owner'], agents: ['Agent-Bot'], mode });
+
+    it('is refused in enforce mode, whoever runs sdlc', async () => {
+      const byAgent = comment('/approve', 'agent-bot');
+      for (const login of ['owner', 'someone-else', undefined]) {
+        await expect(
+          validateCommentApproval(check({ comment: byAgent, login: async () => login, cfg: agentsCfg('enforce') })),
+        ).rejects.toThrow(
+          `comment ${byAgent.url} is by agent-bot, an agent login (listed under \`agents\`); agents cannot approve`,
+        );
+      }
+    });
+
+    it('is recorded as unverified in observe mode, keeping the comment url', async () => {
+      const byAgent = comment('/approve', 'agent-bot');
+      const { approval } = await validateCommentApproval(
+        check({ comment: byAgent, login: async () => 'owner', cfg: agentsCfg('observe') }),
+      );
+      expect(approval).toEqual({ source: 'unverified', ref: byAgent.url, by: 'agent-bot', at: AFTER });
+    });
+  });
+
+  it('refuses comment approvals in enforce mode when the login is unknown and no agents are listed', async () => {
+    const owner = comment('/approve', 'owner');
+    await expect(
+      validateCommentApproval(
+        check({ comment: owner, login: async () => undefined, cfg: { owners: ['owner'], agents: [], mode: 'enforce' } }),
+      ),
+    ).rejects.toThrow(
+      'cannot tell owner from agent comments; list agent logins under `agents` in sdlc.config.yaml',
     );
+  });
+
+  it('accepts an owner comment with an unknown login once agents are listed', async () => {
+    const { approval } = await validateCommentApproval(
+      check({ login: async () => undefined, cfg: { owners: ['owner'], agents: ['agent-bot'], mode: 'enforce' } }),
+    );
+    expect(approval.source).toBe('comment');
+  });
+
+  it('accepts an owner comment with an unknown login in observe mode', async () => {
+    const { approval } = await validateCommentApproval(check({ login: async () => undefined }));
     expect(approval.source).toBe('comment');
   });
 
