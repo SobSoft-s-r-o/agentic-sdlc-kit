@@ -15,6 +15,7 @@ import {
   type ExpectedStateComment,
   type IssueComment,
   type IssueInfo,
+  type PostedComment,
   type PrInfo,
   type ReleaseInfo,
   type TrackedTask,
@@ -376,10 +377,16 @@ export class GitHubTracker implements Tracker {
     await this.send('POST', `repos/${this.repo}/issues/${issue}/comments`, { body });
   }
 
-  async postComment(issue: number, body: string): Promise<string> {
-    const created = await this.send<{ id: number }>('POST', `repos/${this.repo}/issues/${issue}/comments`, { body });
-    if (typeof created?.id !== 'number') throw new Error('GitHub did not return the created comment');
-    return String(created.id);
+  async postComment(issue: number, body: string): Promise<PostedComment> {
+    const created = await this.send<{ id: number; created_at: string }>(
+      'POST',
+      `repos/${this.repo}/issues/${issue}/comments`,
+      { body },
+    );
+    if (typeof created?.id !== 'number' || typeof created.created_at !== 'string') {
+      throw new Error('GitHub did not return the created comment');
+    }
+    return { id: String(created.id), createdAt: created.created_at };
   }
 
   /**

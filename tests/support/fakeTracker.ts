@@ -13,6 +13,7 @@ import {
   type ExpectedStateComment,
   type IssueComment,
   type IssueInfo,
+  type PostedComment,
   type PrInfo,
   type ReleaseInfo,
   type TrackedTask,
@@ -92,6 +93,7 @@ export class FakeTracker implements Tracker {
   private pendingFailures = new Map<keyof Tracker, number>();
   private concurrentWrites = new Set<number>();
   private clock = 0;
+  private clockStart = CLOCK_START;
 
   /**
    * Makes the next `writeState` on `issue` find its state comment edited by someone else since it
@@ -219,12 +221,12 @@ export class FakeTracker implements Tracker {
     } else this.comments.push(this.newComment(issue, body, this.login));
   }
 
-  async postComment(issue: number, body: string): Promise<string> {
+  async postComment(issue: number, body: string): Promise<PostedComment> {
     this.begin('postComment', true);
     this.requireThread(issue);
     const comment = this.newComment(issue, body, this.login);
     this.comments.push(comment);
-    return comment.id;
+    return { id: comment.id, createdAt: comment.createdAt };
   }
 
   /** Oldest first; `sinceIso` keeps only comments created strictly after it. */
@@ -343,7 +345,13 @@ export class FakeTracker implements Tracker {
 
   private tick(): string {
     this.clock += 1;
-    return new Date(CLOCK_START + this.clock * MINUTE).toISOString();
+    return new Date(this.clockStart + this.clock * MINUTE).toISOString();
+  }
+
+  /** Restarts the fake clock (GitHub's clock) at `iso`: the next timestamp is one minute after it. */
+  startClockAt(iso: string): void {
+    this.clockStart = Date.parse(iso);
+    this.clock = 0;
   }
 
   private sortedIssues(): FakeIssue[] {

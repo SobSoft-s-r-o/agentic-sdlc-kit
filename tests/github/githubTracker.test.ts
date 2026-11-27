@@ -460,11 +460,11 @@ describe('GitHubTracker issues and comments', () => {
     });
   });
 
-  it('posts a comment and returns its id', async () => {
+  it('posts a comment and returns its id and the time GitHub created it', async () => {
     const { run, tracker } = trackerFor([
       ok(['api', '-X', 'POST', 'repos/acme/shop/issues/12/comments', '--input', '-'], fixture('comment-created.json')),
     ]);
-    expect(await tracker.postComment(12, 'Heads up: tests are red.')).toBe('5010');
+    expect(await tracker.postComment(12, 'Heads up: tests are red.')).toEqual({ id: '5010', createdAt: '2026-11-27T10:00:00Z' });
     expect(body(run, 0)).toEqual({ body: 'Heads up: tests are red.' });
   });
 

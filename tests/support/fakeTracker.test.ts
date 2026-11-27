@@ -359,13 +359,14 @@ describe('FakeTracker comments', () => {
     const { number } = await tracker.createIssue('T', '', []);
     const first = await tracker.postComment(number, 'one');
     const second = await tracker.postComment(number, 'two');
-    expect(second).not.toBe(first);
+    expect(second.id).not.toBe(first.id);
 
     const all = await tracker.listComments(number);
     expect(all.map(c => c.body)).toEqual(['one', 'two']);
+    expect(all.map(c => ({ id: c.id, createdAt: c.createdAt }))).toEqual([first, second]);
     expect(Date.parse(all[1]!.createdAt)).toBeGreaterThan(Date.parse(all[0]!.createdAt));
     expect(all[0]).toEqual({
-      id: first,
+      id: first.id,
       url: expect.stringContaining(`/issues/${number}`),
       author: tracker.login,
       body: 'one',

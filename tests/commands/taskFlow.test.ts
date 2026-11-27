@@ -49,6 +49,8 @@ afterEach(async () => {
 
 function setup(config: Config = cfg) {
   const tracker = new FakeTracker();
+  // GitHub's clock: after BEFORE, a little behind the local clock (2026-06-01), before AFTER.
+  tracker.startClockAt('2026-05-15T00:00:00.000Z');
   tracker.owners = [...config.owners];
   tracker.agents = [...config.agents];
   const out: unknown[] = [];
@@ -313,6 +315,18 @@ describe('stagePublish', () => {
     expect(comment.body).toContain('### Brainstorming — revision 1');
     expect(comment.body).toContain('Decision: use the index.');
     expect(comment.body).toContain('Approve with /approve');
+  });
+
+  it('records the time GitHub created the summary comment as the publication time, not the local clock', async () => {
+    const h = setup();
+    h.tracker.startClockAt('2026-06-15T00:00:00.000Z'); // GitHub's clock, apart from the local one
+    const issue = await pausedFeature(h);
+
+    const [comment] = visibleComments(h.tracker, issue);
+    const state = await stateOf(h.tracker, issue);
+    expect(comment.createdAt.startsWith('2026-06-15')).toBe(true);
+    expect(state.stages.brainstorming?.publishedAt).toBe(comment.createdAt);
+    expect(state.updatedAt).toBe(comment.createdAt);
   });
 
   it('posts a new revision each time and leaves the task running without approval', async () => {

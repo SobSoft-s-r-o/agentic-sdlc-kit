@@ -1,9 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import type { Command } from 'commander';
 import { renderStageSummary } from '../core/summary.js';
-import type { Phase, TaskState } from '../core/types.js';
+import { applyEvent } from '../core/stateMachine.js';
+import type { Phase, TaskEvent, TaskState } from '../core/types.js';
 import {
   commit,
+  loadTask,
+  persist,
   describeState,
   parseIssueNumber,
   parsePhase,
@@ -27,7 +30,8 @@ async function readSummary(file: string): Promise<string> {
 }
 
 /**
- * Publishes the stage result in `file` as a comment on the issue, then records the new revision.
+ * Publishes the stage result in `file` as a comment on the issue, then records the new revision,
+ * published at the time GitHub created that comment (an owner's reply is then always newer).
  * With `needsApproval` the task pauses waiting on the owner. A failed comment leaves the state alone.
  */
 export async function stagePublish(
@@ -37,23 +41,19 @@ export async function stagePublish(
   input: { file: string; needsApproval: boolean },
 ): Promise<TaskState> {
   const markdown = await readSummary(input.file);
-  return commit(
-    ctx,
-    issue,
-    { kind: 'stage_published', phase, needsApproval: input.needsApproval },
-    {
-      beforeWrite: async next => {
-        const body = renderStageSummary({
-          phase,
-          revision: next.stages[phase]?.revision ?? 1,
-          markdown,
-          needsApproval: input.needsApproval,
-        });
-        await trackerStep('postComment', issue, () => ctx.tracker.postComment(issue, body), 'the state was not changed');
-      },
-      writeHint: 'the stage summary was posted; the state was not changed',
-    },
-  );
+  const loaded = await loadTask(ctx, issue);
+  const event: TaskEvent = { kind: 'stage_published', phase, needsApproval: input.needsApproval };
+  // Checks the event before anything is posted, and gives the revision the comment names.
+  const preview = applyEvent(loaded.task.state, event, loaded.type, ctx.now());
+  const body = renderStageSummary({
+    phase,
+    revision: preview.stages[phase]?.revision ?? 1,
+    markdown,
+    needsApproval: input.needsApproval,
+  });
+  const posted = await trackerStep('postComment', issue, () => ctx.tracker.postComment(issue, body), 'the state was not changed');
+  const next = applyEvent(loaded.task.state, event, loaded.type, posted.createdAt);
+  return persist(ctx, loaded, next, { writeHint: 'the stage summary was posted; the state was not changed' });
 }
 
 /** Registers `sdlc stage start|publish`. */

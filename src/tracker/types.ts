@@ -79,6 +79,12 @@ export interface PrInfo {
   body: string;
 }
 
+/** A comment just posted: its id and GitHub's creation time. */
+export interface PostedComment {
+  id: string;
+  createdAt: string;
+}
+
 export interface DeploymentInfo {
   id: number;
   sha: string;
@@ -132,8 +138,8 @@ export interface Tracker {
    * writing nothing, unless it is still that comment with that `updated_at`.
    */
   writeState(issue: number, state: TaskState, expected?: ExpectedStateComment): Promise<void>;
-  /** Posts a comment and returns its id. */
-  postComment(issue: number, body: string): Promise<string>;
+  /** Posts a comment and returns its id and the time GitHub created it. */
+  postComment(issue: number, body: string): Promise<PostedComment>;
   /**
    * Lists comments oldest first. `issue` may be an issue or a pull request number: GitHub's
    * issue-comments API serves both. With `sinceIso`, only comments created after it are returned.
