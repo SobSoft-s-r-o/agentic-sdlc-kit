@@ -77,6 +77,13 @@ describe('buildTypeRegistry', () => {
     expect(() => buildTypeRegistry(['feature'], [{ ...infraChange, id: 'feature' }])).toThrow(ConfigError);
   });
 
+  it('rejects duplicate enabled ids', () => {
+    expect(() => buildTypeRegistry(['feature', 'spike', 'feature'], [])).toThrow(ConfigError);
+    expect(() => buildTypeRegistry(['feature', 'spike', 'feature'], [])).toThrow(
+      /duplicate enabled task type id "feature"/,
+    );
+  });
+
   it('rejects duplicate custom ids', () => {
     const dup = [infraChange, { ...infraChange, label: 'Infra change (second)' }];
     expect(() => buildTypeRegistry([], dup)).toThrow(ConfigError);

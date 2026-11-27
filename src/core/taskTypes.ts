@@ -80,8 +80,8 @@ export const BUILTIN_TYPES: readonly TaskTypeDef[] = [
 
 /**
  * Builds the task type registry from the enabled built-in ids plus all custom types.
- * Throws ConfigError if an enabled id is not a built-in, a custom id shadows a built-in,
- * or two custom types share an id.
+ * Throws ConfigError if an enabled id is not a built-in or is listed twice, a custom id shadows
+ * a built-in, or two custom types share an id.
  */
 export function buildTypeRegistry(
   enabled: string[],
@@ -91,7 +91,13 @@ export function buildTypeRegistry(
   const problems: string[] = [];
   const registry = new Map<string, TaskTypeDef>();
 
+  const seenEnabled = new Set<string>();
   for (const id of enabled) {
+    if (seenEnabled.has(id)) {
+      problems.push(`duplicate enabled task type id "${id}"`);
+      continue;
+    }
+    seenEnabled.add(id);
     const def = builtins.get(id);
     if (def) {
       registry.set(id, def);

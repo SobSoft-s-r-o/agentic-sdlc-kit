@@ -37,13 +37,14 @@ export type Harness = (typeof HARNESSES)[number];
 
 /** Lowercase kebab-case: safe inside `type:<id>` labels and comma-separated `Targets:` lists. */
 const SLUG = /^[a-z0-9][a-z0-9-]*$/;
+const SLUG_MESSAGE = 'must be lowercase kebab-case (a-z, 0-9 and hyphens, e.g. "my-target")';
 const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 const nonEmpty = z.string().min(1);
 
 const CustomTypeSchema = z
   .strictObject({
-    id: z.string().regex(SLUG, 'must be lowercase kebab-case (letters, digits, hyphens)'),
+    id: z.string().regex(SLUG, SLUG_MESSAGE),
     label: nonEmpty,
     phases: z.array(z.enum(PHASES satisfies Exhaustive<Phase, typeof PHASES>)).min(1),
     ends_on: z.enum(ENDS_ON satisfies Exhaustive<EndsOn, typeof ENDS_ON>),
@@ -64,7 +65,7 @@ const CustomTypeSchema = z
   );
 
 const RawTargetSchema = z.strictObject({
-  name: z.string().regex(SLUG, 'must be lowercase kebab-case (letters, digits, hyphens)'),
+  name: z.string().regex(SLUG, SLUG_MESSAGE),
   environment: nonEmpty.optional(),
   deploy: z.strictObject({
     via: z.enum(DEPLOY_VIA),
@@ -76,12 +77,12 @@ const RawTargetSchema = z.strictObject({
 
 const ModelTiersSchema = z.strictObject({ deep: nonEmpty, standard: nonEmpty, fast: nonEmpty });
 
-export interface TargetConfig {
+export type TargetConfig = {
   name: string;
   environment: string;
   deploy: { via: (typeof DEPLOY_VIA)[number]; command?: string; workflow?: string };
   paths: string[];
-}
+};
 
 const RawConfigSchema = z
   .strictObject({
@@ -155,11 +156,12 @@ const RawConfigSchema = z
 
     if (cfg.targets.length === 0) {
       for (const def of registry.values()) {
-        if (def.endsOn === 'deploy') {
+        if (def.endsOn === 'deploy' || def.targetsRequired) {
+          const reason = def.endsOn === 'deploy' ? 'ends on deploy' : 'declares targets';
           ctx.addIssue({
             code: 'custom',
             path: ['targets'],
-            message: `task type "${def.id}" ends on deploy and requires at least one target (add a target or disable the type)`,
+            message: `task type "${def.id}" ${reason} and requires at least one target (add a target or disable the type)`,
           });
         }
       }
@@ -221,7 +223,11 @@ function formatPath(path: ReadonlyArray<PropertyKey>): string {
   );
 }
 
-/** Parses and validates `sdlc.config.yaml` text. Throws ConfigError listing every issue path. */
+/**
+ * Parses and validates `sdlc.config.yaml` text. Throws ConfigError listing the issue paths:
+ * field-level issues are reported first; cross-field checks (unique targets, task type rules)
+ * run once those are fixed.
+ */
 export function parseConfig(text: string): Config {
   let raw: unknown;
   try {

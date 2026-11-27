@@ -172,6 +172,37 @@ describe('parseConfig / loadConfig', () => {
     expect(msg).toContain('duplicate target name "web"');
   });
 
+  it('refuses target names that are not lowercase kebab-case', () => {
+    for (const name of ['Web', 'web_app', 'web app', '-web']) {
+      const msg = messageOf(
+        config({ targets: `targets:\n  - { name: "${name}", deploy: { via: manual } }\n` }),
+      );
+      expect(msg).toContain('targets[0].name');
+      expect(msg).toContain('lowercase kebab-case');
+    }
+  });
+
+  it('refuses custom type ids that are not lowercase kebab-case', () => {
+    for (const id of ['Infra', 'infra_change', 'infra change']) {
+      const msg = messageOf(
+        config({
+          taskTypes: `task_types:
+  enabled: []
+  custom:
+    - { id: "${id}", label: Infra, phases: [intake], ends_on: merge }
+`,
+        }),
+      );
+      expect(msg).toContain('task_types.custom[0].id');
+      expect(msg).toContain('lowercase kebab-case');
+    }
+  });
+
+  it('refuses any version other than 1', () => {
+    const msg = messageOf(config({ header: HEADER.replace('version: 1', 'version: 2') }));
+    expect(msg).toContain('version');
+  });
+
   it('refuses deploy-ending types enabled with no targets', () => {
     const msg = messageOf(
       config({ taskTypes: 'task_types:\n  enabled: [feature]\n', targets: 'targets: []\n' }),
@@ -192,6 +223,34 @@ describe('parseConfig / loadConfig', () => {
     );
     expect(msg).toContain('requires at least one target');
     expect(msg).toContain('infra-change');
+  });
+
+  it('refuses a custom type that requires targets when no target is configured', () => {
+    const msg = messageOf(
+      config({
+        taskTypes: `task_types:
+  enabled: []
+  custom:
+    - { id: rollout, label: Rollout, phases: [intake, delivery], ends_on: merge, targets_required: true }
+`,
+      }),
+    );
+    expect(msg).toContain('requires at least one target');
+    expect(msg).toContain('rollout');
+  });
+
+  it('accepts a custom targets_required type once a target exists', () => {
+    const cfg = parseConfig(
+      config({
+        taskTypes: `task_types:
+  enabled: []
+  custom:
+    - { id: rollout, label: Rollout, phases: [intake, delivery], ends_on: merge, targets_required: true }
+`,
+        targets: 'targets:\n  - { name: web, deploy: { via: manual } }\n',
+      }),
+    );
+    expect(cfg.taskTypes.custom[0].targetsRequired).toBe(true);
   });
 
   it('accepts deploy-ending types once a target exists', () => {
@@ -225,6 +284,11 @@ describe('parseConfig / loadConfig', () => {
     const msg = messageOf(config({ taskTypes: 'task_types:\n  enabled: [feature, hotfix]\n' }));
     expect(msg).toContain('task_types');
     expect(msg).toContain('hotfix');
+  });
+
+  it('refuses duplicate enabled type ids', () => {
+    const msg = messageOf(config({ taskTypes: 'task_types:\n  enabled: [tooling, spike, tooling]\n' }));
+    expect(msg).toContain('duplicate enabled task type id "tooling"');
   });
 
   it('refuses a custom type that shadows a built-in', () => {
