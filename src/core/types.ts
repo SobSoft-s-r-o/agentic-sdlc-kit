@@ -39,3 +39,66 @@ export interface TaskTypeDef {
   requiresBeforeReview: EvidenceKind[];
   targetsRequired: boolean;
 }
+
+export interface Approval {
+  source: 'prompt' | 'comment' | 'unverified';
+  ref: string;
+  by: string;
+  at: string;
+}
+
+export interface PrRecord {
+  number: number;
+  scope: 'partial' | 'final';
+  mergeSha?: string;
+}
+
+export interface StageRecord {
+  revision: number;
+  publishedAt?: string;
+  approval?: Approval;
+}
+
+export interface TaskState {
+  schema: 1;
+  issue: number;
+  type: string;
+  status: Status;
+  phase: Phase;
+  waitingOn: WaitingOn;
+  summary: string;
+  currentStep: string;
+  nextStep: string;
+  agent: string;
+  targets: string[];
+  pendingTargets: string[];
+  prs: PrRecord[];
+  stages: Partial<Record<Phase, StageRecord>>;
+  evidence: { kind: EvidenceKind; ref: string; at: string }[];
+  outcome?: 'completed' | 'cancelled';
+  cancelReason?: string;
+  resultPublishedAt?: string;
+  deliveredBy?: string[];
+  updatedAt: string;
+}
+
+export type TaskEvent =
+  | { kind: 'phase_started'; phase: Phase }
+  | { kind: 'stage_published'; phase: Phase; needsApproval: boolean }
+  | { kind: 'stage_approved'; phase: Phase; approval: Approval }
+  | { kind: 'evidence_added'; evidenceKind: EvidenceKind; ref: string }
+  | { kind: 'review_handoff'; pr: number; scope: 'partial' | 'final'; targets: string[] }
+  | { kind: 'pr_merged'; pr: number; scope: 'partial' | 'final'; mergeSha: string }
+  | { kind: 'targets_deployed'; targets: string[]; deploymentUrls: string[] }
+  | { kind: 'accepted'; approval: Approval }
+  | { kind: 'confirmed_ran'; approval: Approval }
+  | { kind: 'cancelled'; reason: string; approval: Approval }
+  | { kind: 'reopened' }
+  | {
+      kind: 'checkpoint';
+      currentStep?: string;
+      nextStep?: string;
+      agent?: string;
+      waitingOn?: WaitingOn;
+      status?: 'in_progress' | 'blocked';
+    };
