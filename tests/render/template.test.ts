@@ -252,3 +252,43 @@ describe('block errors', () => {
     expect(() => render(source, { x: true })).toThrow('unknown value "missing" at line 5');
   });
 });
+
+describe('escaped braces', () => {
+  it('renders \\{{ as a literal {{ and leaves the tag text alone', () => {
+    expect(render('x: $\\{{ secrets.SDLC_TOKEN }}')).toBe('x: ${{ secrets.SDLC_TOKEN }}');
+    expect(render('GH_TOKEN: ${{ secrets.X }}'.replace('${{', '$\\{{'))).toBe('GH_TOKEN: ${{ secrets.X }}');
+  });
+
+  it('does not evaluate or parse what is between the escaped {{ and the next }}', () => {
+    expect(render('\\{{#if nope}}')).toBe('{{#if nope}}');
+    expect(render('\\{{/each}} \\{{else}}')).toBe('{{/each}} {{else}}');
+    expect(render('\\{{ {{missing}} }}')).toBe('{{ {{missing}} }}');
+    expect(render('\\{{a b c}}')).toBe('{{a b c}}');
+  });
+
+  it('keeps a real tag after the escaped text working', () => {
+    expect(render('\\{{ lit }} {{v}} \\{{ lit2 }}', { v: 'real' })).toBe('{{ lit }} real {{ lit2 }}');
+    expect(render('{{v}}\\{{x}}{{v}}', { v: 'a' })).toBe('a{{x}}a');
+  });
+
+  it('is plain text when no }} follows', () => {
+    expect(render('open \\{{ and never closed')).toBe('open {{ and never closed');
+    expect(render('{{v}} \\{{ lit\nmore', { v: 'a' })).toBe('a {{ lit\nmore');
+    // A later tag's }} closes the escaped span, so that tag stays literal too.
+    expect(render('\\{{ lit\n{{v}}', { v: 'a' })).toBe('{{ lit\n{{v}}');
+  });
+
+  it('works inside blocks and keeps the standalone-line rule', () => {
+    expect(render('a\n{{#if x}}\n\\{{ lit }}\n{{/if}}\nb', { x: true })).toBe('a\n{{ lit }}\nb');
+    expect(render('{{#each xs}}\n  \\{{ {{.}} }}\n{{/each}}\n', { xs: [1, 2] })).toBe('  {{ {{.}} }}\n  {{ {{.}} }}\n');
+    expect(render('a\n  \\{{#if x}}\nb', {})).toBe('a\n  {{#if x}}\nb');
+  });
+
+  it('counts the lines inside an escaped span', () => {
+    expect(() => render('\\{{ a\nb }}\n{{missing}}')).toThrow('unknown value "missing" at line 3');
+  });
+
+  it('only a backslash directly before {{ escapes', () => {
+    expect(render('a\\b {{v}}', { v: 'c' })).toBe('a\\b c');
+  });
+});

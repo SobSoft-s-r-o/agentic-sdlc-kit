@@ -21,9 +21,14 @@
  * Outside `each`, `.` is unknown and every other path resolves against the root. Lookups only see
  * own properties of plain objects, so `constructor` or `__proto__.x` are unknown values.
  *
- * Parsing is one pass over the source into a tree; evaluation walks the tree. There is no escape
- * for a literal `{{`: a source that needs one (e.g. GitHub Actions `${{ … }}`) must not be rendered
- * through this engine.
+ * Escape. A backslash directly before `{{` (`\{{`) drops the backslash and makes the `{{` literal
+ * text; nothing from there up to and including the next `}}` is parsed or evaluated, so
+ * `$\{{ secrets.X }}` renders `${{ secrets.X }}` (GitHub Actions expressions). Without a later
+ * `}}`, only the `{{` is literal. A tag the escape swallows does not count as a block tag, and a
+ * line holding one is never standalone. A backslash anywhere else is plain text, and there is no
+ * way to write a literal backslash right before a real tag.
+ *
+ * Parsing is one pass over the source into a tree; evaluation walks the tree.
  */
 
 /** A template that cannot be parsed or evaluated; the message starts with the template's name. */
@@ -121,6 +126,15 @@ function parse(source: string, name: string): Node[] {
   };
 
   for (let open = source.indexOf('{{'); open !== -1; open = source.indexOf('{{', textStart)) {
+    if (open > 0 && source[open - 1] === '\\') {
+      // Escaped: keep `{{` and everything through the next `}}` as text, without the backslash.
+      pushText(open - 1);
+      const swallowed = source.indexOf('}}', open + 2);
+      const literalEnd = swallowed === -1 ? open + 2 : swallowed + 2;
+      out.push({ kind: 'text', text: source.slice(open, literalEnd) });
+      textStart = literalEnd;
+      continue;
+    }
     line += countNewlines(source, counted, open);
     counted = open;
     const close = source.indexOf('}}', open + 2);
