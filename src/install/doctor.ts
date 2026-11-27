@@ -86,13 +86,10 @@ function ghReason(error: unknown): string {
   return describeError(error);
 }
 
-/** The line of `gh auth status` that says what is wrong, else its first line. */
-function authProblem(text: string): string {
-  const lines = text
-    .split('\n')
-    .map(line => line.trim().replace(/^[X✗!-]\s+/, ''))
-    .filter(line => line !== '');
-  return describeError(lines.find(line => /not logged|failed|invalid|expired|error/i.test(line)) ?? lines[0] ?? '');
+/** `failed (exit N)` and, when the program said something on stderr, its first line as one printable line. Never stdout: it can hold other people's credentials. */
+function failure(code: number, stderr: string): string {
+  const first = stderr.split('\n').map(line => line.trim()).find(line => line !== '');
+  return first === undefined ? `failed (exit ${code})` : `failed (exit ${code}): ${describeError(first)}`;
 }
 
 const list = (items: readonly string[], max = 8): string =>
@@ -222,7 +219,7 @@ function checkConfigPresent(env: DoctorEnv): Check {
 /** The reason the checks that call `gh` cannot run, from the preflight's results; `undefined` when `gh` is usable. */
 function ghBlocker(preflight: Check[]): string | undefined {
   if (preflight.find(check => check.id === 'gh.installed')?.status !== 'ok') return 'gh is not installed';
-  if (preflight.find(check => check.id === 'gh.auth')?.status !== 'ok') return 'gh is not authenticated';
+  if (preflight.find(check => check.id === 'gh.auth')?.status !== 'ok') return 'gh auth status did not succeed';
   return undefined;
 }
 
@@ -252,7 +249,7 @@ export async function runPreflight(env: DoctorEnv, options: PreflightOptions = {
           const result = await env.run(['auth', 'status']);
           const output = `${result.stdout}\n${result.stderr}`;
           if (result.code !== 0) {
-            return fail('gh.auth', `gh is not logged in: ${authProblem(output)}`, 'gh auth login');
+            return fail('gh.auth', `gh auth status ${failure(result.code, result.stderr)}`, 'gh auth login');
           }
           status = output;
           const account = activeAccount(accountBlocks(output));
@@ -348,12 +345,22 @@ async function checkBoard(env: DoctorEnv, cfg: Config): Promise<Check> {
   const id = 'board.fields';
   const result = await ensureBoard(env.run, cfg, { dryRun: true });
   if (result.wouldCreateProject) return fail(id, 'no board is configured: github.project.number is not set', 'sdlc board ensure');
-  const planned = [
+  const structure = [
     ...(result.plan.createFields.length > 0 ? [`missing fields: ${list(result.plan.createFields.map(field => field.name))}`] : []),
     ...result.plan.addOptions.map(change => `missing options of ${change.fieldName}: ${list(change.missing)}`),
-    ...(result.viewsPlanned.length > 0 ? [`missing views: ${list(result.viewsPlanned)}`] : []),
   ];
-  if (planned.length > 0) return fail(id, `board #${result.projectNumber}: ${planned.join('; ')}`, 'sdlc board ensure');
+  const views = result.viewsPlanned.length > 0 ? `missing views: ${list(result.viewsPlanned)}` : undefined;
+  if (structure.length > 0) {
+    return fail(id, `board #${result.projectNumber}: ${[...structure, ...(views === undefined ? [] : [views])].join('; ')}`, 'sdlc board ensure');
+  }
+  // Views alone do not stop the workflow, and the API cannot create every kind of view.
+  if (views !== undefined) {
+    return warn(
+      id,
+      `board #${result.projectNumber}: ${views} (run sdlc board ensure; if the API cannot create them, create them manually)`,
+      'sdlc board ensure',
+    );
+  }
   return ok(id, `board #${result.projectNumber} has every field, option and view`);
 }
 
@@ -377,8 +384,16 @@ async function checkActionsSecret(env: DoctorEnv, cfg: Config): Promise<Check> {
   try {
     const secrets = await ghJson<Array<{ name?: string }> | undefined>(env.run, ['secret', 'list', '--repo', cfg.github.repo, '--json', 'name']);
     if ((secrets ?? []).some(secret => secret.name === SECRET_NAME)) return ok(id, `${SECRET_NAME} is set as a repository secret`);
-    return fail(id, `${SECRET_NAME} is not set as a repository secret`, `gh secret set ${SECRET_NAME}`);
+    return fail(
+      id,
+      `${SECRET_NAME} is not set as a repository secret (organization-level secrets are not visible to this check)`,
+      `gh secret set ${SECRET_NAME}`,
+    );
   } catch (error) {
+    // Listing secrets needs admin access: without it the secret cannot be told apart from a missing one.
+    if (error instanceof GhError && /\bHTTP 403\b/.test(error.stderr)) {
+      return warn(id, `cannot verify ${SECRET_NAME} (needs admin access to list secrets)`);
+    }
     return fail(id, `cannot list the repository secrets: ${ghReason(error)}`);
   }
 }
@@ -411,7 +426,8 @@ async function checkMcpClaude(env: DoctorEnv, cfg: Config): Promise<Check> {
     return warn(id, `could not run claude mcp list: ${describeError(error)}`);
   }
   if (result.code !== 0) {
-    return warn(id, `claude mcp list failed (exit code ${result.code}): ${describeError(result.stderr.trim() || result.stdout.trim())}`);
+    // Only the exit code and the first line of stderr: stdout can list other servers with their credentials.
+    return warn(id, `claude mcp list ${failure(result.code, result.stderr)}`);
   }
   // `<id>: <command or url> - <status>` per server; an id counts only when it is the whole name.
   const listed = new Set(
@@ -429,16 +445,22 @@ async function checkMcpClaude(env: DoctorEnv, cfg: Config): Promise<Check> {
   );
 }
 
+/** Inactive when the hooks path is wrong or `sdlc` is missing; failing to read the hooks path is "cannot verify" (still a fail), not a wrong path. */
 function checkSecretGuard(hooks: Hooks, sdlcResolvable: boolean): Check {
   const id = 'secrets.guard';
   const hooksOk = hooksActive(hooks);
   if (hooksOk && sdlcResolvable) return ok(id, `the pre-commit secret guard is active (core.hooksPath ${HOOKS_PATH}, sdlc resolvable)`);
+  const unreadable = 'error' in hooks;
   const problems = [
-    ...(hooksOk ? [] : ['core.hooksPath is not ' + HOOKS_PATH]),
+    ...(hooksOk ? [] : [unreadable ? `could not read core.hooksPath (${describeError(hooks.error)})` : `core.hooksPath is not ${HOOKS_PATH}`]),
     ...(sdlcResolvable ? [] : ['sdlc cannot be found, so the hook skips']),
   ];
-  const fixes = [...(hooksOk ? [] : ['sdlc init']), ...(sdlcResolvable ? [] : ['install sdlc (see INSTALL.md)'])];
-  return fail(id, `secret guard inactive: ${problems.join('; ')}`, fixes.join('; '));
+  const fixes = [
+    ...(hooksOk ? [] : [unreadable ? 'make sure git works in this repository (git config --get core.hooksPath)' : 'sdlc init']),
+    ...(sdlcResolvable ? [] : ['install sdlc (see INSTALL.md)']),
+  ];
+  const only = unreadable && sdlcResolvable;
+  return fail(id, `secret guard ${only ? 'cannot be verified' : 'inactive'}: ${problems.join('; ')}`, fixes.join('; '));
 }
 
 /** The reason GitHub gives when it will not show the settings: a plan without them, or a token without admin rights. */
@@ -466,7 +488,7 @@ async function checkPushProtection(env: DoctorEnv, cfg: Config): Promise<Check> 
   return warn(id, `push protection: ${state.pushProtection}; secret scanning: ${state.secretScanning}`, 'sdlc init');
 }
 
-/** Tracked file names the commit guard would refuse (`.env`, `*.pem`, ...) minus the fingerprints accepted in `secrets.allow`. Paths only, never contents. */
+/** Tracked file names the commit guard would refuse (`.env`, `*.pem`, ...) minus the fingerprints accepted in `secrets.allow`. A warning (spec 14a). Paths only, never contents. */
 async function checkTrackedFiles(env: DoctorEnv, cfg: Config): Promise<Check> {
   const id = 'secrets.trackedFiles';
   const result = await env.git(['ls-files', '-z']);
@@ -478,7 +500,7 @@ async function checkTrackedFiles(env: DoctorEnv, cfg: Config): Promise<Check> {
     return finding !== undefined && !accepted.has(finding.fingerprint);
   });
   if (hits.length === 0) return ok(id, `no tracked file name looks like it holds a secret (${files.length} files checked)`);
-  return fail(
+  return warn(
     id,
     `tracked files that look like they hold secrets: ${list(hits.map(printable), 10)}`,
     'git rm --cached <file>, rotate the secret, store it in the keystore',

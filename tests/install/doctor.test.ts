@@ -71,7 +71,11 @@ const LABELS = ['sdlc:task', 'sdlc:partial', 'type:tooling', 'type:analysis'];
 const SECURITY_ON = JSON.stringify({ secret_scanning: { status: 'enabled' }, secret_scanning_push_protection: { status: 'enabled' } });
 
 /** A board that already has every field, option and view of `cfg`. */
-function boardOf(cfg: Config, mutate: (nodes: Array<Record<string, unknown>>) => Array<Record<string, unknown>> = n => n): FakeGhStep {
+function boardOf(
+  cfg: Config,
+  mutate: (nodes: Array<Record<string, unknown>>) => Array<Record<string, unknown>> = n => n,
+  views: string[] = VIEWS,
+): FakeGhStep {
   const nodes = mutate([
     { id: 'F_title', name: 'Title', dataType: 'TITLE' },
     ...desiredFields(cfg).map((f, i) => ({
@@ -84,7 +88,7 @@ function boardOf(cfg: Config, mutate: (nodes: Array<Record<string, unknown>>) =>
   return {
     match: ['graphql'],
     stdout: JSON.stringify({
-      data: { owner: { projectV2: { id: 'PVT_1', number: 7, fields: { nodes }, views: { nodes: VIEWS.map(name => ({ name })) } } } },
+      data: { owner: { projectV2: { id: 'PVT_1', number: 7, fields: { nodes }, views: { nodes: views.map(name => ({ name })) } } } },
     }),
   };
 }
@@ -288,7 +292,7 @@ describe('runPreflight', () => {
       expect(h.gh.calls).toEqual([]);
     });
 
-    it('fails when gh auth status fails, with gh auth login as the fix and the first line of what gh said', async () => {
+    it('fails when gh auth status fails: neutral wording with the exit code and the first line of stderr, and gh auth login as the fix', async () => {
       const h = harness({
         gh: [{ match: ['auth', 'status'], code: 1, stderr: 'You are not logged into any GitHub hosts. To log in, run: gh auth login\nsecond line\n' }],
       });
@@ -296,12 +300,23 @@ describe('runPreflight', () => {
 
       const auth = byId(checks, 'gh.auth');
       expect(auth.status).toBe('fail');
-      expect(auth.message).toContain('You are not logged into any GitHub hosts');
+      expect(auth.message).toBe('gh auth status failed (exit 1): You are not logged into any GitHub hosts. To log in, run: gh auth login');
       expect(auth.message).not.toContain('second line');
+      expect(auth.message).not.toMatch(/not logged in:/);
       expect(auth.fix).toBe('gh auth login');
       expect(byId(checks, 'gh.scopes').message).toMatch(/^not checked/);
       expect(byId(checks, 'repo.remote').message).toMatch(/^not checked/);
       expect(h.gh.calls).toEqual([['auth', 'status']]);
+    });
+
+    it('does not claim the user is logged out, and never prints stdout, when gh auth status fails for another reason', async () => {
+      const h = harness({ gh: [{ match: ['auth', 'status'], code: 4, stdout: 'Token: sensitive-stdout-line\n', stderr: '' }] });
+      const auth = byId(await runPreflight(h.env), 'gh.auth');
+
+      expect(auth.status).toBe('fail');
+      expect(auth.message).toBe('gh auth status failed (exit 4)');
+      expect(auth.message).not.toContain('sensitive');
+      expect(auth.fix).toBe('gh auth login');
     });
 
     it('names the account gh is logged in as', async () => {
@@ -699,6 +714,30 @@ describe('runDoctor', () => {
       expect(mutations(h.gh)).toEqual([]);
     });
 
+    it('warns, not fails, when only views are missing, and says to create them manually if the API cannot', async () => {
+      const cfg = cfgOf(CONFIG);
+      const h = harness({ gh: ghScript(cfg, { board: boardOf(cfg, undefined, ['Board', 'In flight']) }) });
+      const check = byId(await runDoctor(h.env, cfg), 'board.fields');
+
+      expect(check.status).toBe('warn');
+      expect(check.message).toContain('missing views: Awaiting deployment, Waiting on owner');
+      expect(check.message).toContain('run sdlc board ensure; if the API cannot create them, create them manually');
+      expect(check.message).not.toContain('missing fields');
+      expect(check.fix).toBe('sdlc board ensure');
+      expect(mutations(h.gh)).toEqual([]);
+    });
+
+    it('fails when fields and views are both missing, naming both', async () => {
+      const cfg = cfgOf(CONFIG);
+      const h = harness({ gh: ghScript(cfg, { board: boardOf(cfg, nodes => nodes.filter(node => node['name'] !== 'Status'), ['Board']) }) });
+      const check = byId(await runDoctor(h.env, cfg), 'board.fields');
+
+      expect(check.status).toBe('fail');
+      expect(check.message).toContain('missing fields: Status');
+      expect(check.message).toContain('missing views: In flight');
+      expect(check.fix).toBe('sdlc board ensure');
+    });
+
     it('fails when an option of a field is missing', async () => {
       const cfg = cfgOf(CONFIG);
       const h = harness({
@@ -797,15 +836,24 @@ describe('runDoctor', () => {
       const check = byId(await runDoctor(h.env, cfg), 'actions.secret');
       expect(check.status).toBe('fail');
       expect(check.message).toContain('SDLC_TOKEN');
+      expect(check.message).toContain('(organization-level secrets are not visible to this check)');
       expect(check.fix).toBe('gh secret set SDLC_TOKEN');
     });
 
-    it('fails with the reason when the secrets cannot be listed', async () => {
+    it('warns that it cannot verify SDLC_TOKEN when GitHub answers 403 (listing secrets needs admin access)', async () => {
       const cfg = cfgOf(CONFIG);
-      const h = harness({ gh: ghScript(cfg, { secrets: { match: ['secret', 'list'], code: 1, stderr: 'HTTP 403: Resource not accessible\n' } }) });
+      const h = harness({ gh: ghScript(cfg, { secrets: { match: ['secret', 'list'], code: 1, stderr: 'HTTP 403: Resource not accessible by personal access token\n' } }) });
+      const check = byId(await runDoctor(h.env, cfg), 'actions.secret');
+      expect(check.status).toBe('warn');
+      expect(check.message).toBe('cannot verify SDLC_TOKEN (needs admin access to list secrets)');
+    });
+
+    it('fails with the reason when the secrets cannot be listed for another reason', async () => {
+      const cfg = cfgOf(CONFIG);
+      const h = harness({ gh: ghScript(cfg, { secrets: { match: ['secret', 'list'], code: 1, stderr: 'HTTP 500: Server Error\nsecond line\n' } }) });
       const check = byId(await runDoctor(h.env, cfg), 'actions.secret');
       expect(check.status).toBe('fail');
-      expect(check.message).toContain('403');
+      expect(check.message).toContain('500');
       expect(check.message).not.toContain('\n');
     });
   });
@@ -898,6 +946,28 @@ describe('runDoctor', () => {
       expect(check.message).toContain('github');
     });
 
+    it('on a failing claude mcp list prints the exit code and the first line of stderr only, never stdout', async () => {
+      const claude = {
+        stdout: `other: https://x.test/mcp?token=${githubToken()} (HTTP) - failed\n`,
+        code: 2,
+        stderr: 'boom\u001b[31m happened\nsecond line\n',
+      };
+      const check = byId(await runDoctor(harness({ exec: { claude } }).env, cfgOf(CONFIG)), 'mcp.claude');
+
+      expect(check.status).toBe('warn');
+      expect(check.message).toBe('claude mcp list failed (exit 2): boom happened');
+      expect(check.message).not.toContain(githubToken());
+      expect(check.message).not.toContain('other');
+    });
+
+    it('with a failing claude mcp list and an empty stderr says only the exit code, not stdout', async () => {
+      const claude = { stdout: `leak ${githubToken()}\n`, code: 1, stderr: '' };
+      const check = byId(await runDoctor(harness({ exec: { claude } }).env, cfgOf(CONFIG)), 'mcp.claude');
+
+      expect(check.status).toBe('warn');
+      expect(check.message).toBe('claude mcp list failed (exit 1)');
+    });
+
     it('warns, and does not fail, when claude mcp list fails or cannot run', async () => {
       for (const claude of [{ stdout: '', code: 1, stderr: 'boom' }, new Error('claude timed out after 120s')]) {
         const check = byId(await runDoctor(harness({ exec: { claude } }).env, cfgOf(CONFIG)), 'mcp.claude');
@@ -932,6 +1002,31 @@ describe('runDoctor', () => {
       expect(check.message).toMatch(/^secret guard inactive/);
       expect(check.fix).toMatch(/install sdlc/);
       expect(check.fix).not.toContain('sdlc init');
+    });
+
+    it('says it could not verify the hooks path, still failing, when git cannot read core.hooksPath', async () => {
+      const h = harness();
+      const base = h.env.git;
+      h.env.git = async args =>
+        args.join(' ') === 'config --get core.hooksPath' ? { stdout: '', code: 128, stderr: 'fatal: bad config line 1 in file .git/config' } : base(args);
+      const check = byId(await runDoctor(h.env, h.cfg), 'secrets.guard');
+
+      expect(check.status).toBe('fail');
+      expect(check.message).toMatch(/^secret guard cannot be verified: could not read core\.hooksPath \(.*bad config line 1/);
+      expect(check.message).not.toMatch(/inactive|is not \.sdlc\/githooks/);
+      expect(check.fix).toContain('git config --get core.hooksPath');
+      expect(check.fix).not.toContain('sdlc init');
+    });
+
+    it('is inactive, not just unverifiable, when core.hooksPath cannot be read and sdlc cannot be found', async () => {
+      const h = harness({ installed: ['git', 'gh'] });
+      const base = h.env.git;
+      h.env.git = async args => (args.join(' ') === 'config --get core.hooksPath' ? { stdout: '', code: 128, stderr: 'fatal: bad config' } : base(args));
+      const check = byId(await runDoctor(h.env, h.cfg), 'secrets.guard');
+
+      expect(check.status).toBe('fail');
+      expect(check.message).toMatch(/^secret guard inactive: could not read core\.hooksPath .*; sdlc cannot be found/);
+      expect(check.fix).toMatch(/install sdlc/);
     });
 
     it('gives both fixes when both are wrong', async () => {
@@ -994,11 +1089,11 @@ describe('runDoctor', () => {
       expect((await tracked(['README.md', '.env.example', 'src/keys.ts', 'docs/credentials.md'])).status).toBe('ok');
     });
 
-    it('fails and lists only the paths of tracked files matching the file-name rules', async () => {
+    it('warns (spec 14a) and lists only the paths of tracked files matching the file-name rules', async () => {
       const files = ['.env', 'deploy/server.pem', 'README.md', 'a/b/id_rsa', '.env.example'];
       const check = await tracked(files);
 
-      expect(check.status).toBe('fail');
+      expect(check.status).toBe('warn');
       for (const hit of ['.env', 'deploy/server.pem', 'a/b/id_rsa']) expect(check.message).toContain(hit);
       expect(check.message).not.toContain('README.md');
       expect(check.message).not.toContain('.env.example');
@@ -1019,14 +1114,14 @@ describe('runDoctor', () => {
       const cfg = cfgOf(configWith(`secrets: { allow: ["${finding?.fingerprint}"] }\n`));
       const check = await tracked(['config/service.pem', '.env'], cfg);
 
-      expect(check.status).toBe('fail');
+      expect(check.status).toBe('warn');
       expect(check.message).not.toContain('service.pem');
       expect(check.message).toContain('.env');
     });
 
     it('prints a path with control characters as one safe line', async () => {
       const check = await tracked(['dir/.env.\u001b[2K\nboom']);
-      expect(check.status).toBe('fail');
+      expect(check.status).toBe('warn');
       expect(check.message).toContain('dir/.env.');
       expect(check.message).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
     });
