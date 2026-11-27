@@ -1,17 +1,18 @@
 import type { Command } from 'commander';
-import { applyPlan, formatPlan, planUninstall } from '../install/apply.js';
+import { planUninstall } from '../install/apply.js';
 import { MANIFEST_PATH, readManifest } from '../install/manifest.js';
 import { HOOKS_PATH, normalizeHooksPath } from '../install/provision.js';
+import { formatCliError } from './errors.js';
 import {
   Reporter,
+  lines,
+  reportPlan,
   runInstallAction,
   type InstallContext,
   type InstallContextFactory,
   type InstallReport,
   type StepStatus,
-  type WriteSummary,
-} from './init.js';
-import { formatCliError } from './errors.js';
+} from './install.js';
 
 export interface UninstallOptions {
   dryRun?: boolean;
@@ -28,32 +29,34 @@ const USER_OWNED: Array<{ path: string; what: string; directory: boolean }> = [
 const GITHUB_REMAINS =
   'GitHub was not touched: the board, labels and issues remain, and so do branch protection and secret scanning';
 
-/** The files step: remove what the manifest says the kit wrote, keeping whatever was edited. */
-function uninstallFiles(ctx: InstallContext, report: Reporter, dryRun: boolean): void {
+/** The files step: remove what the manifest says the kit wrote, keeping whatever was edited. Returns its status. */
+function uninstallFiles(ctx: InstallContext, report: Reporter, dryRun: boolean): StepStatus {
   try {
     const manifest = readManifest(ctx.fs);
     if (manifest === undefined) {
       report.step('files', 'skipped', [`nothing to remove: ${MANIFEST_PATH} does not exist`]);
-      return;
+      return 'skipped';
     }
-    const plan = planUninstall(ctx.fs, manifest);
-    const result = dryRun ? undefined : applyPlan(plan, ctx.fs, { removeObsolete: false });
-    const notices = result?.notices ?? plan.notices;
-    const errors = result?.errors ?? plan.errors;
-    const writes: WriteSummary[] = result
-      ? result.removed.map(path => ({ path, action: 'remove' }))
-      : plan.writes.filter(w => w.path !== MANIFEST_PATH).map(w => ({ path: w.path, action: w.action }));
-    report.plan = { writes, notices, errors };
-    const status: StepStatus = errors.length > 0 ? 'failed' : dryRun && writes.length > 0 ? 'skipped' : 'ok';
-    report.step('files', status, formatPlan({ ...plan, notices, errors }, dryRun).split('\n'));
+    return reportPlan(report, 'files', planUninstall(ctx.fs, manifest), ctx.fs, { dryRun, removeObsolete: false });
   } catch (error) {
-    report.step('files', 'failed', formatCliError(error).split('\n'));
+    report.step('files', 'failed', lines(formatCliError(error)));
+    return 'failed';
   }
 }
 
-/** Unsets `core.hooksPath` when it is the kit's hooks directory, and only then. */
-function uninstallHooksPath(ctx: InstallContext, report: Reporter, dryRun: boolean): Promise<void> {
+/**
+ * Unsets `core.hooksPath` when it is the kit's hooks directory, and only then. Not when the files
+ * step failed: the kit's hooks (the secret guard among them) are still there, and they must stay active.
+ */
+function uninstallHooksPath(ctx: InstallContext, report: Reporter, dryRun: boolean, filesStatus: StepStatus): Promise<void> {
   return report.guarded('git hooks path', async details => {
+    if (filesStatus === 'failed') {
+      details.push(
+        'core.hooksPath left as it is: removing the files failed, so the kit\'s git hooks are still installed and stay active; ' +
+          'fix the errors above and run sdlc uninstall again',
+      );
+      return 'skipped';
+    }
     const read = await ctx.git(['config', '--get', 'core.hooksPath']);
     if (read.code !== 0 && !(read.code === 1 && read.stdout.trim() === '')) {
       throw new Error(`git config --get core.hooksPath failed: ${read.stderr.trim() || `exit code ${read.code}`}`);
@@ -100,8 +103,8 @@ function reportKept(ctx: InstallContext, report: Reporter): void {
 export async function runUninstall(ctx: InstallContext, options: UninstallOptions): Promise<InstallReport> {
   const dryRun = options.dryRun === true;
   const report = new Reporter(ctx, options.json === true);
-  uninstallFiles(ctx, report, dryRun);
-  await uninstallHooksPath(ctx, report, dryRun);
+  const filesStatus = uninstallFiles(ctx, report, dryRun);
+  await uninstallHooksPath(ctx, report, dryRun, filesStatus);
   reportKept(ctx, report);
   return report.finish();
 }

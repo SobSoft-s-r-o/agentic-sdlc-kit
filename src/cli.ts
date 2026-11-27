@@ -17,7 +17,8 @@ import {
   spawnDetachedLogged,
   type GitHookContext,
 } from './commands/githook.js';
-import { registerInitCommand, type InstallContext, type InstallContextFactory } from './commands/init.js';
+import { registerInitCommand } from './commands/init.js';
+import type { InstallContext, InstallContextFactory } from './commands/install.js';
 import { registerReconcileCommand } from './commands/reconcile.js';
 import { registerReviewCommand } from './commands/review.js';
 import { registerStageCommand } from './commands/stage.js';

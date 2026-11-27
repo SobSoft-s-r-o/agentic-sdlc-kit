@@ -8,7 +8,7 @@ import {
   type InstallContext,
   type InstallContextFactory,
   type InstallReport,
-} from './init.js';
+} from './install.js';
 
 export interface UpgradeOptions {
   dryRun?: boolean;
