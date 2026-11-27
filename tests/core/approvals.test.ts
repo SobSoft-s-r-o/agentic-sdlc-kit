@@ -96,6 +96,15 @@ describe('validateCommentApproval', () => {
     ).rejects.toThrow(/was edited after posting/);
   });
 
+  it.each([
+    ['created', 'not a time', AFTER],
+    ['updated', AFTER, 'not a time'],
+  ])('fails closed when the %s time cannot be read, counting the comment as edited', async (_, createdAt, updatedAt) => {
+    await expect(
+      validateCommentApproval(check({ comment: comment('/approve', 'owner', createdAt, updatedAt) })),
+    ).rejects.toThrow(/was edited after posting/);
+  });
+
   it("refuses the tool's own login in enforce mode and records it unverified in observe mode", async () => {
     const own = comment('/approve', 'owner');
     await expect(
