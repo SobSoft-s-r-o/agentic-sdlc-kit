@@ -1,0 +1,239 @@
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { formatCliError, runCli } from '../src/cli.js';
+import type { CommandContext } from '../src/commands/context.js';
+import { loadConfig, typeRegistry } from '../src/config/schema.js';
+import { newTask } from '../src/core/stateMachine.js';
+import { GhError, type GhRunner } from '../src/github/gh.js';
+import { FakeTracker } from './support/fakeTracker.js';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const cliPath = join(root, 'dist', 'cli.js');
+const version = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version;
+const validConfig = join(root, 'tests', 'fixtures', 'config', 'valid.yaml');
+
+const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board'];
+
+let dir: string;
+beforeAll(() => {
+  // The spawned CLI is the built one, so build it here instead of trusting a stale `dist`.
+  execFileSync(process.execPath, [join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', root], {
+    cwd: root,
+    stdio: 'pipe',
+  });
+}, 120_000);
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'sdlc-cli-'));
+});
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+interface Spawned {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+function sdlc(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; script?: string } = {}): Spawned {
+  const result = spawnSync(process.execPath, [options.script ?? cliPath, ...args], {
+    cwd: options.cwd ?? dir,
+    env: options.env ?? process.env,
+    encoding: 'utf8',
+  });
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** An environment where `gh` cannot be found. */
+const withoutGh: NodeJS.ProcessEnv = { ...process.env, PATH: '' };
+
+describe('cli (built)', () => {
+  it('cli --help lists every command', () => {
+    const result = sdlc(['--help']);
+
+    expect(result.status).toBe(0);
+    for (const command of COMMANDS) expect(result.stdout).toMatch(new RegExp(`^\\s+${command}\\b`, 'm'));
+  });
+
+  it('starts with a node shebang', () => {
+    expect(readFileSync(cliPath, 'utf8').split('\n')[0]).toBe('#!/usr/bin/env node');
+  });
+
+  it('--help and --version work without a config file and without gh', () => {
+    const help = sdlc(['--help'], { env: withoutGh });
+    const versionResult = sdlc(['--version'], { env: withoutGh });
+
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain('--config');
+    expect(versionResult.status).toBe(0);
+    expect(versionResult.stdout.trim()).toBe(version);
+  });
+
+  it('runs through a symlink, like the installed bin', () => {
+    const link = join(dir, 'sdlc');
+    symlinkSync(cliPath, link);
+
+    const result = sdlc(['--version'], { script: link });
+
+    expect(result.stdout.trim()).toBe(version);
+  });
+
+  it('shows a command help without a config file', () => {
+    const result = sdlc(['status', '--help'], { env: withoutGh });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('--stale-days');
+  });
+
+  it('fails clearly outside a git repository unless --config is given', () => {
+    const result = sdlc(['status']);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('git repository');
+    expect(result.stderr).toContain('--config');
+  });
+
+  it('with --config outside a git repository, gets as far as reading the config', () => {
+    const missing = join(dir, 'nope.yaml');
+
+    const result = sdlc(['--config', missing, 'status']);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`Cannot read config file ${missing}`);
+    expect(result.stderr).not.toContain('git repository');
+  });
+
+  it('reads sdlc.config.yaml from the git root, also when run from a subdirectory', () => {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    mkdirSync(join(dir, 'sub'));
+    const result = sdlc(['status'], { cwd: join(dir, 'sub') });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(join(realpathSync(dir), 'sdlc.config.yaml'));
+  });
+
+  it('prints a JSON error with --json when the config cannot be read', () => {
+    const missing = join(dir, 'nope.yaml');
+
+    const result = sdlc(['--json', '--config', missing, 'status']);
+
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stdout)).toEqual({ error: expect.stringContaining('Cannot read config file') });
+  });
+
+  it('rejects an unknown command', () => {
+    const result = sdlc(['frobnicate']);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('unknown command');
+  });
+});
+
+describe('runCli', () => {
+  const cfg = loadConfig(validConfig);
+  const NOW = '2026-06-01T00:00:00.000Z';
+
+  function setup() {
+    const tracker = new FakeTracker();
+    tracker.owners = [...cfg.owners];
+    tracker.seedTask({
+      ...newTask({ issue: 1, type: typeRegistry(cfg).get('feature')!, summary: 'Add search', now: NOW }),
+      status: 'in_progress',
+    });
+    const out: unknown[] = [];
+    const ctx: CommandContext = { tracker, cfg, now: () => NOW, out: data => out.push(data) };
+    const io = { out: [] as string[], err: [] as string[] };
+    const deps = { makeContext: () => ctx, out: (t: string) => io.out.push(t), err: (t: string) => io.err.push(t) };
+    return { ctx, out, io, deps };
+  }
+
+  let exitCode: typeof process.exitCode;
+  beforeEach(() => {
+    exitCode = process.exitCode;
+  });
+  afterEach(() => {
+    process.exitCode = exitCode;
+  });
+
+  const printed = (out: unknown[]): { byStatus: { in_progress: { issue: number }[] } } =>
+    JSON.parse(out[0] as string);
+
+  it('treats the global --json like the per-command one', async () => {
+    for (const argv of [['--json', 'status'], ['status', '--json'], ['--json', 'status', '--json']]) {
+      const h = setup();
+
+      await runCli(argv, h.deps);
+
+      expect(printed(h.out).byStatus.in_progress.map(t => t.issue)).toEqual([1]);
+    }
+  });
+
+  it('prints human text without --json', async () => {
+    const h = setup();
+
+    await runCli(['status'], h.deps);
+
+    expect(h.out[0]).toContain('In progress (1)');
+  });
+
+  it('applies the global --json to nested commands too', async () => {
+    const h = setup();
+    const run: GhRunner = async () => {
+      throw new GhError(['api', 'x'], 'boom');
+    };
+
+    await runCli(['--json', 'board', 'ensure'], { ...h.deps, makeBoardContext: () => ({ run, config: cfg }) });
+
+    expect(JSON.parse(h.io.out[0])).toMatchObject({ error: expect.stringContaining('boom') });
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('prints the gh arguments and stderr of a GhError and exits 1', async () => {
+    const h = setup();
+    const run: GhRunner = async args => ({ stdout: '', code: 1, stderr: `HTTP 401: Bad credentials (${args[0]})` });
+
+    await runCli(['board', 'ensure'], { ...h.deps, makeBoardContext: () => ({ run, config: cfg }) });
+
+    expect(h.io.err.join('\n')).toContain('gh api graphql');
+    expect(h.io.err.join('\n')).toContain('HTTP 401: Bad credentials');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('prints the message of any other error and exits 1', async () => {
+    const h = setup();
+
+    await runCli(['board', 'ensure'], {
+      ...h.deps,
+      makeBoardContext: () => {
+        throw new Error('config is broken');
+      },
+    });
+
+    expect(h.io.err).toEqual(['config is broken']);
+    expect(process.exitCode).toBe(1);
+  });
+});
+
+describe('formatCliError', () => {
+  it('lists the gh arguments and stderr of a GhError', () => {
+    const error = new GhError(['api', 'repos/acme/shop/issues', '-f', 'title=Hi'], 'HTTP 404: Not Found\n');
+
+    const text = formatCliError(error);
+
+    expect(text).toContain('gh api repos/acme/shop/issues -f title=Hi');
+    expect(text).toContain('HTTP 404: Not Found');
+  });
+
+  it('says so when gh printed nothing', () => {
+    expect(formatCliError(new GhError(['api', 'x'], ''))).toContain('no error output');
+  });
+
+  it('is the message of any other error, or the text of a thrown value', () => {
+    expect(formatCliError(new Error('boom'))).toBe('boom');
+    expect(formatCliError('plain')).toBe('plain');
+  });
+});

@@ -72,7 +72,7 @@ The reference project is **not touched** and does not migrate to this project.
 - Works for org-owned and user-owned repositories and Projects (v2).
 - GitHub Actions must remain **optional** (the reference project disables them for
   billing reasons); every automation that runs in Actions also runs locally.
-- **Reference project access**: the builder may read the reference project
+- **Reference project access**: the builder may read the private reference project
   (read-only, location kept outside this repository) to extract rules and edge cases. It is
   **private**: no code, issue text, names, domain terms or identifiers from it may
   be copied into this public repository; regression tests are rewritten as generic
@@ -196,6 +196,9 @@ github:
   repo: owner/name
   default_branch: main
   project: { owner: owner, owner_type: org, number: 7 }   # filled by init
+owners: [owner-login]    # GitHub logins whose comments count as owner approval
+agents: []               # logins agents write as (bot account, `<app>[bot]`): trusted for
+                         # state, never an owner approval; must not overlap owners
 content_language: en
 merge_policy: owner_only # owner_only | agent_on_request
 quality_gate: ["npm test"]
@@ -280,8 +283,9 @@ single-select would clear values on existing items (verify `updateProjectV2Field
 behaviour at build), init refuses for that board and recommends a new one. The
 built-in Status field is reused and extended. One board serves one repo in v1, but
 every query is scoped by repository so a shared board does not break. Items without
-an `sdlc:state` comment are ignored by reconcile and listed as "untracked" by
-`sdlc status`.
+an `sdlc:state` comment are ignored by reconcile (reported as `untracked`, not as
+errors) and listed as "untracked" by `sdlc status`. `sdlc task new --issue <n>
+--type <id>` adopts such an existing issue: labels, initial state, board item.
 
 **Owner approval** (owner decision): an approval, acceptance, production-data run
 confirmation, merge instruction or cancellation counts only from one of two sources:
@@ -298,6 +302,10 @@ confirmation, merge instruction or cancellation counts only from one of two sour
    harnesses without hooks.
 Each recorded approval stores its source (prompt id or comment URL). In observe
 mode, an approval without either source is recorded but flagged as unverified.
+A comment by a login listed under `agents` (or by the tool's own login) never counts
+as the owner's: ignored in enforce mode, recorded as unverified in observe mode. In
+enforce mode, when the tool cannot read its own login and no `agents` are listed,
+comment approvals are ignored, since owner and agent comments cannot be told apart.
 `owners` (GitHub logins) is an install question.
 
 **Views** created: Board (by Status), "In flight" (table, not Done, sorted by Last

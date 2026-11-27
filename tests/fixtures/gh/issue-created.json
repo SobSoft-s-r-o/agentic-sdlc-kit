@@ -1,0 +1,31 @@
+{
+  "url": "https://api.github.com/repos/acme/shop/issues/21",
+  "html_url": "https://github.com/acme/shop/issues/21",
+  "id": 2400000021,
+  "node_id": "I_kwDOBx21",
+  "number": 21,
+  "state": "open",
+  "title": "Add CSV export",
+  "user": {
+    "login": "octo-agent",
+    "id": 2202,
+    "node_id": "U_2202",
+    "avatar_url": "https://avatars.githubusercontent.com/u/2202?v=4",
+    "html_url": "https://github.com/octo-agent",
+    "type": "User",
+    "site_admin": false
+  },
+  "labels": [
+    {
+      "id": 1,
+      "name": "sdlc:task",
+      "color": "ededed"
+    },
+    {
+      "id": 2,
+      "name": "type:feature",
+      "color": "ededed"
+    }
+  ],
+  "body": "Export orders as CSV."
+}

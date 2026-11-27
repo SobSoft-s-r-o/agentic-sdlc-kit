@@ -1,0 +1,50 @@
+[
+  {
+    "url": "https://api.github.com/repos/acme/shop/deployments/901/statuses/7101",
+    "id": 7101,
+    "node_id": "DES_kwDOB7101",
+    "state": "inactive",
+    "creator": {
+      "login": "octo-agent",
+      "id": 2202,
+      "node_id": "U_2202",
+      "avatar_url": "https://avatars.githubusercontent.com/u/2202?v=4",
+      "html_url": "https://github.com/octo-agent",
+      "type": "User",
+      "site_admin": false
+    },
+    "description": "",
+    "environment": "production-web",
+    "target_url": "",
+    "created_at": "2026-11-25T12:02:30Z",
+    "updated_at": "2026-11-25T12:02:30Z",
+    "deployment_url": "https://api.github.com/repos/acme/shop/deployments/901",
+    "repository_url": "https://api.github.com/repos/acme/shop",
+    "environment_url": "",
+    "log_url": ""
+  },
+  {
+    "url": "https://api.github.com/repos/acme/shop/deployments/901/statuses/7100",
+    "id": 7100,
+    "node_id": "DES_kwDOB7101",
+    "state": "success",
+    "creator": {
+      "login": "octo-agent",
+      "id": 2202,
+      "node_id": "U_2202",
+      "avatar_url": "https://avatars.githubusercontent.com/u/2202?v=4",
+      "html_url": "https://github.com/octo-agent",
+      "type": "User",
+      "site_admin": false
+    },
+    "description": "",
+    "environment": "production-web",
+    "target_url": "",
+    "created_at": "2026-11-25T12:02:30Z",
+    "updated_at": "2026-11-25T12:02:30Z",
+    "deployment_url": "https://api.github.com/repos/acme/shop/deployments/901",
+    "repository_url": "https://api.github.com/repos/acme/shop",
+    "environment_url": "",
+    "log_url": "https://github.com/acme/shop/actions/runs/42"
+  }
+]

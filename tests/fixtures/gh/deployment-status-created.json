@@ -1,0 +1,24 @@
+{
+  "url": "https://api.github.com/repos/acme/shop/deployments/905/statuses/7005",
+  "id": 7005,
+  "node_id": "DES_kwDOB7005",
+  "state": "success",
+  "creator": {
+    "login": "octo-agent",
+    "id": 2202,
+    "node_id": "U_2202",
+    "avatar_url": "https://avatars.githubusercontent.com/u/2202?v=4",
+    "html_url": "https://github.com/octo-agent",
+    "type": "User",
+    "site_admin": false
+  },
+  "description": "",
+  "environment": "production-web",
+  "target_url": "",
+  "created_at": "2026-11-27T15:00:01Z",
+  "updated_at": "2026-11-27T15:00:01Z",
+  "deployment_url": "https://api.github.com/repos/acme/shop/deployments/905",
+  "repository_url": "https://api.github.com/repos/acme/shop",
+  "environment_url": "",
+  "log_url": ""
+}

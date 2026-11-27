@@ -1,0 +1,116 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "id": "I_kwDOBx12",
+        "projectItems": {
+          "pageInfo": {
+            "hasNextPage": false
+          },
+          "nodes": [
+            {
+              "id": "PVTI_lADOBy3_99",
+              "project": {
+                "id": "PVT_kwDOBy3",
+                "number": 7,
+                "owner": {
+                  "login": "another-org"
+                }
+              },
+              "fieldValues": {
+                "pageInfo": {
+                  "hasNextPage": false
+                },
+                "nodes": [
+                  {
+                    "optionId": "00001181",
+                    "field": {
+                      "id": "PVTSSF_lADOBx7_status"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PVTI_lADOBx7_12",
+              "project": {
+                "id": "PVT_kwDOBx7",
+                "number": 7,
+                "owner": {
+                  "login": "acme"
+                }
+              },
+              "fieldValues": {
+                "pageInfo": {
+                  "hasNextPage": false
+                },
+                "nodes": [
+                  {},
+                  {
+                    "optionId": "0000106e",
+                    "field": {
+                      "id": "PVTSSF_lADOBx7_status"
+                    }
+                  },
+                  {
+                    "optionId": "00001339",
+                    "field": {
+                      "id": "PVTSSF_lADOBx7_phase"
+                    }
+                  },
+                  {
+                    "optionId": "00001415",
+                    "field": {
+                      "id": "PVTSSF_lADOBx7_task_type"
+                    }
+                  },
+                  {
+                    "optionId": "00001604",
+                    "field": {
+                      "id": "PVTSSF_lADOBx7_waiting_on"
+                    }
+                  },
+                  {
+                    "text": "Add CSV export to the orders page",
+                    "field": {
+                      "id": "PVTF_lADOBx7_summary"
+                    }
+                  },
+                  {
+                    "text": "Writing the export endpoint",
+                    "field": {
+                      "id": "PVTF_lADOBx7_current_step"
+                    }
+                  },
+                  {
+                    "text": "web",
+                    "field": {
+                      "id": "PVTF_lADOBx7_pending_targets"
+                    }
+                  },
+                  {
+                    "text": "octo-agent",
+                    "field": {
+                      "id": "PVTF_lADOBx7_agent"
+                    }
+                  },
+                  {
+                    "text": "2026-11-20T09:30:00.000Z",
+                    "field": {
+                      "id": "PVTF_lADOBx7_last_update"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "boardOwner": {
+      "projectV2": {
+        "id": "PVT_kwDOBx7"
+      }
+    }
+  }
+}
