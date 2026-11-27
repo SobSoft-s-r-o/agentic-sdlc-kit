@@ -1,0 +1,4 @@
+file .claude/skills/sdlc-delivery/SKILL.md
+file .claude/skills/sdlc-orientation/SKILL.md
+file .claude/skills/sdlc-task-tracking/SKILL.md
+md-block CLAUDE.md
