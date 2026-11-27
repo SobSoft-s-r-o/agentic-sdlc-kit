@@ -343,7 +343,6 @@ function planJson(path: string, jsonEntries: JsonEntry[], disk: string | undefin
   const root = parseJsonObject(disk, path);
   // The kit created this file (now, or on an earlier run): uninstall may then clean up after itself.
   const created = disk === undefined || ctx.prior.some(e => e.kind === 'json-keys' && e.createdFile === true);
-  const stamp = (e: ManifestEntry): ManifestEntry => (created ? { ...e, createdFile: true } : e);
   const owned = new Set<string>();
   const toMerge: JsonEntry[] = [];
   const entries: ManifestEntry[] = [];
@@ -384,13 +383,27 @@ function planJson(path: string, jsonEntries: JsonEntry[], disk: string | undefin
     }
   }
 
-  const stamped = entries.map(stamp);
-  if (toMerge.length === 0) return { notices, entries: stamped };
-  const merged = mergeJsonKeys(disk, toMerge, owned, path);
-  for (const key of merged.skipped) notices.push({ path, message: `${key} already defined by you; kept` });
-  const write = changesSomething && merged.text !== disk ? put(ctx, path, disk, merged.text) : undefined;
+  const merged = toMerge.length === 0 ? undefined : mergeJsonKeys(disk, toMerge, owned, path);
+  for (const key of merged?.skipped ?? []) notices.push({ path, message: `${key} already defined by you; kept` });
+
+  // In a file the user had, the objects we created on the way (`mcpServers`) are ours to take back,
+  // on this run or an earlier one. A file we created needs no list: all of it is ours.
+  const parents = created ? [] : unique([...priorParents(ctx.prior), ...(merged?.createdParents ?? [])]);
+  const stamped = entries.map(
+    (e): ManifestEntry => ({
+      ...e,
+      ...(created ? { createdFile: true as const } : {}),
+      ...(parents.length === 0 ? {} : { createdParents: parents }),
+    }),
+  );
+  const write = merged && changesSomething && merged.text !== disk ? put(ctx, path, disk, merged.text) : undefined;
   return { ...(write ? { write } : {}), notices, entries: stamped };
 }
+
+const unique = (list: string[]): string[] => [...new Set(list)].sort(compare);
+/** The parents any json-keys entry of the path recorded. */
+const priorParents = (entries: ManifestEntry[]): string[] =>
+  entries.filter(e => e.kind === 'json-keys').flatMap(e => e.createdParents ?? []);
 
 // --- removals (obsolete entries and uninstall) ----------------------------------------------------
 
@@ -433,8 +446,10 @@ function planRemovals(entries: ManifestEntry[], fs: RepoFs, modifiedMessage: str
       }
 
       let text = disk;
-      // Only a file the kit created is its to tidy: empty objects and an empty document are the user's otherwise.
+      // Only what the kit created is its to tidy: a file it created, or the objects it added to a file the user
+      // had. Empty objects the user had, and an empty document of theirs, stay.
       const created = group.some(e => e.kind === 'json-keys' && e.createdFile === true);
+      const parents = priorParents(group);
       const pointers: string[][] = [];
       for (const entry of removable) {
         if (entry.kind === 'md-block') text = removeMdBlock(text);
@@ -442,7 +457,7 @@ function planRemovals(entries: ManifestEntry[], fs: RepoFs, modifiedMessage: str
         else if (entry.kind === 'toml-block') text = removeTomlBlock(text);
         else if (entry.kind === 'json-keys') pointers.push((entry.key ?? '').split('/'));
       }
-      if (pointers.length > 0) text = removeJsonKeys(text, pointers, path, { pruneEmpty: created });
+      if (pointers.length > 0) text = removeJsonKeys(text, pointers, path, { pruneEmpty: created ? true : parents });
       if (text === disk) continue;
 
       const empty =

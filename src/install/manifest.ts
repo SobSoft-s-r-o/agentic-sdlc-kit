@@ -33,6 +33,12 @@ export interface ManifestEntry {
    * created is never deleted, and their empty objects stay.
    */
   createdFile?: true;
+  /**
+   * `json-keys` only, in a file the user had: the objects the kit created on the way to its keys, as
+   * manifest keys (`mcpServers`). Uninstall removes one of them once it is empty; an object the user
+   * had is never listed and never removed. Every entry of the path carries the same list.
+   */
+  createdParents?: string[];
 }
 
 export interface Manifest {
@@ -68,6 +74,7 @@ export function serializeManifest(manifest: Manifest): string {
     ...(e.key === undefined ? {} : { key: e.key }),
     hash: e.hash,
     ...(e.createdFile === true ? { createdFile: true } : {}),
+    ...(e.createdParents === undefined || e.createdParents.length === 0 ? {} : { createdParents: e.createdParents }),
   }));
   return `${JSON.stringify({ version: 1, kit: manifest.kit, entries }, null, 2)}\n`;
 }
@@ -84,6 +91,7 @@ const ManifestSchema = z.object({
       key: z.string().optional(),
       hash: z.string().regex(/^sha256:/),
       createdFile: z.literal(true).optional(),
+      createdParents: z.array(z.string()).optional(),
     }),
   ),
 });
@@ -113,6 +121,7 @@ export function parseManifest(text: string): Manifest {
       ...(e.key === undefined ? {} : { key: e.key }),
       hash: e.hash,
       ...(e.createdFile === true ? { createdFile: true as const } : {}),
+      ...(e.createdParents === undefined || e.createdParents.length === 0 ? {} : { createdParents: [...e.createdParents] }),
     })),
   };
 }

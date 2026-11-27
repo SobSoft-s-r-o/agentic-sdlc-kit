@@ -101,6 +101,13 @@ describe('manifest helpers', () => {
     expect(() => parseManifest('{"version":1,"kit":"1","entries":[{"path":"a"}]}')).toThrow(/manifest/);
     const ok = parseManifest('{"version":1,"kit":"0.1.0","entries":[{"path":"a","kind":"file","hash":"sha256:00"}]}');
     expect(ok.entries).toEqual([{ path: 'a', kind: 'file', hash: 'sha256:00' }]);
+    const json = parseManifest(
+      '{"version":1,"kit":"0.1.0","entries":[{"path":"a.json","kind":"json-keys","key":"x/y","hash":"sha256:00","createdFile":true,"createdParents":["x"]}]}',
+    );
+    expect(json.entries[0]).toMatchObject({ createdFile: true, createdParents: ['x'] });
+    expect(() =>
+      parseManifest('{"version":1,"kit":"0.1.0","entries":[{"path":"a","kind":"json-keys","hash":"sha256:00","createdParents":"x"}]}'),
+    ).toThrow(/manifest/);
   });
 
   it('readManifest is undefined without a manifest and throws on a damaged one', () => {
@@ -884,11 +891,11 @@ describe('createdFile on json-keys entries', () => {
     uninstall(fs);
     expect(fs.read('.mcp.json')).toBe(user);
 
-    // a file without the key we added: the object we added stays (we cannot tell it from the user's)
+    // a user `{}` gets mcpServers from us and takes it back: see the createdParents tests below
     const bare = memoryFs({ '.mcp.json': '{}\n' });
     install([mcp()], bare);
     uninstall(bare);
-    expect(bare.read('.mcp.json')).toBe(`${JSON.stringify({ mcpServers: {} }, null, 2)}\n`);
+    expect(bare.read('.mcp.json')).toBe('{}\n');
   });
 
   it('survives the manifest round trip: the manifest is byte-identical on a second run', () => {
@@ -899,6 +906,133 @@ describe('createdFile on json-keys entries', () => {
     expect(fs.read(MANIFEST_PATH)).toBe(first);
     expect(first).toContain('"createdFile": true');
     expect(() => parseManifest(first ?? '')).not.toThrow();
+  });
+});
+
+describe('createdParents: objects the kit created inside a file the user had', () => {
+  const GEMINI = '.gemini/settings.json';
+  const geminiOf = (entries: Array<{ pointer: string[]; value: unknown }>): Change => ({ kind: 'json-keys', path: GEMINI, entries });
+  const gemini = (servers: Array<'github' | 'context7'> = ['github']): Change =>
+    geminiOf(servers.map(id => ({ pointer: ['mcpServers', id], value: id === 'github' ? GITHUB_SERVER : CONTEXT7_SERVER })));
+  const uninstall = (fs: RepoFs) => applyPlan(planUninstall(fs, readManifest(fs)!), fs, { removeObsolete: false });
+  const entriesOf = (fs: RepoFs) => manifestOf(fs).entries.filter(e => e.path === GEMINI);
+
+  it('user settings without mcpServers: init with github then uninstall is byte-identical', () => {
+    const user = '{\n  "theme": "dark"\n}\n';
+    const fs = memoryFs({ [GEMINI]: user });
+
+    install([gemini()], fs);
+    expect(JSON.parse(fs.read(GEMINI)!)).toEqual({ theme: 'dark', mcpServers: { github: GITHUB_SERVER } });
+    expect(entriesOf(fs)).toEqual([
+      {
+        path: GEMINI,
+        kind: 'json-keys',
+        key: 'mcpServers/github',
+        hash: hashText(canonicalJson(GITHUB_SERVER)),
+        createdParents: ['mcpServers'],
+      },
+    ]);
+
+    expect(uninstall(fs).errors).toEqual([]);
+    expect(fs.snapshot()).toEqual({ [GEMINI]: user });
+  });
+
+  it('works for every layout: 4 spaces, tab, no final newline', () => {
+    for (const [indent, tail] of [['    ', '\n'], ['\t', '\n'], ['  ', ''], ['\t', '']] as const) {
+      const user = JSON.stringify({ theme: 'dark', model: 'x' }, null, indent) + tail;
+      const fs = memoryFs({ [GEMINI]: user });
+      install([gemini(['github', 'context7'])], fs);
+      uninstall(fs);
+      expect(fs.snapshot()).toEqual({ [GEMINI]: user });
+    }
+  });
+
+  it('a user `{}` file comes back as `{}` with its own newline, and is not deleted', () => {
+    for (const user of ['{}\n', '{}']) {
+      const fs = memoryFs({ [GEMINI]: user });
+      install([gemini(['github', 'context7'])], fs);
+      expect(JSON.parse(fs.read(GEMINI)!).mcpServers).toEqual({ github: GITHUB_SERVER, context7: CONTEXT7_SERVER });
+      expect(uninstall(fs).errors).toEqual([]);
+      expect(fs.snapshot()).toEqual({ [GEMINI]: user });
+    }
+  });
+
+  it('is kept across later writes and when one server is dropped, so the last removal still tidies up', () => {
+    const user = '{\n  "theme": "dark"\n}\n';
+    const fs = memoryFs({ [GEMINI]: user });
+    install([gemini(['github', 'context7'])], fs);
+    expect(entriesOf(fs).map(e => e.createdParents)).toEqual([['mcpServers'], ['mcpServers']]);
+
+    const changed = geminiOf([
+      { pointer: ['mcpServers', 'github'], value: { type: 'http', url: 'https://v2.example' } },
+      { pointer: ['mcpServers', 'context7'], value: CONTEXT7_SERVER },
+    ]);
+    install([changed], fs);
+    expect(entriesOf(fs).map(e => e.createdParents)).toEqual([['mcpServers'], ['mcpServers']]);
+
+    install([gemini(['github'])], fs, { removeObsolete: true });
+    expect(entriesOf(fs).map(e => e.key)).toEqual(['mcpServers/github']);
+    expect(entriesOf(fs).map(e => e.createdParents)).toEqual([['mcpServers']]);
+    expect(JSON.parse(fs.read(GEMINI)!).mcpServers).toEqual({ github: GITHUB_SERVER });
+
+    uninstall(fs);
+    expect(fs.snapshot()).toEqual({ [GEMINI]: user });
+  });
+
+  it('dropping every server with removeObsolete tidies up too', () => {
+    const user = '{\n  "theme": "dark"\n}\n';
+    const fs = memoryFs({ [GEMINI]: user });
+    install([gemini(['github'])], fs);
+    install([geminiOf([])], fs, { removeObsolete: true });
+    expect(fs.read(GEMINI)).toBe(user);
+  });
+
+  it('a container the user filled after init stays; only the empty ones we created go', () => {
+    const fs = memoryFs({ [GEMINI]: '{\n  "theme": "dark"\n}\n' });
+    install([gemini()], fs);
+    const doc = JSON.parse(fs.read(GEMINI)!);
+    doc.mcpServers.mine = { command: 'mine' };
+    fs.write(GEMINI, `${JSON.stringify(doc, null, 2)}\n`);
+
+    uninstall(fs);
+    expect(fs.read(GEMINI)).toBe(`${JSON.stringify({ theme: 'dark', mcpServers: { mine: { command: 'mine' } } }, null, 2)}\n`);
+  });
+
+  it('an object the user already had is never recorded and never pruned', () => {
+    const user = '{\n  "theme": "dark",\n  "mcpServers": {}\n}\n';
+    const fs = memoryFs({ [GEMINI]: user });
+    install([gemini()], fs);
+    expect(entriesOf(fs).map(e => e.createdParents)).toEqual([undefined]);
+    uninstall(fs);
+    expect(fs.read(GEMINI)).toBe(user);
+  });
+
+  it('a file we created records createdFile only, and uninstall deletes it', () => {
+    const fs = memoryFs();
+    install([gemini()], fs);
+    expect(entriesOf(fs).map(e => [e.createdFile, e.createdParents])).toEqual([[true, undefined]]);
+    uninstall(fs);
+    expect(fs.snapshot()).toEqual({});
+  });
+
+  it('any entry of the path that recorded the parent counts, and the manifest is byte-identical on a rerun', () => {
+    const fs = memoryFs({ [GEMINI]: '{\n  "theme": "dark"\n}\n' });
+    install([gemini(['github'])], fs);
+    install([gemini(['github'])], fs);
+    const first = fs.read(MANIFEST_PATH);
+    install([gemini(['github'])], fs);
+    expect(fs.read(MANIFEST_PATH)).toBe(first);
+    expect(first).toContain('"createdParents": [\n        "mcpServers"\n      ]');
+
+    // a manifest where only one of two entries carries the parent still tidies up
+    const manifest = manifestOf(fs);
+    const extra = { path: GEMINI, kind: 'json-keys' as const, key: 'mcpServers/context7', hash: hashText(canonicalJson(CONTEXT7_SERVER)) };
+    const doc = JSON.parse(fs.read(GEMINI)!);
+    doc.mcpServers.context7 = CONTEXT7_SERVER;
+    fs.write(GEMINI, `${JSON.stringify(doc, null, 2)}\n`);
+    const p = planUninstall(fs, { ...manifest, entries: [...manifest.entries, extra] });
+    applyPlan(p, fs, { removeObsolete: false });
+    expect(fs.read(GEMINI)).toBe('{\n  "theme": "dark"\n}\n');
   });
 });
 

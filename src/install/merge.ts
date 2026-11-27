@@ -252,16 +252,19 @@ export function assertJsonPointer(pointer: string[], path = 'file'): void {
  * that is not owned belongs to the user: it is left alone and reported in `skipped`. The file keeps
  * its key order (new keys go last), its indentation (a tab or N spaces; two spaces for a new file or
  * one with no indentation), its line endings and whether it ends with a newline. When no key is
- * actually set or changed, `existing` is returned as it is.
+ * actually set or changed, `existing` is returned as it is. `createdParents` lists the objects this
+ * call had to create on the way to the keys (manifest keys, outermost first): `mcpServers` in a file
+ * that had none. Uninstall may take those back once they are empty; objects that were there are not listed.
  */
 export function mergeJsonKeys(
   existing: string | undefined,
   entries: JsonEntry[],
   owned: Set<string>,
   path = 'file',
-): { text: string; skipped: string[] } {
+): { text: string; skipped: string[]; createdParents: string[] } {
   const root = parseJsonObject(existing, path);
   const skipped: string[] = [];
+  const createdParents: string[] = [];
   let changed = false;
   for (const { pointer, value } of entries) {
     assertJsonPointer(pointer, path);
@@ -275,6 +278,7 @@ export function mergeJsonKeys(
         const created: JsonObject = {};
         setOwn(node, segment, created);
         node = created;
+        createdParents.push(jsonKey(pointer.slice(0, i + 1)));
         changed = true;
       } else if (isObject(next)) {
         node = next;
@@ -293,23 +297,26 @@ export function mergeJsonKeys(
       changed = true;
     }
   }
-  if (!changed && existing !== undefined) return { text: existing, skipped };
-  return { text: serialize(root, detectJsonFormat(existing)), skipped };
+  if (!changed && existing !== undefined) return { text: existing, skipped, createdParents };
+  return { text: serialize(root, detectJsonFormat(existing)), skipped, createdParents };
 }
 
 /**
- * Deletes the keys. With `pruneEmpty` (the default) every object on their path that is left empty
- * goes too, which for us is `mcpServers`; a caller passes `false` for a file the user created, whose
- * empty objects are theirs. Text without those keys is returned unchanged; otherwise the file keeps
- * its indentation, line endings and final newline. A document left as `{}` is the caller's to delete.
+ * Deletes the keys. `pruneEmpty` says which objects on their path may go once they are left empty
+ * (for us that is `mcpServers`): `true` (the default) every one, `false` none, or a list of manifest
+ * keys (`['mcpServers']`) for exactly those the kit created. An object that still holds something is
+ * never removed. Text without those keys is returned unchanged; otherwise the file keeps its
+ * indentation, line endings and final newline. A document left as `{}` is the caller's to delete.
  */
 export function removeJsonKeys(
   existing: string,
   pointers: string[][],
   path = 'file',
-  opts: { pruneEmpty?: boolean } = {},
+  opts: { pruneEmpty?: boolean | string[] } = {},
 ): string {
-  const pruneEmpty = opts.pruneEmpty ?? true;
+  const prune = opts.pruneEmpty ?? true;
+  const mayPrune = (pointer: string[], depth: number): boolean =>
+    prune === true || (prune !== false && prune.includes(jsonKey(pointer.slice(0, depth))));
   const root = parseJsonObject(existing, path);
   let changed = false;
   for (const pointer of pointers) {
@@ -325,9 +332,9 @@ export function removeJsonKeys(
     if (leaf === undefined || parent === undefined || !hasOwn(parent, leaf)) continue;
     delete parent[leaf];
     changed = true;
-    for (let depth = pointer.length - 1; pruneEmpty && depth > 0; depth--) {
+    for (let depth = pointer.length - 1; depth > 0; depth--) {
       const holder = chain[depth];
-      if (holder === undefined || Object.keys(holder).length > 0) break;
+      if (holder === undefined || Object.keys(holder).length > 0 || !mayPrune(pointer, depth)) break;
       delete (chain[depth - 1] as JsonObject)[pointer[depth - 1] as string];
     }
   }

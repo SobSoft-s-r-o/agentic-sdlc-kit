@@ -320,6 +320,20 @@ describe('mergeJsonKeys', () => {
     expect(JSON.parse(out.text).mcpServers.github).toEqual({ url: 'u' });
   });
 
+  it('reports the objects it had to create on the way, outermost first, and none that were there', () => {
+    expect(mergeJsonKeys(undefined, [entry], new Set()).createdParents).toEqual(['mcpServers']);
+    expect(mergeJsonKeys('{"theme":"dark"}', [entry], new Set()).createdParents).toEqual(['mcpServers']);
+    expect(mergeJsonKeys('{"mcpServers":{}}', [entry], new Set()).createdParents).toEqual([]);
+    expect(mergeJsonKeys('{"mcpServers":{"db":{}}}', [entry], new Set()).createdParents).toEqual([]);
+    expect(mergeJsonKeys('{"a":{}}', [{ pointer: ['a', 'b', 'c'], value: 1 }], new Set()).createdParents).toEqual(['a/b']);
+    expect(mergeJsonKeys('{}', [{ pointer: ['a', 'b', 'c'], value: 1 }], new Set()).createdParents).toEqual(['a', 'a/b']);
+    // two entries share one new parent: reported once
+    const two = [entry, { pointer: ['mcpServers', 'db'], value: { command: 'x' } }];
+    expect(mergeJsonKeys('{}', two, new Set()).createdParents).toEqual(['mcpServers']);
+    // a skipped or in-sync entry creates nothing
+    expect(mergeJsonKeys('{"mcpServers":{"github":{"url":"mine"}}}', [entry], new Set()).createdParents).toEqual([]);
+  });
+
   it('refuses a pointer segment that contains "/"', () => {
     expect(() => mergeJsonKeys(undefined, [{ pointer: ['mcpServers', 'a/b'], value: 1 }], new Set(), '.mcp.json')).toThrow(
       '.mcp.json: key segment "a/b" must not contain "/"',
@@ -360,6 +374,21 @@ describe('removeJsonKeys', () => {
     expect(removeJsonKeys(only, [['mcpServers', 'github']], 'a.json', { pruneEmpty: false })).toBe(
       `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`,
     );
+  });
+
+  it('prunes only the emptied objects named in a list, and only up to the first one not named', () => {
+    const text = `${JSON.stringify({ a: { b: { c: 1 } }, keep: true }, null, 2)}\n`;
+    const pointer = [['a', 'b', 'c']];
+    const pruned = (list: string[]) => JSON.parse(removeJsonKeys(text, pointer, 'a.json', { pruneEmpty: list }));
+    expect(pruned([])).toEqual({ a: { b: {} }, keep: true });
+    expect(pruned(['a/b'])).toEqual({ a: {}, keep: true });
+    expect(pruned(['a'])).toEqual({ a: { b: {} }, keep: true }); // a is not empty while b stays
+    expect(pruned(['a/b', 'a'])).toEqual({ keep: true });
+    // an object that is not empty is never pruned, named or not
+    const shared = JSON.stringify({ mcpServers: { github: 1, mine: 2 } });
+    expect(JSON.parse(removeJsonKeys(shared, [['mcpServers', 'github']], 'a.json', { pruneEmpty: ['mcpServers'] }))).toEqual({
+      mcpServers: { mine: 2 },
+    });
   });
 
   it('keeps the indentation, the line endings and the final newline of the file', () => {
