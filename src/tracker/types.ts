@@ -14,6 +14,22 @@ export interface TrackedTask {
   stateCommentUpdatedAt: string;
 }
 
+/** The issue has no trusted state comment: it is not a tracked task (yet). */
+export class NoStateCommentError extends Error {
+  constructor(issue: number) {
+    super(`Issue #${issue} has no state comment`);
+    this.name = 'NoStateCommentError';
+  }
+}
+
+/** An issue as `getIssue` reads it. */
+export interface IssueInfo {
+  number: number;
+  title: string;
+  url: string;
+  open: boolean;
+}
+
 /** The state comment a write expects to replace, as it was read. */
 export interface ExpectedStateComment {
   id: string;
@@ -105,8 +121,10 @@ export interface Tracker {
   listUntracked(): Promise<UntrackedIssue[]>;
   /** `listTrackedTasks` and `listUntracked` from one scan of the `sdlc:task` issues. */
   scanTasks(): Promise<TaskScan>;
-  /** Throws when the issue has no state comment, and `StateCommentError` when it is corrupt. */
+  /** Throws `NoStateCommentError` when the issue has no state comment, and `StateCommentError` when it is corrupt. */
   getTask(issue: number): Promise<TrackedTask>;
+  /** Reads one issue, tracked or not. */
+  getIssue(issue: number): Promise<IssueInfo>;
   /**
    * Updates the state comment in place, or posts one when there is none (or an edit is refused).
    * With `expected`, the state comment is read again first and `StateChangedError` is thrown,

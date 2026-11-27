@@ -9,10 +9,12 @@ import {
 } from '../core/stateComment.js';
 import type { TaskState } from '../core/types.js';
 import {
+  NoStateCommentError,
   StateChangedError,
   type DeploymentInfo,
   type ExpectedStateComment,
   type IssueComment,
+  type IssueInfo,
   type PrInfo,
   type ReleaseInfo,
   type TrackedTask,
@@ -323,8 +325,15 @@ export class GitHubTracker implements Tracker {
       'issue', 'view', String(issue), '--repo', this.repo, '--json', ISSUE_FIELDS,
     ]);
     const comment = await this.findStateComment(issue);
-    if (!comment) throw new Error(`Issue #${issue} has no state comment`);
+    if (!comment) throw new NoStateCommentError(issue);
     return this.toTrackedTask(row, comment, readState(comment));
+  }
+
+  async getIssue(issue: number): Promise<IssueInfo> {
+    const row = await ghJson<IssueRow & { url: string }>(this.run, [
+      'issue', 'view', String(issue), '--repo', this.repo, '--json', 'number,title,url,state',
+    ]);
+    return { number: row.number, title: row.title, url: row.url, open: row.state.toUpperCase() === 'OPEN' };
   }
 
   /**

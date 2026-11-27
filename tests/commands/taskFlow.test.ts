@@ -148,6 +148,78 @@ describe('taskNew', () => {
     });
   });
 
+  describe('adopting an existing issue (--issue)', () => {
+    const handMade = (h: Harness, number: number, extra: object = {}): void =>
+      void h.tracker.issues.push({
+        number,
+        title: 'Hand-made issue',
+        body: 'Written by a person',
+        labels: ['bug'],
+        open: true,
+        onBoard: false,
+        ...extra,
+      });
+
+    it('labels it, writes its state and puts it on the board, keeping title and body', async () => {
+      const h = setup();
+      handMade(h, 7);
+      const { issue, url } = await taskNew(h.ctx, { issue: 7, type: 'bugfix' });
+
+      expect({ issue, url }).toEqual({ issue: 7, url: 'https://github.test/issues/7' });
+      expect(issueOf(h.tracker, 7)).toMatchObject({
+        title: 'Hand-made issue',
+        body: 'Written by a person',
+        labels: ['bug', 'sdlc:task', 'type:bugfix'],
+        open: true,
+        onBoard: true,
+      });
+      expect(await stateOf(h.tracker, 7)).toMatchObject({
+        issue: 7,
+        type: 'bugfix',
+        status: 'in_progress',
+        phase: 'intake',
+        summary: 'Hand-made issue',
+      });
+      expect(h.tracker.fields.get(7)).toMatchObject({ type: 'Bug fix', summary: 'Hand-made issue' });
+      expect(await h.tracker.listUntracked()).toEqual([]);
+    });
+
+    it('takes the summary when given', async () => {
+      const h = setup();
+      handMade(h, 7, { labels: ['sdlc:task'] });
+      await taskNew(h.ctx, { issue: 7, type: 'tooling', summary: 'Clean up the scripts' });
+      expect((await stateOf(h.tracker, 7)).summary).toBe('Clean up the scripts');
+    });
+
+    it('refuses an issue that is already tracked, and changes nothing', async () => {
+      const h = setup();
+      const issue = await newTask(h);
+      const writes = h.tracker.writes;
+      await expect(taskNew(h.ctx, { issue, type: 'tooling' })).rejects.toThrow(
+        `#${issue} is already tracked (type "feature"); use "sdlc task set-type" to change its type`,
+      );
+      expect(h.tracker.writes).toBe(writes);
+    });
+
+    it('refuses an issue whose state comment is corrupt', async () => {
+      const h = setup();
+      handMade(h, 7, { labels: ['sdlc:task'] });
+      h.tracker.seedComment(7, { body: `${STATE_MARKER}\nnot json`, author: 'sdlc-bot' });
+      await expect(taskNew(h.ctx, { issue: 7, type: 'tooling' })).rejects.toThrow(
+        /#7 has a state comment that cannot be read/,
+      );
+      expect(issueOf(h.tracker, 7).labels).toEqual(['sdlc:task']);
+    });
+
+    it('refuses a title, which the issue already has', async () => {
+      const h = setup();
+      handMade(h, 7);
+      await expect(taskNew(h.ctx, { issue: 7, type: 'tooling', title: 'Other' })).rejects.toThrow(
+        '--title cannot be used with --issue: the issue keeps its own title',
+      );
+    });
+  });
+
   it('keeps an explicit issue body', async () => {
     const h = setup();
     const { issue } = await taskNew(h.ctx, { title: 'T', summary: 'S', type: 'tooling', body: 'Long text' });
@@ -1219,6 +1291,23 @@ describe('commander wiring', () => {
 
     expect(h.err).toEqual([]);
     expect(await stateOf(h.tracker, 1)).toMatchObject({ type: 'artifact', status: 'in_review', targets: ['web'] });
+  });
+
+  it('adopts an existing issue with task new --issue, without --title or --summary', async () => {
+    const h = setup();
+    h.tracker.issues.push({ number: 4, title: 'Old issue', body: '', labels: [], open: true, onBoard: false });
+    const root = program(h);
+    await run(root, 'task', 'new', '--issue', '4', '--type', 'tooling');
+    expect(h.err).toEqual([]);
+    expect(h.out).toEqual(['Tracking #4: https://github.test/issues/4']);
+    expect((await stateOf(h.tracker, 4)).summary).toBe('Old issue');
+  });
+
+  it('still needs --title and --summary for a new issue', async () => {
+    const h = setup();
+    const root = program(h);
+    await run(root, 'task', 'new', '--type', 'tooling', '--summary', 'S');
+    expect(h.err).toEqual(['A new task needs --title (or --issue to adopt an existing issue)']);
   });
 
   it('passes --comment-url to set-type', async () => {

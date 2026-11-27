@@ -143,6 +143,7 @@ describe('statusReport', () => {
     const report = await statusReport(h.ctx, { staleDays: 7 });
 
     expect(report.untracked).toEqual([{ issue: 9, title: 'Hand-made task' }]);
+    expect(report.pendingReconcile.filter(a => a.issue === 9)).toEqual([]);
     expect(issues(Object.values(report.byStatus).flat())).toEqual([1]);
   });
 

@@ -40,6 +40,8 @@ export interface ReconcileAction {
     | 'delivery_report'
     | 'cancel_report'
     | 'skipped_unknown_type'
+    /** An `sdlc:task` issue without readable state: left alone, not an error (`sdlc task new --issue` adopts it). */
+    | 'untracked'
     | 'error';
   detail: string;
 }
@@ -106,6 +108,7 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
     listTrackedTasks: () => once('scan', () => inner.scanTasks()).then(scan => scan.tracked),
     listUntracked: () => once('scan', () => inner.scanTasks()).then(scan => scan.untracked),
     getTask: issue => inner.getTask(issue),
+    getIssue: issue => inner.getIssue(issue),
     listComments: (issue, sinceIso) => inner.listComments(issue, sinceIso),
     listTaskPrs: issue => inner.listTaskPrs(issue),
     getPr: pr => inner.getPr(pr),
@@ -139,8 +142,10 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
  *    delivery report is posted before the state is written, unless a trusted author (tracker
  *    login, owner, Actions bot) already posted one since the last reopen; a failed post writes
  *    nothing;
- * 5. the state is written when it changed, the board fields are synced (every run; the tracker
- *    skips unchanged fields) and the issue is opened or closed to match the projection.
+ * 5. the state is written when it changed, the board fields are synced (the tracker skips
+ *    unchanged fields) and the issue is opened or closed, with the right reason, to match the
+ *    projection. A done task that did not change and whose issue is closed with the right reason
+ *    is left alone.
  * Done tasks get no events in steps 2-4. Events are timed with GitHub's clock: the merge time, the
  * comment time, the newest satisfying deployment or release.
  *
@@ -150,7 +155,8 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
  * A failure on one task is recorded as an `error` action and the other tasks still run; a failed
  * read or write stops that task's remaining steps, except that failed field and issue syncs are
  * independent of each other. `errors` counts the `error` actions. In a full run (no `issue`, `only`
- * not `deployments`) each `sdlc:task` issue without readable state is also an `error`.
+ * not `deployments`) each `sdlc:task` issue without readable state is reported `untracked`, which
+ * is not an error: reconcile leaves it alone.
  */
 export async function reconcile(ctx: CommandContext, opts: ReconcileOptions = {}): Promise<ReconcileResult> {
   const dryRun = opts.dryRun ?? false;
@@ -194,7 +200,7 @@ async function loadTasks(
   }
   if (only === 'all') {
     for (const issue of scan.untracked) {
-      actions.push({ issue: issue.issue, kind: 'error', detail: `untracked sdlc:task issue: ${issue.reason}` });
+      actions.push({ issue: issue.issue, kind: 'untracked', detail: `untracked sdlc:task issue: ${issue.reason}` });
     }
   }
   return scan.tracked;

@@ -7,10 +7,12 @@ import {
 import type { BoardFields } from '../../src/core/projection.js';
 import type { TaskState } from '../../src/core/types.js';
 import {
+  NoStateCommentError,
   StateChangedError,
   type DeploymentInfo,
   type ExpectedStateComment,
   type IssueComment,
+  type IssueInfo,
   type PrInfo,
   type ReleaseInfo,
   type TrackedTask,
@@ -192,8 +194,14 @@ export class FakeTracker implements Tracker {
     this.begin('getTask');
     const found = this.issue(issue);
     const stateComment = this.findStateComment(issue);
-    if (!stateComment) throw new Error(`FakeTracker: issue #${issue} has no state comment`);
+    if (!stateComment) throw new NoStateCommentError(issue);
     return this.toTrackedTask(found, stateComment);
+  }
+
+  async getIssue(issue: number): Promise<IssueInfo> {
+    this.begin('getIssue');
+    const found = this.issue(issue);
+    return { number: found.number, title: found.title, url: `https://github.test/issues/${found.number}`, open: found.open };
   }
 
   async writeState(issue: number, state: TaskState, expected?: ExpectedStateComment): Promise<void> {

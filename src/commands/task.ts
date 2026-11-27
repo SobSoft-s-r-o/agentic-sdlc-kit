@@ -3,6 +3,8 @@ import { newTask, TransitionError } from '../core/stateMachine.js';
 import { typeRegistry } from '../config/schema.js';
 import { validateOwnerComment } from '../core/approvals.js';
 import type { EndsOn, TaskState, WaitingOn } from '../core/types.js';
+import { StateCommentError } from '../core/stateComment.js';
+import { NoStateCommentError } from '../tracker/types.js';
 import { findComment } from './approve.js';
 import {
   commit,
@@ -22,14 +24,16 @@ import {
 
 /**
  * Creates the tracked issue (labels `sdlc:task` and `type:<id>`), adds it to the board and writes
- * the initial state, at the first phase of the type.
+ * the initial state, at the first phase of the type. With `issue`, adopts that existing issue
+ * instead (see `adoptIssue`).
  */
 export async function taskNew(
   ctx: CommandContext,
-  input: { title: string; summary: string; type: string; body?: string },
+  input: { title?: string; summary?: string; type: string; body?: string; issue?: number },
 ): Promise<{ issue: number; url: string }> {
-  const title = input.title.trim();
-  const summary = input.summary.trim();
+  if (input.issue !== undefined) return adoptIssue(ctx, { ...input, issue: input.issue });
+  const title = input.title?.trim() ?? '';
+  const summary = input.summary?.trim() ?? '';
   if (!title) throw new Error('A task needs a title');
   if (!summary) throw new Error('A task needs a summary');
   const type = resolveType(ctx.cfg, input.type);
@@ -43,6 +47,43 @@ export async function taskNew(
   const state: TaskState = { ...newTask({ issue, type, summary, now: ctx.now() }), phase: type.phases[0] };
   await saveAndSync(ctx, issue, state, type, true, { writeHint: untracked });
   return { issue, url: created.url };
+}
+
+/**
+ * Starts tracking an existing issue that has no state comment: adds the `sdlc:task` and `type:<id>`
+ * labels, puts it on the board and writes the initial state. The issue keeps its title and body;
+ * the summary defaults to the title. Refused when the issue is already tracked or its state comment
+ * cannot be read.
+ */
+async function adoptIssue(
+  ctx: CommandContext,
+  input: { issue: number; type: string; title?: string; summary?: string; body?: string },
+): Promise<{ issue: number; url: string }> {
+  const { issue } = input;
+  if (input.title !== undefined) throw new Error('--title cannot be used with --issue: the issue keeps its own title');
+  if (input.body !== undefined) throw new Error('--body cannot be used with --issue: the issue keeps its own body');
+  const type = resolveType(ctx.cfg, input.type);
+  const found = await trackerStep('getIssue', issue, () => ctx.tracker.getIssue(issue));
+  try {
+    const tracked = await ctx.tracker.getTask(issue);
+    throw new Error(
+      `#${issue} is already tracked (type "${tracked.state.type}"); use "sdlc task set-type" to change its type`,
+    );
+  } catch (error) {
+    if (error instanceof StateCommentError) {
+      throw new Error(`#${issue} has a state comment that cannot be read (${error.message}); fix or delete it first`);
+    }
+    if (!(error instanceof NoStateCommentError)) throw error;
+  }
+
+  const summary = input.summary?.trim() || found.title.trim();
+  if (!summary) throw new Error('A task needs a summary');
+  const untracked = `issue #${issue} has no task state yet; "sdlc status" lists it as untracked`;
+  await trackerStep('setLabels', issue, () => ctx.tracker.setLabels(issue, ['sdlc:task', `type:${type.id}`], []));
+  await trackerStep('addToBoard', issue, () => ctx.tracker.addToBoard(issue), untracked);
+  const state: TaskState = { ...newTask({ issue, type, summary, now: ctx.now() }), phase: type.phases[0] };
+  await saveAndSync(ctx, issue, state, type, found.open, { writeHint: untracked });
+  return { issue, url: found.url };
 }
 
 /** Ends that need an owner, or a deployment, beyond the merge. */
@@ -149,20 +190,30 @@ export function registerTaskCommand(program: Command, makeContext: ContextFactor
 
   task
     .command('new')
-    .description('Create a tracked task: an issue on the board at its first phase')
-    .requiredOption('--title <text>', 'issue title')
-    .requiredOption('--summary <text>', 'one-line summary shown on the board')
+    .description('Create a tracked task: an issue on the board at its first phase (or adopt an existing issue)')
+    .option('--title <text>', 'issue title')
+    .option('--summary <text>', 'one-line summary shown on the board (with --issue: defaults to its title)')
     .requiredOption('--type <id>', 'task type id')
     .option('--body <text>', 'issue body (defaults to the summary)')
+    .option('--issue <number>', 'adopt this existing issue, which has no task state yet, instead of creating one')
     .option('--json', 'print machine-readable JSON')
-    .action(async (options: { title: string; summary: string; type: string; body?: string; json?: boolean }) => {
-      await runCommand(
-        makeContext,
-        options,
-        ctx => taskNew(ctx, options),
-        created => `Created #${created.issue}: ${created.url}`,
-      );
-    });
+    .action(
+      async (options: { title?: string; summary?: string; type: string; body?: string; issue?: string; json?: boolean }) => {
+        await runCommand(
+          makeContext,
+          options,
+          async ctx => {
+            if (options.issue !== undefined) {
+              return taskNew(ctx, { ...options, issue: parseIssueNumber(options.issue) });
+            }
+            if (options.title === undefined) throw new Error('A new task needs --title (or --issue to adopt an existing issue)');
+            if (options.summary === undefined) throw new Error('A new task needs --summary');
+            return taskNew(ctx, { ...options, issue: undefined });
+          },
+          created => `${options.issue !== undefined ? 'Tracking' : 'Created'} #${created.issue}: ${created.url}`,
+        );
+      },
+    );
 
   task
     .command('set-type')

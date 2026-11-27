@@ -893,21 +893,21 @@ describe('robustness', () => {
     });
   });
 
-  it('reports untracked sdlc:task issues in a full run only', async () => {
+  it('reports untracked sdlc:task issues in a full run only, as untracked rather than errors', async () => {
     const h = setup();
     h.tracker.seedTask(task(1, 'feature'));
     h.tracker.issues.push({ number: 2, title: 'x', body: '', labels: ['sdlc:task'], open: true, onBoard: true });
 
     const full = await reconcile(h.ctx, {});
-    expect(full.errors).toBe(1);
+    expect(full.errors).toBe(0);
     expect(full.actions).toContainEqual({
       issue: 2,
-      kind: 'error',
+      kind: 'untracked',
       detail: 'untracked sdlc:task issue: missing state comment',
     });
 
-    expect((await reconcile(h.ctx, { issue: 1 })).errors).toBe(0);
-    expect((await reconcile(h.ctx, { only: 'deployments' })).errors).toBe(0);
+    expect((await reconcile(h.ctx, { issue: 1 })).actions.some(a => a.kind === 'untracked')).toBe(false);
+    expect((await reconcile(h.ctx, { only: 'deployments' })).actions.some(a => a.kind === 'untracked')).toBe(false);
   });
 });
 

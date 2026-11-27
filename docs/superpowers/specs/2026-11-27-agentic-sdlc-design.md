@@ -277,8 +277,9 @@ single-select would clear values on existing items (verify `updateProjectV2Field
 behaviour at build), init refuses for that board and recommends a new one. The
 built-in Status field is reused and extended. One board serves one repo in v1, but
 every query is scoped by repository so a shared board does not break. Items without
-an `sdlc:state` comment are ignored by reconcile and listed as "untracked" by
-`sdlc status`.
+an `sdlc:state` comment are ignored by reconcile (reported as `untracked`, not as
+errors) and listed as "untracked" by `sdlc status`. `sdlc task new --issue <n>
+--type <id>` adopts such an existing issue: labels, initial state, board item.
 
 **Owner approval** (owner decision): an approval, acceptance, production-data run
 confirmation, merge instruction or cancellation counts only from one of two sources:

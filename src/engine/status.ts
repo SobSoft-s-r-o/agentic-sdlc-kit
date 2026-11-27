@@ -45,9 +45,14 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Reconcile actions that would write nothing (an owner command that does not count, a task type
- * that is not enabled); every other kind is drift a reconcile would fix, or a problem.
+ * that is not enabled, an untracked issue, which `untracked` already lists); every other kind is
+ * drift a reconcile would fix, or a problem.
  */
-const QUIET_KINDS: ReadonlySet<ReconcileAction['kind']> = new Set(['ignored_approval', 'skipped_unknown_type']);
+const QUIET_KINDS: ReadonlySet<ReconcileAction['kind']> = new Set([
+  'ignored_approval',
+  'skipped_unknown_type',
+  'untracked',
+]);
 
 const reasonOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 

@@ -81,6 +81,9 @@ describe('sdlc status', () => {
     expect(text).toContain('Awaiting deployment for more than 7 days (1)');
     expect(text).toContain('Untracked sdlc:task issues (1)');
     expect(text).toContain('#9 Hand-made');
+    // Listed once, under untracked issues, not again under pending reconcile.
+    expect(text.match(/#9 /g)).toHaveLength(1);
+    expect(text).not.toContain('Pending reconcile');
     expect(text).not.toContain('Paused on the agent');
     expect(text).not.toContain('Ready (');
     expect(text).not.toContain('\u001b[');

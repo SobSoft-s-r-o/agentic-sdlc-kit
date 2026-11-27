@@ -12,6 +12,7 @@ import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
 import { GhError } from '../../src/github/gh.js';
 import { resolveFieldIds } from '../../src/github/board.js';
 import { GitHubTracker } from '../../src/github/githubTracker.js';
+import { NoStateCommentError } from '../../src/tracker/types.js';
 import { fakeGh, type FakeGh, type FakeGhStep } from '../support/fakeGh.js';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '../fixtures');
@@ -232,6 +233,25 @@ describe('GitHubTracker tracked tasks', () => {
       comments(14),
     ]);
     await expect(tracker.getTask(14)).rejects.toThrow(/#14 has no state comment/);
+    await expect(
+      trackerFor([
+        ok(['issue', 'view', '14'], JSON.stringify({ number: 14, title: 'x', state: 'OPEN', stateReason: '' })),
+        LOGIN,
+        comments(14),
+      ]).tracker.getTask(14),
+    ).rejects.toBeInstanceOf(NoStateCommentError);
+  });
+
+  it('getIssue reads any issue, tracked or not', async () => {
+    const view = ['issue', 'view', '14', '--repo', 'acme/shop', '--json', 'number,title,url,state'];
+    const row = { number: 14, title: 'Labelled by hand', url: 'https://github.com/acme/shop/issues/14', state: 'CLOSED' };
+    const { tracker } = trackerFor([ok(view, JSON.stringify(row))]);
+    expect(await tracker.getIssue(14)).toEqual({
+      number: 14,
+      title: 'Labelled by hand',
+      url: 'https://github.com/acme/shop/issues/14',
+      open: false,
+    });
   });
 
   it('getTask throws StateCommentError when the state comment is corrupt', async () => {
