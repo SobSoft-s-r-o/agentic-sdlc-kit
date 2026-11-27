@@ -95,15 +95,13 @@ export function loadMcpCatalog(): McpServerDef[] {
 const idList = (defs: readonly McpServerDef[]): string => defs.map(def => def.id).join(', ') || 'none';
 
 /**
- * One message per problem in the `mcp.servers` ids: an empty list, an id listed twice (reported
- * once however often it repeats) and an id the catalog does not have. This is what the config
- * schema asks by default, so a config that names a server the catalog lacks never loads.
+ * One message per problem in the `mcp.servers` ids: an id listed twice (reported once however often
+ * it repeats) and an id the catalog does not have. An empty list is valid: it is the explicit
+ * opt-out, and renders no MCP changes or notes. This is what the config schema asks by default,
+ * so a config that names a server the catalog lacks never loads.
  */
 export function validateMcpIds(ids: string[]): string[] {
   const known = loadMcpCatalog();
-  if (ids.length === 0) {
-    return [`must list at least one MCP server (catalog ids: ${idList(known)})`];
-  }
   const messages: string[] = [];
   const seen = new Set<string>();
   const reported = new Set<string>();

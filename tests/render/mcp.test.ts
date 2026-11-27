@@ -282,6 +282,18 @@ describe('renderMcp, other cases', () => {
   });
 });
 
+describe('mcp.servers: [] (explicit opt-out)', () => {
+  for (const scope of ['project', 'user']) {
+    it(`renders no changes, commands or notes for any harness in ${scope} scope`, () => {
+      const cfg = cfgWith(`mcp:\n  servers: []\n  scope: ${scope}\n`);
+      for (const harness of ['claude', 'codex', 'gemini', 'agents-md'] as const) {
+        expect(renderMcp(cfg, harness)).toEqual({ changes: [], userCommands: [] });
+      }
+      expect(mcpNotes(cfg)).toEqual([]);
+    });
+  }
+});
+
 describe('renderMcp, user scope', () => {
   const COMMANDS: Record<Exclude<Harness, 'agents-md'>, { remote: string; local: string }> = {
     claude: {
@@ -419,10 +431,9 @@ describe('mcp.servers validation through the config', () => {
     expect(message).toContain('github, context7, playwright');
   });
 
-  it('rejects an empty list', () => {
-    const message = messageOf('mcp:\n  servers: []\n');
-    expect(message).toContain('mcp.servers');
-    expect(message).toContain('at least one');
+  it('accepts an empty list as the explicit opt-out, and keeps [github] when mcp is omitted', () => {
+    expect(cfgWith('mcp:\n  servers: []\n').mcp.servers).toEqual([]);
+    expect(cfgWith().mcp.servers).toEqual(['github']);
   });
 
   it('rejects a duplicate id once, however often it repeats', () => {
@@ -434,18 +445,19 @@ describe('mcp.servers validation through the config', () => {
   it('accepts every catalog id, and validateMcpIds reports each problem as one message', () => {
     expect(cfgWith(ALL).mcp.servers).toEqual(['github', 'context7', 'playwright']);
     expect(validateMcpIds(['github', 'context7'])).toEqual([]);
-    expect(validateMcpIds([])).toHaveLength(1);
+    expect(validateMcpIds([])).toEqual([]);
     expect(validateMcpIds(['a', 'github', 'github'])).toHaveLength(2);
   });
 
   it('is what the config asks by default, and an injected validator still replaces it', () => {
-    const restore = setMcpIdValidator(() => []);
+    const restore = setMcpIdValidator(ids => ids.map(id => `custom check rejects ${id}`));
     try {
-      expect(cfgWith('mcp:\n  servers: []\n').mcp.servers).toEqual([]);
+      expect(messageOf('mcp:\n  servers: [github]\n')).toContain('custom check rejects github');
     } finally {
       restore();
     }
-    expect(messageOf('mcp:\n  servers: []\n')).toContain('at least one');
+    expect(cfgWith('mcp:\n  servers: [github]\n').mcp.servers).toEqual(['github']);
+    expect(messageOf('mcp:\n  servers: [nope]\n')).toContain('unknown MCP server "nope"');
   });
 });
 
