@@ -116,6 +116,19 @@ describe('stage_published', () => {
     expect(second.stages.planning).toEqual({ revision: 2, publishedAt: ts(2) });
   });
 
+  it('drops the previous approval when a stage is published again', () => {
+    const next = drive(
+      feature,
+      fresh('feature'),
+      [{ kind: 'stage_published', phase: 'planning', needsApproval: true }, 1],
+      [{ kind: 'stage_approved', phase: 'planning', approval: approval(ts(2)) }, 3],
+      [{ kind: 'stage_published', phase: 'planning', needsApproval: true }, 4],
+    );
+    expect(next.stages.planning).toEqual({ revision: 2, publishedAt: ts(4) });
+    expect('approval' in (next.stages.planning ?? {})).toBe(false);
+    expect(next.status).toBe('paused');
+  });
+
   it('pauses and waits on the owner when approval is needed', () => {
     const next = applyEvent(fresh('feature'), { kind: 'stage_published', phase: 'planning', needsApproval: true }, feature, ts(1));
     expect(next.status).toBe('paused');
@@ -432,6 +445,43 @@ describe('pr_merged', () => {
     },
   );
 
+  it('stamps finalMergedAt on a final merge only', () => {
+    const feature = typeDef('feature');
+    const partial = applyEvent(fresh('feature'), { kind: 'pr_merged', pr: 1, scope: 'partial', mergeSha: 'a' }, feature, ts(1));
+    expect(partial.finalMergedAt).toBeUndefined();
+    const final = applyEvent(partial, { kind: 'pr_merged', pr: 2, scope: 'final', mergeSha: 'b' }, feature, ts(2));
+    expect(final.finalMergedAt).toBe(ts(2));
+  });
+
+  it('treats the merged report of an owner-acceptance type as its published result', () => {
+    const analysis = typeDef('analysis');
+    const inReview = drive(analysis, fresh('analysis'), [{ kind: 'review_handoff', pr: 6, scope: 'final', targets: [] }, 1]);
+    expect(inReview.resultPublishedAt).toBeUndefined();
+    const next = applyEvent(inReview, { kind: 'pr_merged', pr: 6, scope: 'final', mergeSha: 's' }, analysis, ts(2));
+    expect(next.resultPublishedAt).toBe(ts(2));
+    expect(next.status).toBe('paused');
+  });
+
+  it('keeps a result that was already published when the report PR merges', () => {
+    const analysis = typeDef('analysis');
+    const next = drive(
+      analysis,
+      fresh('analysis'),
+      [{ kind: 'stage_published', phase: 'delivery', needsApproval: true }, 1],
+      [{ kind: 'pr_merged', pr: 6, scope: 'final', mergeSha: 's' }, 2],
+    );
+    expect(next.resultPublishedAt).toBe(ts(1));
+  });
+
+  it('does not publish a result on merge for other types', () => {
+    const prodData = typeDef('production-data');
+    const next = applyEvent(fresh('production-data'), { kind: 'pr_merged', pr: 6, scope: 'final', mergeSha: 's' }, prodData, ts(2));
+    expect(next.resultPublishedAt).toBeUndefined();
+    const feature = typeDef('feature');
+    const merged = applyEvent(fresh('feature'), { kind: 'pr_merged', pr: 6, scope: 'final', mergeSha: 's' }, feature, ts(2));
+    expect(merged.resultPublishedAt).toBeUndefined();
+  });
+
   it('records a merge for a PR that was never handed off', () => {
     const tooling = typeDef('tooling');
     const next = applyEvent(fresh('tooling'), { kind: 'pr_merged', pr: 99, scope: 'final', mergeSha: 'late' }, tooling, ts(1));
@@ -676,6 +726,37 @@ describe('accepted', () => {
     expect(next.outcome).toBe('completed');
   });
 
+  it('analysis delivered through a merged report is accepted by a newer approval', () => {
+    const merged = drive(
+      analysis,
+      fresh('analysis'),
+      [{ kind: 'review_handoff', pr: 6, scope: 'final', targets: [] }, 1],
+      [{ kind: 'pr_merged', pr: 6, scope: 'final', mergeSha: 's' }, 2],
+    );
+    expect(() => applyEvent(merged, { kind: 'accepted', approval: approval(ts(1)) }, analysis, ts(3))).toThrow(
+      TransitionError,
+    );
+    const next = applyEvent(merged, { kind: 'accepted', approval: approval(ts(3)) }, analysis, ts(4));
+    expect(next.status).toBe('done');
+    expect(next.outcome).toBe('completed');
+  });
+
+  it('rejects an acceptance older than a reopen even when it is newer than the published result', () => {
+    const reopened = drive(
+      analysis,
+      fresh('analysis'),
+      [{ kind: 'stage_published', phase: 'delivery', needsApproval: true }, 1],
+      [{ kind: 'cancelled', reason: 'on hold', approval: approval(ts(2)) }, 3],
+      [{ kind: 'reopened' }, 4],
+    );
+    expect(reopened.resultPublishedAt).toBe(ts(1));
+    expect(() => applyEvent(reopened, { kind: 'accepted', approval: approval(ts(2)) }, analysis, ts(5))).toThrow(/reopen/);
+    expect(() => applyEvent(reopened, { kind: 'accepted', approval: approval(ts(4)) }, analysis, ts(5))).toThrow(
+      TransitionError,
+    );
+    expect(applyEvent(reopened, { kind: 'accepted', approval: approval(ts(5)) }, analysis, ts(6)).status).toBe('done');
+  });
+
   it('completes a merge-or-acceptance task that was never merged', () => {
     const artifact = typeDef('artifact');
     const next = drive(
@@ -745,6 +826,42 @@ describe('confirmed_ran', () => {
     const merged = applyEvent(reviewReady(), { kind: 'pr_merged', pr: 8, scope: 'final', mergeSha: 's' }, prodData, ts(4));
     const next = applyEvent(merged, { kind: 'confirmed_ran', approval: a }, prodData, ts(6));
     expect(next.outcomeApproval).toEqual(a);
+  });
+
+  it('a reopened task cannot be closed again by the old confirmation', () => {
+    const done = drive(
+      prodData,
+      reviewReady(),
+      [{ kind: 'pr_merged', pr: 8, scope: 'final', mergeSha: 's' }, 4],
+      [{ kind: 'confirmed_ran', approval: approval(ts(5)) }, 6],
+    );
+    expect(done.status).toBe('done');
+
+    const reopened = applyEvent(done, { kind: 'reopened' }, prodData, ts(7));
+    expect(reopened.finalMergedAt).toBeUndefined();
+    // No final merge yet in the new cycle: even a fresh approval cannot confirm a run of the old merge.
+    expect(() => applyEvent(reopened, { kind: 'confirmed_ran', approval: approval(ts(5)) }, prodData, ts(9))).toThrow(
+      TransitionError,
+    );
+    expect(() => applyEvent(reopened, { kind: 'confirmed_ran', approval: approval(ts(8)) }, prodData, ts(9))).toThrow(
+      /final PR has not been merged/,
+    );
+
+    const remerged = drive(
+      prodData,
+      reopened,
+      [{ kind: 'review_handoff', pr: 9, scope: 'final', targets: [] }, 8],
+      [{ kind: 'pr_merged', pr: 9, scope: 'final', mergeSha: 's2' }, 9],
+    );
+    expect(remerged.finalMergedAt).toBe(ts(9));
+    // The merge is new, but the old approval predates the reopen.
+    expect(() => applyEvent(remerged, { kind: 'confirmed_ran', approval: approval(ts(5)) }, prodData, ts(10))).toThrow(/reopen/);
+    expect(() => applyEvent(remerged, { kind: 'confirmed_ran', approval: approval(ts(7)) }, prodData, ts(10))).toThrow(
+      TransitionError,
+    );
+    const again = applyEvent(remerged, { kind: 'confirmed_ran', approval: approval(ts(10)) }, prodData, ts(11));
+    expect(again.status).toBe('done');
+    expect(again.outcomeApproval?.at).toBe(ts(10));
   });
 
   it('rejects confirmation before the final PR merged', () => {
@@ -817,6 +934,32 @@ describe('cancelled', () => {
     expect(next.outcome).toBe('cancelled');
   });
 
+  it('clears pending targets when cancelled from awaiting deployment', () => {
+    const awaiting = applyEvent(featureInReview(['web', 'api']), { kind: 'pr_merged', pr: 11, scope: 'final', mergeSha: 's' }, feature, ts(20));
+    expect(awaiting.pendingTargets).toEqual(['web', 'api']);
+    const next = applyEvent(awaiting, { kind: 'cancelled', reason: 'rolled back', approval: approval(ts(30)) }, feature, ts(31));
+    expect(next.pendingTargets).toEqual([]);
+    expect(next.targets).toEqual(['web', 'api']);
+  });
+
+  it('rejects a cancellation that is not newer than the last reopen', () => {
+    const reopened = drive(
+      feature,
+      fresh('feature'),
+      [{ kind: 'cancelled', reason: 'first', approval: approval(ts(1)) }, 2],
+      [{ kind: 'reopened' }, 3],
+    );
+    expect(() =>
+      applyEvent(reopened, { kind: 'cancelled', reason: 'stale', approval: approval(ts(1)) }, feature, ts(5)),
+    ).toThrow(/reopen/);
+    expect(() =>
+      applyEvent(reopened, { kind: 'cancelled', reason: 'stale', approval: approval(ts(3)) }, feature, ts(5)),
+    ).toThrow(TransitionError);
+    const next = applyEvent(reopened, { kind: 'cancelled', reason: 'fresh', approval: approval(ts(4)) }, feature, ts(5));
+    expect(next.status).toBe('done');
+    expect(next.cancelReason).toBe('fresh');
+  });
+
   it('cannot cancel a task that is already done', () => {
     const done = applyEvent(
       fresh('feature'),
@@ -854,6 +997,60 @@ describe('reopened', () => {
     expect('outcome' in reopened).toBe(false);
     expect(reopened.cancelReason).toBeUndefined();
     expect('outcomeApproval' in reopened).toBe(false);
+  });
+
+  it('restarts at the first phase of the type and records when it was reopened', () => {
+    const cancelled = applyEvent(
+      fresh('feature'),
+      { kind: 'cancelled', reason: 'paused for now', approval: approval(ts(1)) },
+      feature,
+      ts(2),
+    );
+    expect(cancelled.reopenedAt).toBeUndefined();
+    const reopened = applyEvent(cancelled, { kind: 'reopened' }, feature, ts(3));
+    expect(reopened.phase).toBe('intake');
+    expect(reopened.reopenedAt).toBe(ts(3));
+  });
+
+  it('a reopened delivered task can go back to an earlier phase', () => {
+    const done = drive(
+      feature,
+      featureInReview(['web']),
+      [{ kind: 'pr_merged', pr: 11, scope: 'final', mergeSha: 's' }, 20],
+      [{ kind: 'targets_deployed', targets: ['web'], deploymentUrls: ['https://example.test/deploy/1'] }, 21],
+    );
+    expect(done.status).toBe('done');
+    expect(done.phase).toBe('delivery');
+    const reopened = applyEvent(done, { kind: 'reopened' }, feature, ts(22));
+    const next = applyEvent(reopened, { kind: 'phase_started', phase: 'implementation' }, feature, ts(23));
+    expect(next.phase).toBe('implementation');
+    expect(next.status).toBe('in_progress');
+  });
+
+  it('keeps the latest reopen time when a task is reopened twice', () => {
+    const next = drive(
+      feature,
+      fresh('feature'),
+      [{ kind: 'cancelled', reason: 'a', approval: approval(ts(1)) }, 2],
+      [{ kind: 'reopened' }, 3],
+      [{ kind: 'cancelled', reason: 'b', approval: approval(ts(4)) }, 5],
+      [{ kind: 'reopened' }, 6],
+    );
+    expect(next.reopenedAt).toBe(ts(6));
+  });
+
+  it('does not mutate a done input state', () => {
+    const done = deepFreeze(
+      applyEvent(
+        fresh('feature'),
+        { kind: 'cancelled', reason: 'dropped', approval: approval(ts(1)) },
+        feature,
+        ts(2),
+      ),
+    );
+    const snapshot = structuredClone(done);
+    expect(applyEvent(done, { kind: 'reopened' }, feature, ts(3)).status).toBe('in_progress');
+    expect(done).toEqual(snapshot);
   });
 
   it('keeps the published result when a cancelled task is reopened, since nothing accepted it', () => {

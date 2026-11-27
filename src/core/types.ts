@@ -80,6 +80,10 @@ export interface TaskState {
   /** The owner action that ended the task: set by `accepted`, `confirmed_ran`, `cancelled`. */
   outcomeApproval?: Approval;
   resultPublishedAt?: string;
+  /** When the latest final PR merged; set by `pr_merged` (final), cleared by `reopened`. */
+  finalMergedAt?: string;
+  /** When the task was last reopened; owner actions that end the task must be newer. */
+  reopenedAt?: string;
   deliveredBy?: string[];
   updatedAt: string;
 }

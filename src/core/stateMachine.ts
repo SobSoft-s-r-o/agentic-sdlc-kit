@@ -62,6 +62,13 @@ function upsertPr(state: TaskState, number: number, fields: Omit<PrRecord, 'numb
   }
 }
 
+/** After a reopen, an owner action that ends the task must be newer than the reopen itself. */
+function requireNewerThanReopen(state: TaskState, approval: Approval, action: string): void {
+  if (state.reopenedAt && !isAfter(approval.at, state.reopenedAt)) {
+    throw new TransitionError(`${action} at ${approval.at} is not newer than the reopen at ${state.reopenedAt}`);
+  }
+}
+
 function complete(state: TaskState, approval?: Approval): void {
   state.status = 'done';
   state.outcome = 'completed';
@@ -116,8 +123,9 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
       if (!type.phases.includes(event.phase)) {
         throw new TransitionError(`phase "${event.phase}" is not part of task type "${type.id}"`);
       }
-      const stage = next.stages[event.phase] ?? { revision: 0 };
-      next.stages[event.phase] = { ...stage, revision: stage.revision + 1, publishedAt: now };
+      const revision = (next.stages[event.phase]?.revision ?? 0) + 1;
+      // A new revision drops the previous approval: it approved a result that no longer stands.
+      next.stages[event.phase] = { revision, publishedAt: now };
       if (event.needsApproval) {
         next.status = 'paused';
         next.waitingOn = 'owner';
@@ -169,6 +177,7 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
 
     case 'pr_merged': {
       upsertPr(next, event.pr, { scope: event.scope, mergeSha: event.mergeSha });
+      if (event.scope === 'final') next.finalMergedAt = now;
       // While awaiting deployment a merge is only recorded: it must not reset pending targets.
       if (event.scope === 'partial' || state.status === 'awaiting_deployment') break;
 
@@ -184,6 +193,11 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
           next.waitingOn = 'external';
           break;
         case 'owner_acceptance':
+          // The merged report is the result the owner accepts, unless one was published earlier.
+          next.resultPublishedAt ??= now;
+          next.status = 'paused';
+          next.waitingOn = 'owner';
+          break;
         case 'owner_confirmation':
           next.status = 'paused';
           next.waitingOn = 'owner';
@@ -217,6 +231,7 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
           `acceptance at ${event.approval.at} is not newer than the result published at ${next.resultPublishedAt}`,
         );
       }
+      requireNewerThanReopen(state, event.approval, 'acceptance');
       complete(next, event.approval);
       break;
     }
@@ -225,18 +240,21 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
       if (type.endsOn !== 'owner_confirmation') {
         throw new TransitionError(`task type "${type.id}" does not end on owner confirmation`);
       }
-      if (!next.prs.some(pr => pr.scope === 'final' && pr.mergeSha !== undefined)) {
+      if (!next.finalMergedAt) {
         throw new TransitionError('cannot confirm: the final PR has not been merged');
       }
+      requireNewerThanReopen(state, event.approval, 'confirmation');
       complete(next, event.approval);
       break;
     }
 
     case 'cancelled': {
+      requireNewerThanReopen(state, event.approval, 'cancellation');
       next.status = 'done';
       next.outcome = 'cancelled';
       next.cancelReason = event.reason;
       next.outcomeApproval = { ...event.approval };
+      next.pendingTargets = [];
       next.waitingOn = 'none';
       break;
     }
@@ -250,6 +268,10 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
       delete next.outcome;
       delete next.cancelReason;
       delete next.outcomeApproval;
+      delete next.finalMergedAt;
+      // Back to the start so work can resume at any phase; owner actions must now postdate the reopen.
+      next.phase = type.phases[0];
+      next.reopenedAt = now;
       next.status = 'in_progress';
       next.waitingOn = 'agent';
       break;
