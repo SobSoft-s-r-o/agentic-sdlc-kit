@@ -18,9 +18,8 @@ const list = (names: string[]): string => names.join(', ');
 export function formatEnsureResult(result: EnsureBoardResult, dryRun: boolean): string {
   const lines: string[] = [];
   if (result.created) {
-    lines.push(
-      `Created project #${result.projectNumber}; set github.project.number: ${result.projectNumber} in sdlc.config.yaml`,
-    );
+    // The "Created project #N (url); set github.project.number ..." notice went out when it was created.
+    lines.push(`Project #${result.projectNumber} (new)`);
   } else if (result.wouldCreateProject) {
     lines.push('No project configured; a new one would be created');
   } else {

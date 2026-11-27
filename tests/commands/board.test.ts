@@ -239,9 +239,11 @@ describe('formatEnsureResult', () => {
     viewsFailed: [{ name: 'Waiting on owner', error: 'gh: Server Error (HTTP 500)' }],
   };
 
-  it('tells the user to record a newly created project number and lists manual steps', () => {
+  it('names a newly created project without repeating the notice printed when it was created, and lists manual steps', () => {
     const text = formatEnsureResult(base, false);
-    expect(text).toContain('Created project #12; set github.project.number: 12 in sdlc.config.yaml');
+    // "Created project #12 (<url>); set github.project.number ..." was already printed, once, at creation.
+    expect(text.split('\n')[0]).toBe('Project #12 (new)');
+    expect(text).not.toContain('Created project');
     expect(text).toContain('Fields and options are up to date');
     expect(text).toContain('Created views: Board');
     expect(text).toContain('Manual steps:\n  - Create the "In flight" view manually (table layout)');
