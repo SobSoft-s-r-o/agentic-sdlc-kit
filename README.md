@@ -17,6 +17,9 @@ Installable, agent-driven software development lifecycle for GitHub — works wi
 - `sdlc reconcile` - bring tasks, the board and issues in line with merges, approvals and deployments (`--dry-run` only reports). It reads open tasks and those closed within `reconcile.closed_lookback_days` (default 30); `--all` reads every task.
 - `sdlc status` - show tasks by status, what waits on the owner, what is stale (`--stale-days`, default 7), untracked issues and what reconcile would change (`--all` also lists tasks closed before the lookback).
 - `sdlc board ensure` - create the board or add its missing fields, options and views (add-only).
+- `sdlc init` - install the managed files, git hooks and GitHub setup (board, labels, branch and push protection) for `sdlc.config.yaml` (`--dry-run` only reports, `--skip-github` leaves GitHub alone, `--overwrite-modified` replaces files you edited). It commits nothing.
+- `sdlc upgrade` - bring the managed files up to the installed kit version and remove what it no longer generates (`--dry-run`, `--overwrite-modified`). It never touches GitHub.
+- `sdlc uninstall` - remove the managed files and the git hooks path, keeping everything you wrote and edited (`--dry-run`). The board, labels and issues on GitHub remain.
 
 Run `sdlc <command> --help` for the options of each command.
 

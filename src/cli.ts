@@ -17,15 +17,19 @@ import {
   spawnDetachedLogged,
   type GitHookContext,
 } from './commands/githook.js';
+import { registerInitCommand, type InstallContext, type InstallContextFactory } from './commands/init.js';
 import { registerReconcileCommand } from './commands/reconcile.js';
 import { registerReviewCommand } from './commands/review.js';
 import { registerStageCommand } from './commands/stage.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerTaskCommand } from './commands/task.js';
+import { registerUninstallCommand } from './commands/uninstall.js';
+import { registerUpgradeCommand } from './commands/upgrade.js';
 import { errorAsJson, formatCliError } from './commands/errors.js';
 import { loadConfig, type Config } from './config/schema.js';
 import { defaultGhRunner } from './github/gh.js';
 import { GitHubTracker } from './github/githubTracker.js';
+import { nodeRepoFs } from './install/repoFs.js';
 import { createGitRunner } from './install/provision.js';
 import { execProgram, findOnPath } from './secrets/gitleaks.js';
 import { packageVersion } from './version.js';
@@ -41,6 +45,8 @@ export interface CliDeps {
   makeConfigContext?: () => ConfigCommandContext | Promise<ConfigCommandContext>;
   /** Builds the context of `githook`, which loads the config and builds the tracker only if a hook needs them. */
   makeGitHookContext?: () => GitHookContext | Promise<GitHookContext>;
+  /** Builds the context of `init`, `upgrade` and `uninstall`; defaults to the git root, git and `gh`. */
+  makeInstallContext?: InstallContextFactory;
   /** Where results go; defaults to stdout. */
   out?: (text: string) => void;
   /** Where errors go; defaults to stderr. */
@@ -124,6 +130,27 @@ export function buildProgram(deps: CliDeps = {}): Command {
       };
     });
 
+  const makeInstallContext =
+    deps.makeInstallContext ??
+    ((): InstallContext => {
+      // The config is read by the command's first step, so that a broken one is a reported step.
+      const cwd = process.cwd();
+      const root = gitRoot(cwd);
+      if (root === undefined) {
+        throw new Error('Not inside a git repository: run sdlc from the repository you want to install into');
+      }
+      const configOption = program.opts<{ config?: string }>().config;
+      const configPath = configOption === undefined ? join(root, CONFIG_FILE) : resolve(cwd, configOption);
+      return {
+        fs: nodeRepoFs(root),
+        git: createGitRunner(root),
+        gh: defaultGhRunner,
+        loadConfig: () => loadConfig(configPath),
+        out,
+        err,
+      };
+    });
+
   const makeGitHookContext =
     deps.makeGitHookContext ??
     ((): GitHookContext => {
@@ -168,6 +195,9 @@ export function buildProgram(deps: CliDeps = {}): Command {
   registerBoardCommand(program, makeBoardContext);
   registerConfigCommand(program, makeConfigContext);
   registerGitHookCommand(program, makeGitHookContext);
+  registerInitCommand(program, makeInstallContext);
+  registerUpgradeCommand(program, makeInstallContext);
+  registerUninstallCommand(program, makeInstallContext);
   return program;
 }
 

@@ -18,7 +18,7 @@ const cliPath = join(root, 'dist', 'cli.js');
 const version = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version;
 const validConfig = join(root, 'tests', 'fixtures', 'config', 'valid.yaml');
 
-const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board', 'config', 'githook'];
+const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board', 'config', 'githook', 'init', 'upgrade', 'uninstall'];
 
 let dir: string;
 beforeAll(() => {

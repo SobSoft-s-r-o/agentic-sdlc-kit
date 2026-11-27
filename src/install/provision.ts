@@ -261,7 +261,7 @@ export function createGitRunner(cwd?: string): GitRunner {
 export const defaultGitRunner: GitRunner = createGitRunner();
 
 /** `./.sdlc/githooks/` and `.sdlc/githooks` name the same directory. */
-const normalizeHooksPath = (value: string): string => value.trim().replace(/^(?:\.\/)+/, '').replace(/\/+$/, '');
+export const normalizeHooksPath = (value: string): string => value.trim().replace(/^(?:\.\/)+/, '').replace(/\/+$/, '');
 
 export interface HooksPathOptions extends ProvisionOptions {
   /** Called with the explanation when another `core.hooksPath` is already set. */
