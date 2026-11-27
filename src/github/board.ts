@@ -65,7 +65,7 @@ export interface BoardPlan {
 export type FieldKey = keyof BoardFields | 'start' | 'targetDate';
 
 /** Board field names, in creation order. `Type` is a reserved built-in name, hence `Task type`. */
-const FIELD_NAMES: Record<FieldKey, string> = {
+export const FIELD_NAMES: Record<FieldKey, string> = {
   status: 'Status',
   phase: 'Phase',
   type: 'Task type',

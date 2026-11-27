@@ -1,0 +1,289 @@
+{
+  "data": {
+    "owner": {
+      "projectV2": {
+        "id": "PVT_kwDOBx7",
+        "number": 7,
+        "fields": {
+          "nodes": [
+            {
+              "id": "PVTF_lADOBx7Title",
+              "name": "Title",
+              "dataType": "TITLE"
+            },
+            {
+              "id": "PVTF_lADOBx7Assignees",
+              "name": "Assignees",
+              "dataType": "ASSIGNEES"
+            },
+            {
+              "id": "PVTF_lADOBx7Labels",
+              "name": "Labels",
+              "dataType": "LABELS"
+            },
+            {
+              "id": "PVTF_lADOBx7Repo",
+              "name": "Repository",
+              "dataType": "REPOSITORY"
+            },
+            {
+              "id": "PVTSSF_lADOBx7_status",
+              "name": "Status",
+              "dataType": "SINGLE_SELECT",
+              "options": [
+                {
+                  "id": "00001037",
+                  "name": "Ready",
+                  "color": "BLUE",
+                  "description": ""
+                },
+                {
+                  "id": "0000106e",
+                  "name": "In progress",
+                  "color": "GREEN",
+                  "description": ""
+                },
+                {
+                  "id": "000010a5",
+                  "name": "Blocked",
+                  "color": "YELLOW",
+                  "description": ""
+                },
+                {
+                  "id": "000010dc",
+                  "name": "Paused",
+                  "color": "ORANGE",
+                  "description": ""
+                },
+                {
+                  "id": "00001113",
+                  "name": "In review",
+                  "color": "RED",
+                  "description": ""
+                },
+                {
+                  "id": "0000114a",
+                  "name": "Awaiting deployment",
+                  "color": "PINK",
+                  "description": ""
+                },
+                {
+                  "id": "00001181",
+                  "name": "Done",
+                  "color": "PURPLE",
+                  "description": ""
+                }
+              ]
+            },
+            {
+              "id": "PVTSSF_lADOBx7_phase",
+              "name": "Phase",
+              "dataType": "SINGLE_SELECT",
+              "options": [
+                {
+                  "id": "000011b8",
+                  "name": "Intake",
+                  "color": "BLUE",
+                  "description": ""
+                },
+                {
+                  "id": "000011ef",
+                  "name": "Debugging",
+                  "color": "GREEN",
+                  "description": ""
+                },
+                {
+                  "id": "00001226",
+                  "name": "Brainstorming",
+                  "color": "YELLOW",
+                  "description": ""
+                },
+                {
+                  "id": "0000125d",
+                  "name": "Analysis",
+                  "color": "ORANGE",
+                  "description": ""
+                },
+                {
+                  "id": "00001294",
+                  "name": "Exploration",
+                  "color": "RED",
+                  "description": ""
+                },
+                {
+                  "id": "000012cb",
+                  "name": "Creation",
+                  "color": "PINK",
+                  "description": ""
+                },
+                {
+                  "id": "00001302",
+                  "name": "Planning",
+                  "color": "PURPLE",
+                  "description": ""
+                },
+                {
+                  "id": "00001339",
+                  "name": "Implementation",
+                  "color": "GRAY",
+                  "description": ""
+                },
+                {
+                  "id": "00001370",
+                  "name": "Verification",
+                  "color": "BLUE",
+                  "description": ""
+                },
+                {
+                  "id": "000013a7",
+                  "name": "Review",
+                  "color": "GREEN",
+                  "description": ""
+                },
+                {
+                  "id": "000013de",
+                  "name": "Delivery",
+                  "color": "YELLOW",
+                  "description": ""
+                }
+              ]
+            },
+            {
+              "id": "PVTSSF_lADOBx7_task_type",
+              "name": "Task type",
+              "dataType": "SINGLE_SELECT",
+              "options": [
+                {
+                  "id": "00001415",
+                  "name": "Feature",
+                  "color": "BLUE",
+                  "description": ""
+                },
+                {
+                  "id": "0000144c",
+                  "name": "Bug fix",
+                  "color": "GREEN",
+                  "description": ""
+                },
+                {
+                  "id": "00001483",
+                  "name": "Tooling",
+                  "color": "YELLOW",
+                  "description": ""
+                },
+                {
+                  "id": "000014ba",
+                  "name": "Analysis",
+                  "color": "ORANGE",
+                  "description": ""
+                },
+                {
+                  "id": "000014f1",
+                  "name": "Production data",
+                  "color": "RED",
+                  "description": ""
+                },
+                {
+                  "id": "00001528",
+                  "name": "Artifact",
+                  "color": "PINK",
+                  "description": ""
+                },
+                {
+                  "id": "0000155f",
+                  "name": "Spike",
+                  "color": "PURPLE",
+                  "description": ""
+                },
+                {
+                  "id": "00001596",
+                  "name": "Infra change",
+                  "color": "GRAY",
+                  "description": ""
+                }
+              ]
+            },
+            {
+              "id": "PVTSSF_lADOBx7_waiting_on",
+              "name": "Waiting on",
+              "dataType": "SINGLE_SELECT",
+              "options": [
+                {
+                  "id": "000015cd",
+                  "name": "Owner",
+                  "color": "BLUE",
+                  "description": ""
+                },
+                {
+                  "id": "00001604",
+                  "name": "Agent",
+                  "color": "GREEN",
+                  "description": ""
+                },
+                {
+                  "id": "0000163b",
+                  "name": "External",
+                  "color": "YELLOW",
+                  "description": ""
+                },
+                {
+                  "id": "00001672",
+                  "name": "—",
+                  "color": "ORANGE",
+                  "description": ""
+                }
+              ]
+            },
+            {
+              "id": "PVTF_lADOBx7_summary",
+              "name": "Summary",
+              "dataType": "TEXT"
+            },
+            {
+              "id": "PVTF_lADOBx7_current_step",
+              "name": "Current step",
+              "dataType": "TEXT"
+            },
+            {
+              "id": "PVTF_lADOBx7_next_step",
+              "name": "Next step",
+              "dataType": "TEXT"
+            },
+            {
+              "id": "PVTF_lADOBx7_pending_targets",
+              "name": "Pending targets",
+              "dataType": "TEXT"
+            },
+            {
+              "id": "PVTF_lADOBx7_agent",
+              "name": "Agent",
+              "dataType": "TEXT"
+            },
+            {
+              "id": "PVTF_lADOBx7_last_update",
+              "name": "Last update",
+              "dataType": "TEXT"
+            },
+            {
+              "id": "PVTF_lADOBx7_start",
+              "name": "Start",
+              "dataType": "DATE"
+            },
+            {
+              "id": "PVTF_lADOBx7_target_date",
+              "name": "Target date",
+              "dataType": "DATE"
+            }
+          ]
+        },
+        "views": {
+          "nodes": [
+            {
+              "name": "Board"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -10,6 +10,14 @@ export interface TrackedTask {
   stateCommentId: string;
 }
 
+/** A `sdlc:task` issue the tool cannot read state from; `reason` says why, for the user. */
+export interface UntrackedIssue {
+  issue: number;
+  title: string;
+  /** `missing state comment`, or the message of the error from reading a corrupt state comment. */
+  reason: string;
+}
+
 export interface IssueComment {
   id: string;
   url: string;
@@ -44,7 +52,14 @@ export interface DeploymentInfo {
 export interface Tracker {
   createIssue(title: string, body: string, labels: string[]): Promise<{ number: number; url: string }>;
   addToBoard(issue: number): Promise<void>;
+  /**
+   * Tasks with a readable state comment, oldest issue first. Issues whose state comment is missing
+   * or corrupt are skipped, never thrown on; `listUntracked` reports them.
+   */
   listTrackedTasks(): Promise<TrackedTask[]>;
+  /** `sdlc:task` issues with no state comment, or one that cannot be parsed, oldest issue first. */
+  listUntracked(): Promise<UntrackedIssue[]>;
+  /** Throws when the issue has no state comment, and `StateCommentError` when it is corrupt. */
   getTask(issue: number): Promise<TrackedTask>;
   writeState(issue: number, state: TaskState): Promise<void>;
   /** Posts a comment and returns its id. */

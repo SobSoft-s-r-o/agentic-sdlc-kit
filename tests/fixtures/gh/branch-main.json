@@ -1,0 +1,11 @@
+{
+  "name": "main",
+  "commit": {
+    "sha": "abcdef0123456789abcdef0123456789abcdef01",
+    "node_id": "C_abcdef",
+    "commit": {
+      "message": "Merge pull request #35"
+    }
+  },
+  "protected": true
+}

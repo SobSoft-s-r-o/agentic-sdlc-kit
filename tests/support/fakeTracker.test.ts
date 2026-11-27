@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { newTask } from '../../src/core/stateMachine.js';
-import { STATE_MARKER } from '../../src/core/stateComment.js';
+import { STATE_MARKER, StateCommentError } from '../../src/core/stateComment.js';
 import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
 import type { BoardFields } from '../../src/core/projection.js';
 import type { TaskState } from '../../src/core/types.js';
@@ -164,10 +164,62 @@ describe('FakeTracker state', () => {
     expect(listed.map(t => t.issue)).toEqual([2, 5]);
   });
 
+  it('skips a corrupt state comment when listing, but getTask reports it', async () => {
+    const tracker = new FakeTracker();
+    tracker.seedTask(task(2));
+    tracker.seedTask(task(3));
+    tracker.comments.find(c => c.issue === 3)!.body = `${STATE_MARKER}\nnot json`;
+    await expect(tracker.listTrackedTasks()).resolves.toMatchObject([{ issue: 2 }]);
+    await expect(tracker.getTask(3)).rejects.toBeInstanceOf(StateCommentError);
+  });
+
+  it('ignores a state-marker comment written by anyone but the tracker login or the Actions bot', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('T', '', ['sdlc:task']);
+    const forged = tracker.seedComment(number, {
+      body: `${STATE_MARKER}\n\`\`\`json\n{}\n\`\`\``,
+      author: 'intruder',
+    });
+    await expect(tracker.getTask(number)).rejects.toThrow(/no state comment/);
+
+    await tracker.writeState(number, task(number));
+    const own = tracker.comments.find(c => c.id !== forged)!;
+    expect(own.author).toBe(tracker.login);
+    expect((await tracker.getTask(number)).stateCommentId).toBe(own.id);
+
+    tracker.seedTask(task(20), { labels: ['sdlc:task'] });
+    tracker.comments.find(c => c.issue === 20)!.author = 'github-actions[bot]';
+    expect((await tracker.getTask(20)).issue).toBe(20);
+  });
+
   it('seedTask refuses a duplicate issue number', () => {
     const tracker = new FakeTracker();
     tracker.seedTask(task(3));
     expect(() => tracker.seedTask(task(3))).toThrow(/#3/);
+  });
+});
+
+describe('FakeTracker.listUntracked', () => {
+  it('reports sdlc:task issues with a missing or corrupt state comment, in issue order', async () => {
+    const tracker = new FakeTracker();
+    tracker.seedTask(task(1)); // tracked
+    await tracker.createIssue('No state yet', '', ['sdlc:task']); // 2: missing
+    tracker.seedTask(task(3), { title: 'Broken' });
+    tracker.comments.find(c => c.issue === 3)!.body = `${STATE_MARKER}\n\`\`\`json\n{oops\n\`\`\``;
+    await tracker.createIssue('Unrelated issue', '', ['bug']); // 4: not an sdlc:task
+
+    const untracked = await tracker.listUntracked();
+    expect(untracked).toEqual([
+      { issue: 2, title: 'No state yet', reason: 'missing state comment' },
+      { issue: 3, title: 'Broken', reason: expect.stringContaining('invalid JSON') },
+    ]);
+  });
+
+  it('can be made to fail like any other method', async () => {
+    const tracker = new FakeTracker();
+    tracker.failNext('listUntracked');
+    await expect(tracker.listUntracked()).rejects.toThrow(/listUntracked/);
+    await expect(tracker.listUntracked()).resolves.toEqual([]);
   });
 });
 

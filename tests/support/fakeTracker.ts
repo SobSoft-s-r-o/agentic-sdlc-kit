@@ -1,4 +1,9 @@
-import { parseStateComment, renderStateComment, STATE_MARKER } from '../../src/core/stateComment.js';
+import {
+  parseStateComment,
+  renderStateComment,
+  STATE_MARKER,
+  StateCommentError,
+} from '../../src/core/stateComment.js';
 import type { BoardFields } from '../../src/core/projection.js';
 import type { TaskState } from '../../src/core/types.js';
 import type {
@@ -7,6 +12,7 @@ import type {
   PrInfo,
   TrackedTask,
   Tracker,
+  UntrackedIssue,
 } from '../../src/tracker/types.js';
 
 export interface FakeIssue {
@@ -29,13 +35,17 @@ export type FakeDeployment = DeploymentInfo & { target?: string; description?: s
 const CLOCK_START = Date.UTC(2026, 0, 1);
 const MINUTE = 60_000;
 
+/** The login the Actions runner comments as; its state comments count like the tracker's own. */
+const ACTIONS_BOT = 'github-actions[bot]';
+
 const maxOf = (numbers: number[]): number => numbers.reduce((max, n) => Math.max(max, n), 0);
 
 /**
  * In-memory `Tracker` for tests. State is held in public fields so tests can seed and assert on
  * it directly. Task state is stored as the real hidden state comment, so the fake exercises the
  * same render/parse format as production. All timestamps come from one fake clock that advances
- * one minute per use, starting at 2026-01-01T00:01:00.000Z.
+ * one minute per use, starting at 2026-01-01T00:01:00.000Z. As in production, only a state-marker
+ * comment written by `login` or the Actions bot holds state; anyone else's is an ordinary comment.
  */
 export class FakeTracker implements Tracker {
   issues: FakeIssue[] = [];
@@ -109,13 +119,36 @@ export class FakeTracker implements Tracker {
     this.issue(issue).onBoard = true;
   }
 
+  /** Oldest issue first; an issue whose state comment is missing or corrupt is skipped. */
   async listTrackedTasks(): Promise<TrackedTask[]> {
     this.begin('listTrackedTasks');
-    return [...this.issues]
-      .sort((a, b) => a.number - b.number)
+    return this.sortedIssues().flatMap(issue => {
+      const stateComment = this.findStateComment(issue.number);
+      if (!stateComment) return [];
+      try {
+        return [this.toTrackedTask(issue, stateComment)];
+      } catch (error) {
+        if (error instanceof StateCommentError) return [];
+        throw error;
+      }
+    });
+  }
+
+  /** `sdlc:task` issues without a parseable state comment, oldest issue first. */
+  async listUntracked(): Promise<UntrackedIssue[]> {
+    this.begin('listUntracked');
+    return this.sortedIssues()
+      .filter(issue => issue.labels.includes('sdlc:task'))
       .flatMap(issue => {
         const stateComment = this.findStateComment(issue.number);
-        return stateComment ? [this.toTrackedTask(issue, stateComment)] : [];
+        if (!stateComment) return [{ issue: issue.number, title: issue.title, reason: 'missing state comment' }];
+        try {
+          this.toTrackedTask(issue, stateComment);
+          return [];
+        } catch (error) {
+          if (!(error instanceof StateCommentError)) throw error;
+          return [{ issue: issue.number, title: issue.title, reason: error.message }];
+        }
       });
   }
 
@@ -257,6 +290,10 @@ export class FakeTracker implements Tracker {
     return new Date(CLOCK_START + this.clock * MINUTE).toISOString();
   }
 
+  private sortedIssues(): FakeIssue[] {
+    return [...this.issues].sort((a, b) => a.number - b.number);
+  }
+
   private issue(number: number): FakeIssue {
     const found = this.issues.find(i => i.number === number);
     if (!found) throw new Error(`FakeTracker: issue #${number} not found`);
@@ -283,7 +320,12 @@ export class FakeTracker implements Tracker {
   }
 
   private findStateComment(issue: number): FakeComment | undefined {
-    return this.comments.find(c => c.issue === issue && c.body.trimStart().startsWith(STATE_MARKER));
+    return this.comments.find(
+      c =>
+        c.issue === issue &&
+        c.body.trimStart().startsWith(STATE_MARKER) &&
+        (c.author === this.login || c.author === ACTIONS_BOT),
+    );
   }
 
   private toTrackedTask(issue: FakeIssue, stateComment: FakeComment): TrackedTask {

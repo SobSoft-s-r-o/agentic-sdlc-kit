@@ -1,0 +1,22 @@
+[
+  {
+    "url": "https://api.github.com/repos/acme/shop/issues/comments/5201",
+    "html_url": "https://github.com/acme/shop/issues/14#issuecomment-5201",
+    "issue_url": "https://api.github.com/repos/acme/shop/issues/14",
+    "id": 5201,
+    "node_id": "IC_kwDOB5201",
+    "user": {
+      "login": "shop-owner",
+      "id": 1101,
+      "node_id": "U_1101",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1101?v=4",
+      "html_url": "https://github.com/shop-owner",
+      "type": "User",
+      "site_admin": false
+    },
+    "created_at": "2026-11-15T12:00:00Z",
+    "updated_at": "2026-11-15T12:00:00Z",
+    "author_association": "MEMBER",
+    "body": "Tracking this by hand for now."
+  }
+]

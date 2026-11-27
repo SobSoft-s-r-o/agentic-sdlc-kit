@@ -1,0 +1,38 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "id": "I_kwDOBx12",
+        "projectItems": {
+          "nodes": [
+            {
+              "id": "PVTI_lADOBy3_99",
+              "project": {
+                "id": "PVT_kwDOBy3",
+                "number": 7,
+                "owner": {
+                  "login": "another-org"
+                }
+              },
+              "fieldValues": {
+                "nodes": [
+                  {
+                    "optionId": "00001181",
+                    "field": {
+                      "id": "PVTSSF_lADOBx7_status"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "boardOwner": {
+      "projectV2": {
+        "id": "PVT_kwDOBx7"
+      }
+    }
+  }
+}
