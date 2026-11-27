@@ -36,7 +36,8 @@ The reference project is **not touched** and does not migrate to this project.
 6. A library of predefined role agents (analyst, architect, developer, tester,
    reviewer, …) defined once and rendered per harness.
 7. Enforcement level chosen at install: `observe` or `enforce`.
-8. Installs the agent environment stack: Superpowers, graphify, hooks/guards.
+8. Installs the agent environment stack: Superpowers, graphify, hooks/guards, and the
+   MCP servers the agents need (GitHub MCP by default, others optional).
 
 **Non-goals (v1)**
 - Migrating or changing the reference project.
@@ -173,6 +174,8 @@ user content outside managed blocks and custom agents/types.
    (e.g. `npm test`, `make check`); optional per target.
 7. **Merge policy**: owner-only merge (default) or agent may merge after review +
    green gate when the owner explicitly asks (reference behaviour).
+7a. **MCP servers**: GitHub MCP (default on) plus optional servers from the catalog
+   (see §14); for each, project-scoped or user-scoped configuration.
 8. **Models per tier** for each harness (defaults offered; see §9).
 9. **Stack**: install Superpowers (yes default), graphify (yes default), branch
    protection on default branch (yes default), GitHub Actions reconcile workflow
@@ -212,6 +215,9 @@ models:
   codex:  { deep: <verify>, standard: <verify>, fast: <verify> }
   gemini: { deep: <verify>, standard: <verify>, fast: <verify> }
 stack: { superpowers: true, graphify: true, branch_protection: true, actions: true }
+mcp:
+  servers: [github]          # catalog ids; github on by default
+  scope: project             # project | user
 ```
 
 GitHub field/option IDs are **not** stored in config; they are resolved by name at
@@ -422,8 +428,9 @@ sdlc.config.yaml
   cache/                    # gitignored: field ID cache, outbox
 CLAUDE.md / GEMINI.md / AGENTS.md   # managed block <!-- sdlc:begin --> … <!-- sdlc:end -->
 .claude/{settings.json (hooks merged), agents/sdlc-*.md, skills/sdlc-*/}
-.codex/{config.toml (hooks + agents merged)}
-.gemini/{settings.json (hooks merged), agents/ or modes in GEMINI.md}
+.codex/{config.toml (hooks + agents + [mcp_servers] merged)}
+.gemini/{settings.json (hooks + mcpServers merged), agents/ or modes in GEMINI.md}
+.mcp.json                              # Claude Code project MCP servers (merged)
 .github/workflows/sdlc-reconcile.yml   # default on
 .github/pull_request_template.md       # Related to #N, targets, verification
 ```
@@ -461,6 +468,21 @@ template the owner fills).
 - **graphify**: installed per its docs; generated instructions include the graphify
   rules (query before grep, `graphify update .` after changes, `graphify-out/`
   gitignored). Skipped cleanly if declined.
+- **MCP servers** (install question 7a): rendered per harness into its native MCP
+  config, merged without touching servers the user already has — Claude Code
+  `.mcp.json` (project) or `claude mcp add --scope user`, Codex `[mcp_servers.*]` in
+  `config.toml`, Gemini CLI `mcpServers` in `settings.json`. Catalog in v1:
+  - `github` (default on): GitHub's official MCP server — remote endpoint
+    (`https://api.githubcopilot.com/mcp/`, OAuth where the harness supports it) or the
+    local server with a token read from an environment variable
+    (`GITHUB_PERSONAL_ACCESS_TOKEN`), never written into a file.
+  - optional: `context7` (library docs), `playwright` (browser checks for UI work);
+    the catalog is a data file so more can be added without code changes.
+  The `sdlc` CLI itself never depends on MCP — it always uses `gh` — so the board
+  stays correct even for harnesses without MCP. Agents may use the GitHub MCP for
+  reading issues/PRs/reviews; task state changes still go through `sdlc` so they are
+  recorded and projected. `doctor` checks each configured server is listed by the
+  harness (e.g. `claude mcp list`) and reports missing tokens/auth.
 - Checks: `git`, `gh` (with scopes), Node ≥ 20.
 
 ## 15. Testing the project itself
