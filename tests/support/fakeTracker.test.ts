@@ -1,0 +1,296 @@
+import { describe, expect, it } from 'vitest';
+import { newTask } from '../../src/core/stateMachine.js';
+import { STATE_MARKER } from '../../src/core/stateComment.js';
+import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
+import type { BoardFields } from '../../src/core/projection.js';
+import type { TaskState } from '../../src/core/types.js';
+import { FakeTracker } from './fakeTracker.js';
+
+const NOW = '2026-01-01T00:00:00.000Z';
+
+const task = (issue: number, summary = 'Do the thing'): TaskState =>
+  newTask({ issue, type: BUILTIN_TYPES.find(t => t.id === 'feature')!, summary, now: NOW });
+
+const boardFields = (): BoardFields => ({
+  status: 'Ready',
+  phase: 'Intake',
+  type: 'Feature',
+  waitingOn: '—',
+  summary: 'S',
+  currentStep: 'c',
+  nextStep: 'n',
+  pendingTargets: '',
+  agent: '',
+  lastUpdate: NOW,
+});
+
+describe('FakeTracker.failNext', () => {
+  it('rejects exactly one call', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('T', 'B', ['sdlc:task']);
+    tracker.failNext('getTask');
+    await expect(tracker.getTask(number)).rejects.toThrow(/getTask/);
+    // The next call proceeds (and fails only because no state was written, not because of injection).
+    await expect(tracker.getTask(number)).rejects.toThrow(/no state comment/);
+    await tracker.writeState(number, task(number));
+    expect((await tracker.getTask(number)).issue).toBe(number);
+  });
+
+  it('only affects the named method', async () => {
+    const tracker = new FakeTracker();
+    tracker.failNext('createIssue');
+    await expect(tracker.listTrackedTasks()).resolves.toEqual([]);
+    await expect(tracker.createIssue('T', 'B', [])).rejects.toThrow(/createIssue/);
+    expect(tracker.issues).toHaveLength(0);
+  });
+
+  it('queues one failure per call to failNext', async () => {
+    const tracker = new FakeTracker();
+    tracker.failNext('isOnDefaultBranch');
+    tracker.failNext('isOnDefaultBranch');
+    await expect(tracker.isOnDefaultBranch('a')).rejects.toThrow();
+    await expect(tracker.isOnDefaultBranch('a')).rejects.toThrow();
+    await expect(tracker.isOnDefaultBranch('a')).resolves.toBe(false);
+  });
+
+  it('does not count or apply a failed write', async () => {
+    const tracker = new FakeTracker();
+    tracker.failNext('createIssue');
+    await tracker.createIssue('T', 'B', []).catch(() => undefined);
+    expect(tracker.writes).toBe(0);
+    expect(tracker.issues).toEqual([]);
+  });
+});
+
+describe('FakeTracker issues', () => {
+  it('creates issues with increasing numbers and tracks board membership', async () => {
+    const tracker = new FakeTracker();
+    const a = await tracker.createIssue('A', 'body a', ['sdlc:task', 'type:feature']);
+    const b = await tracker.createIssue('B', 'body b', []);
+    expect(b.number).toBe(a.number + 1);
+    expect(a.url).toContain(`/issues/${a.number}`);
+    expect(tracker.issues[0]).toEqual({
+      number: a.number,
+      title: 'A',
+      body: 'body a',
+      labels: ['sdlc:task', 'type:feature'],
+      open: true,
+      onBoard: false,
+    });
+    await tracker.addToBoard(a.number);
+    expect(tracker.issues[0]!.onBoard).toBe(true);
+    expect(tracker.issues[1]!.onBoard).toBe(false);
+  });
+
+  it('does not reuse the number of a seeded PR', async () => {
+    const tracker = new FakeTracker();
+    tracker.prs.push({ issue: 1, number: 7, url: 'u', merged: false, baseRef: 'main', body: '' });
+    const created = await tracker.createIssue('A', '', []);
+    expect(created.number).toBe(8);
+  });
+
+  it('closes with a reason and reopens', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('A', '', []);
+    await tracker.setIssueOpen(number, false, 'not_planned');
+    expect(tracker.issues[0]).toMatchObject({ open: false, closeReason: 'not_planned' });
+    await tracker.setIssueOpen(number, true);
+    expect(tracker.issues[0]!.open).toBe(true);
+    expect(tracker.issues[0]!.closeReason).toBeUndefined();
+  });
+
+  it('adds and removes labels without duplicating', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('A', '', ['a', 'b']);
+    await tracker.setLabels(number, ['b', 'c'], ['a']);
+    expect(tracker.issues[0]!.labels).toEqual(['b', 'c']);
+  });
+
+  it('rejects operations on an unknown issue', async () => {
+    const tracker = new FakeTracker();
+    await expect(tracker.addToBoard(99)).rejects.toThrow(/#99/);
+    await expect(tracker.setIssueOpen(99, false)).rejects.toThrow(/#99/);
+    await expect(tracker.listComments(99)).rejects.toThrow(/#99/);
+  });
+
+  it('stores synced board fields per issue', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('A', '', []);
+    await tracker.syncFields(number, boardFields());
+    expect(tracker.fields.get(number)).toEqual(boardFields());
+  });
+});
+
+describe('FakeTracker state', () => {
+  it('stores state as the real hidden state comment and reads it back', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('Title', '', ['sdlc:task']);
+    const state = task(number);
+    await tracker.writeState(number, state);
+
+    expect(tracker.comments).toHaveLength(1);
+    expect(tracker.comments[0]!.body.startsWith(STATE_MARKER)).toBe(true);
+
+    const got = await tracker.getTask(number);
+    expect(got).toEqual({
+      issue: number,
+      title: 'Title',
+      issueOpen: true,
+      state,
+      stateCommentId: tracker.comments[0]!.id,
+    });
+    // Reads return copies, not live references.
+    got.state.summary = 'mutated';
+    expect((await tracker.getTask(number)).state.summary).toBe('Do the thing');
+  });
+
+  it('updates the existing state comment in place on later writes', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('T', '', []);
+    await tracker.writeState(number, task(number));
+    const id = tracker.comments[0]!.id;
+    await tracker.writeState(number, { ...task(number), status: 'in_progress' });
+    expect(tracker.comments).toHaveLength(1);
+    expect(tracker.comments[0]!.id).toBe(id);
+    expect((await tracker.getTask(number)).state.status).toBe('in_progress');
+  });
+
+  it('lists only issues that carry a state comment, in issue order', async () => {
+    const tracker = new FakeTracker();
+    tracker.seedTask(task(5));
+    tracker.seedTask(task(2));
+    await tracker.createIssue('plain', '', []); // number 6, no state
+    const listed = await tracker.listTrackedTasks();
+    expect(listed.map(t => t.issue)).toEqual([2, 5]);
+  });
+
+  it('seedTask refuses a duplicate issue number', () => {
+    const tracker = new FakeTracker();
+    tracker.seedTask(task(3));
+    expect(() => tracker.seedTask(task(3))).toThrow(/#3/);
+  });
+});
+
+describe('FakeTracker comments', () => {
+  it('posts comments with increasing timestamps and filters by since', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('T', '', []);
+    const first = await tracker.postComment(number, 'one');
+    const second = await tracker.postComment(number, 'two');
+    expect(second).not.toBe(first);
+
+    const all = await tracker.listComments(number);
+    expect(all.map(c => c.body)).toEqual(['one', 'two']);
+    expect(Date.parse(all[1]!.createdAt)).toBeGreaterThan(Date.parse(all[0]!.createdAt));
+    expect(all[0]).toEqual({
+      id: first,
+      url: expect.stringContaining(`/issues/${number}`),
+      author: tracker.login,
+      body: 'one',
+      createdAt: all[0]!.createdAt,
+    });
+
+    const later = await tracker.listComments(number, all[0]!.createdAt);
+    expect(later.map(c => c.body)).toEqual(['two']);
+  });
+
+  it('serves PR numbers as well as issue numbers', async () => {
+    const tracker = new FakeTracker();
+    tracker.prs.push({ issue: 1, number: 10, url: 'u', merged: false, baseRef: 'main', body: '' });
+    tracker.seedComment(10, { body: '/approve', author: 'owner', createdAt: '2026-02-01T00:00:00.000Z' });
+    const comments = await tracker.listComments(10);
+    expect(comments.map(c => [c.author, c.body])).toEqual([['owner', '/approve']]);
+  });
+
+  it('only returns the comments of the requested issue, oldest first', async () => {
+    const tracker = new FakeTracker();
+    const a = (await tracker.createIssue('A', '', [])).number;
+    const b = (await tracker.createIssue('B', '', [])).number;
+    tracker.seedComment(a, { body: 'late', author: 'x', createdAt: '2026-03-01T00:00:00.000Z' });
+    tracker.seedComment(a, { body: 'early', author: 'x', createdAt: '2026-02-01T00:00:00.000Z' });
+    tracker.seedComment(b, { body: 'other', author: 'x', createdAt: '2026-02-01T00:00:00.000Z' });
+    expect((await tracker.listComments(a)).map(c => c.body)).toEqual(['early', 'late']);
+  });
+});
+
+describe('FakeTracker PRs and deployments', () => {
+  it('returns the PRs of an issue without the bookkeeping field', async () => {
+    const tracker = new FakeTracker();
+    tracker.prs.push(
+      { issue: 1, number: 10, url: 'u10', merged: true, mergeSha: 'abc', mergedAt: NOW, baseRef: 'main', body: 'Related to #1' },
+      { issue: 2, number: 11, url: 'u11', merged: false, baseRef: 'main', body: 'Related to #2' },
+    );
+    const prs = await tracker.listTaskPrs(1);
+    expect(prs).toEqual([
+      { number: 10, url: 'u10', merged: true, mergeSha: 'abc', mergedAt: NOW, baseRef: 'main', body: 'Related to #1' },
+    ]);
+    expect(await tracker.listTaskPrs(404)).toEqual([]);
+  });
+
+  it('creates deployments with incrementing ids and a fake clock, newest first when listed', async () => {
+    const tracker = new FakeTracker();
+    const first = await tracker.createDeployment({ environment: 'production-web', sha: 's1', target: 'web', description: 'd1' });
+    const second = await tracker.createDeployment({ environment: 'production-web', sha: 's2', target: 'web', description: 'd2' });
+    await tracker.createDeployment({ environment: 'production-api', sha: 's3', target: 'api', description: 'd3' });
+
+    expect(second.id).toBe(first.id + 1);
+    expect(first).toEqual({
+      id: first.id,
+      sha: 's1',
+      environment: 'production-web',
+      url: expect.stringContaining(String(first.id)),
+      createdAt: first.createdAt,
+    });
+    expect(Date.parse(second.createdAt)).toBeGreaterThan(Date.parse(first.createdAt));
+    expect(first.createdAt.startsWith('2026-01-01T00:')).toBe(true);
+    expect(tracker.deployments).toHaveLength(3);
+
+    const web = await tracker.listSuccessfulDeployments('production-web', 10);
+    expect(web.map(d => d.sha)).toEqual(['s2', 's1']);
+    expect(Object.keys(web[0]!).sort()).toEqual(['createdAt', 'environment', 'id', 'sha', 'url']);
+    expect((await tracker.listSuccessfulDeployments('production-web', 1)).map(d => d.sha)).toEqual(['s2']);
+    expect(await tracker.listSuccessfulDeployments('staging', 5)).toEqual([]);
+  });
+
+  it('answers ancestry and default-branch questions from its sets', async () => {
+    const tracker = new FakeTracker();
+    tracker.ancestors.add('a>b');
+    tracker.defaultBranchShas.add('b');
+    expect(await tracker.isAncestor('a', 'b')).toBe(true);
+    expect(await tracker.isAncestor('b', 'a')).toBe(false);
+    expect(await tracker.isAncestor('c', 'c')).toBe(true);
+    expect(await tracker.isOnDefaultBranch('b')).toBe(true);
+    expect(await tracker.isOnDefaultBranch('a')).toBe(false);
+  });
+});
+
+describe('FakeTracker.writes', () => {
+  it('counts every mutating call and no reads', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('T', '', []); // 1
+    await tracker.addToBoard(number); // 2
+    await tracker.writeState(number, task(number)); // 3
+    await tracker.postComment(number, 'hi'); // 4
+    await tracker.setLabels(number, ['x'], []); // 5
+    await tracker.syncFields(number, boardFields()); // 6
+    await tracker.setIssueOpen(number, false, 'completed'); // 7
+    await tracker.createDeployment({ environment: 'e', sha: 's', target: 't', description: 'd' }); // 8
+    expect(tracker.writes).toBe(8);
+
+    await tracker.getTask(number);
+    await tracker.listTrackedTasks();
+    await tracker.listComments(number);
+    await tracker.listTaskPrs(number);
+    await tracker.listSuccessfulDeployments('e', 5);
+    await tracker.isAncestor('a', 'b');
+    await tracker.isOnDefaultBranch('a');
+    expect(tracker.writes).toBe(8);
+  });
+
+  it('does not count seeding helpers', () => {
+    const tracker = new FakeTracker();
+    tracker.seedTask(task(1));
+    tracker.seedComment(1, { body: 'x', author: 'y' });
+    expect(tracker.writes).toBe(0);
+  });
+});
