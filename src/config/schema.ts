@@ -9,7 +9,7 @@ type Exhaustive<T extends string, V extends readonly T[]> = Exclude<T, V[number]
   ? V
   : never;
 
-const PHASES = [
+export const PHASES = [
   'intake',
   'debugging',
   'brainstorming',

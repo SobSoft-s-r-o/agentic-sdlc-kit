@@ -14,7 +14,7 @@ export interface BoardFields {
   lastUpdate: string;
 }
 
-const STATUS_LABELS: Record<Status, string> = {
+export const STATUS_LABELS: Record<Status, string> = {
   ready: 'Ready',
   in_progress: 'In progress',
   blocked: 'Blocked',
@@ -24,7 +24,7 @@ const STATUS_LABELS: Record<Status, string> = {
   done: 'Done',
 };
 
-const WAITING_ON_LABELS: Record<WaitingOn, string> = {
+export const WAITING_ON_LABELS: Record<WaitingOn, string> = {
   owner: 'Owner',
   agent: 'Agent',
   external: 'External',

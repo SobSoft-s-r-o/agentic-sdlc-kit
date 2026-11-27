@@ -61,7 +61,15 @@ createProjectV2Field(name: "Type", dataType: SINGLE_SELECT) ->
   UNPROCESSABLE: "Name cannot have a reserved value, Name has already been taken"
 ```
 
-So a custom single-select named `Type` cannot be created through the API.
+So a custom single-select named `Type` cannot be created through the API. The board field is therefore
+named `Task type` (ruling R21); board provisioning never creates or modifies the built-in `Type`.
+
+## End-to-end check of board provisioning
+
+`ensureBoard` was run against a second throwaway user-owned project (deleted afterwards): the 11 missing
+fields were created, `Status` was extended with its 5 missing options (existing option ids unchanged), and
+the four views were created through the REST views API with the expected filter, grouping and sorting. A
+second run planned nothing.
 
 ## Built-in fields on an empty project (GraphQL `fields`)
 
