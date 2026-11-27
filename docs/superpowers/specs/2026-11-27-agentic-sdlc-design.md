@@ -250,7 +250,7 @@ Custom type schema:
 
 Classification: at intake the agent **proposes** a type from the request; the owner
 can correct it at any point (`sdlc task set-type`). Type is stored as label
-`type:<id>` and Project field **Type**. A `feature`/`bugfix` declares its targets at
+`type:<id>` and Project field **Task type**. A `feature`/`bugfix` declares its targets at
 review time (`sdlc stage review --targets web,api`); path globs only suggest.
 
 ## 8. Board model and lifecycle
@@ -261,7 +261,7 @@ review time (`sdlc stage review --targets web,api`); path globs only suggest.
 |---|---|---|
 | Status | single select | Ready, In progress, Blocked, Paused, In review, Awaiting deployment, Done |
 | Phase | single select | Intake, Debugging, Brainstorming, Analysis, Planning, Implementation, Verification, Review, Delivery |
-| Type | single select | enabled task types |
+| Task type | single select | enabled task types (GitHub reserves the name `Type`) |
 | Waiting on | single select | Owner, Agent, External, — |
 | Summary | text | one line |
 | Current step | text | |
