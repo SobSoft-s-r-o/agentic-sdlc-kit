@@ -18,6 +18,7 @@ import {
   type PostedComment,
   type PrInfo,
   type ReleaseInfo,
+  type ScanOptions,
   type TrackedTask,
   type TaskScan,
   type Tracker,
@@ -33,8 +34,14 @@ const EDIT_REFUSED = /\bHTTP (?:403|404)\b/;
 const RATE_LIMITED = /rate limit|secondary rate|abuse/i;
 /** What `gh pr view` prints for a number that is not a pull request. */
 const PR_NOT_FOUND = /could not resolve to a pullrequest|no pull requests? found/i;
-/** `gh issue list` and `gh pr list` cap their output; reaching the cap means results may be missing. */
-const ISSUE_LIST_LIMIT = 500;
+/**
+ * `gh issue list` and `gh pr list` cap their output; reaching the cap means results may be missing.
+ * The closed list goes through GitHub's search, which serves at most 1000 results.
+ */
+const OPEN_ISSUE_LIMIT = 2000;
+const CLOSED_ISSUE_LIMIT = 1000;
+/** `scanTasks()` without a lookback: one query over open and closed issues. */
+const ALL_ISSUE_LIMIT = 2000;
 const PR_LIST_LIMIT = 100;
 /** Largest page size of GitHub's REST list endpoints. */
 const MAX_PER_PAGE = 100;
@@ -684,14 +691,22 @@ export class GitHubTracker implements Tracker {
     };
   }
 
-  /** Reads every `sdlc:task` issue's comments and sorts the issues into tracked and untracked. */
-  async scanTasks(): Promise<TaskScan> {
-    const rows =
-      (await ghJson<IssueRow[] | undefined>(this.run, [
-        'issue', 'list', '--repo', this.repo, '--label', 'sdlc:task', '--state', 'all',
-        '--json', ISSUE_FIELDS, '--limit', String(ISSUE_LIST_LIMIT),
-      ])) ?? [];
-    assertNotCut(rows.length, ISSUE_LIST_LIMIT, 'gh issue list');
+  /**
+   * Reads the comments of the `sdlc:task` issues and sorts the issues into tracked and untracked.
+   *
+   * With `closedSince` that is every open issue (limit 2000) and then the closed issues updated on
+   * or after that date (limit 1000), two queries each asserted not cut. An issue in both (closed
+   * between the two reads) counts once, as the closed, later snapshot.
+   *
+   * A closed issue not updated since before `closedSince` has nothing left to converge, by
+   * construction: reopening it updates it, so it is read again; a deployment never reopens a done
+   * task; and a task that is not done under an issue someone closed has that issue reopened (and
+   * so updated) by the first reconcile run after. Running reconcile at least once per lookback
+   * period therefore misses nothing. Without `closedSince`, one `--state all` query reads
+   * everything (limit 2000), the way `--all` asks.
+   */
+  async scanTasks(opts: ScanOptions = {}): Promise<TaskScan> {
+    const rows = await this.listTaskIssues(opts);
     const issues = [...rows].sort((a, b) => a.number - b.number);
     const tracked: TrackedTask[] = [];
     const untracked: UntrackedIssue[] = [];
@@ -715,6 +730,27 @@ export class GitHubTracker implements Tracker {
       }
     });
     return { tracked, untracked };
+  }
+
+  /** The `sdlc:task` issues of a scan, by issue number; see `scanTasks` for what is read. */
+  private async listTaskIssues({ closedSince }: ScanOptions): Promise<IssueRow[]> {
+    const list = async (state: string, limit: number, search?: string): Promise<IssueRow[]> => {
+      const rows =
+        (await ghJson<IssueRow[] | undefined>(this.run, [
+          'issue', 'list', '--repo', this.repo, '--label', 'sdlc:task', '--state', state,
+          ...(search === undefined ? [] : ['--search', search]),
+          '--json', ISSUE_FIELDS, '--limit', String(limit),
+        ])) ?? [];
+      assertNotCut(rows.length, limit, 'gh issue list');
+      return rows;
+    };
+    if (closedSince === undefined) return list('all', ALL_ISSUE_LIMIT);
+
+    const open = await list('open', OPEN_ISSUE_LIMIT);
+    const closed = await list('closed', CLOSED_ISSUE_LIMIT, `updated:>=${closedSince}`);
+    const byNumber = new Map<number, IssueRow>();
+    for (const row of [...open, ...closed]) byNumber.set(row.number, row);
+    return [...byNumber.values()];
   }
 
   private async recentStatuses(deployment: number): Promise<DeploymentStatusRow[]> {

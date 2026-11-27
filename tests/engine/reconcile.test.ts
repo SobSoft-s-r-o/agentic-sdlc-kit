@@ -460,6 +460,103 @@ describe('API cost per run', () => {
   });
 });
 
+describe('closed lookback', () => {
+  /** The test clock reads 2026-06-01, so the default 30 days reach back to 2026-05-02. */
+  const OLD = '2026-04-01T00:00:00.000Z';
+  const RECENT = '2026-05-20T00:00:00.000Z';
+
+  /** Done tasks whose issues were closed with the wrong reason: reconcile corrects them when it reads them. */
+  function wronglyClosed(h: Harness): void {
+    const done = { status: 'done', outcome: 'completed', waitingOn: 'none' } as const;
+    h.tracker.seedTask(task(1, 'tooling', done), { open: false, closeReason: 'not_planned', updatedAt: OLD });
+    h.tracker.seedTask(task(2, 'tooling', done), { open: false, closeReason: 'not_planned', updatedAt: RECENT });
+  }
+
+  it('scans open tasks and the tasks closed within closedLookbackDays of the clock', async () => {
+    const h = setup();
+    const scan = vi.spyOn(h.tracker, 'scanTasks');
+
+    await reconcile(h.ctx, {});
+
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(scan).toHaveBeenCalledWith({ closedSince: '2026-05-02' });
+  });
+
+  it('follows the configured lookback', async () => {
+    const h = setup({ ...cfg, reconcile: { closedLookbackDays: 7 } });
+    const scan = vi.spyOn(h.tracker, 'scanTasks');
+
+    await reconcile(h.ctx, {});
+
+    expect(scan).toHaveBeenCalledWith({ closedSince: '2026-05-25' });
+  });
+
+  it('ignores a done task closed before the lookback and still repairs a recent one', async () => {
+    const h = setup();
+    wronglyClosed(h);
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(mutating(result.actions)).toEqual([
+      { issue: 2, kind: 'issue_closed', detail: 'close reason corrected to completed' },
+    ]);
+    expect(issueOf(h, 1)).toMatchObject({ open: false, closeReason: 'not_planned' });
+    expect(issueOf(h, 2)).toMatchObject({ open: false, closeReason: 'completed' });
+  });
+
+  it('reads every task, however long ago it closed, with all', async () => {
+    const h = setup();
+    wronglyClosed(h);
+    const scan = vi.spyOn(h.tracker, 'scanTasks');
+
+    const result = await reconcile(h.ctx, { all: true });
+
+    expect(scan).toHaveBeenCalledWith({});
+    expect(mutating(result.actions).map(a => a.issue)).toEqual([1, 2]);
+    expect(issueOf(h, 1)).toMatchObject({ open: false, closeReason: 'completed' });
+  });
+
+  it('always reads an open task, however long ago its issue was updated', async () => {
+    const h = setup();
+    h.tracker.seedTask(inReview(1, 'tooling'), { updatedAt: OLD });
+    mergedPr(h, 1, 51);
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(kinds(result.actions)).toContain('pr_merged');
+  });
+
+  it('reports an old closed untracked issue only with all', async () => {
+    const h = setup();
+    h.tracker.issues.push({
+      number: 9, title: 'Closed by hand', body: '', labels: ['sdlc:task'], open: false, onBoard: false, updatedAt: OLD,
+    });
+
+    expect((await reconcile(h.ctx, {})).actions).toEqual([]);
+    expect(kinds((await reconcile(h.ctx, { all: true })).actions)).toEqual(['untracked']);
+  });
+
+  it('does not scan again when the caller passes its scan', async () => {
+    const h = setup();
+    const scan = vi.spyOn(h.tracker, 'scanTasks');
+
+    await reconcile(h.ctx, { scan: { tracked: [], untracked: [] } });
+
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it('reads a task by number whatever the lookback', async () => {
+    const h = setup();
+    wronglyClosed(h);
+    const scan = vi.spyOn(h.tracker, 'scanTasks');
+
+    const result = await reconcile(h.ctx, { issue: 1 });
+
+    expect(scan).not.toHaveBeenCalled();
+    expect(mutating(result.actions).map(a => a.issue)).toEqual([1]);
+  });
+});
+
 describe('approvals', () => {
   it('approves the paused stage from an owner comment on the issue', async () => {
     const h = setup();
@@ -1039,6 +1136,16 @@ describe('sdlc reconcile', () => {
     expect(kinds(printed.actions)).toContain('pr_merged');
     expect(h.tracker.writes).toBe(0);
     expect(process.exitCode).toBe(exitCode);
+  });
+
+  it('scans the recently closed tasks, or every task with --all', async () => {
+    const h = setup();
+    const scan = vi.spyOn(h.tracker, 'scanTasks');
+
+    await run(h, '--json');
+    await run(h, '--all', '--json');
+
+    expect(scan.mock.calls).toEqual([[{ closedSince: '2026-05-02' }], [{}]]);
   });
 
   it('exits 1 when any action is an error, and prints human text', async () => {

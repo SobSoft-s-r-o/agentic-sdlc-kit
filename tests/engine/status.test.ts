@@ -1,6 +1,6 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../../src/commands/context.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
 import { newTask } from '../../src/core/stateMachine.js';
@@ -145,6 +145,63 @@ describe('statusReport', () => {
     expect(report.untracked).toEqual([{ issue: 9, title: 'Hand-made task' }]);
     expect(report.pendingReconcile.filter(a => a.issue === 9)).toEqual([]);
     expect(issues(Object.values(report.byStatus).flat())).toEqual([1]);
+  });
+
+  describe('closed lookback', () => {
+    /** The clock reads 2026-06-01, so the default 30 days reach back to 2026-05-02. */
+    const OLD = '2026-04-01T00:00:00.000Z';
+    const RECENT = '2026-05-20T00:00:00.000Z';
+    const done = (issue: number): TaskState =>
+      task(issue, 'feature', { status: 'done', phase: 'delivery', outcome: 'completed', waitingOn: 'none' });
+    const handMade = (number: number, updatedAt: string) =>
+      h.tracker.issues.push({ number, title: `Hand-made ${number}`, body: '', labels: ['sdlc:task'], open: false, onBoard: false, updatedAt });
+    let h: ReturnType<typeof setup>;
+
+    beforeEach(() => {
+      h = setup();
+      h.tracker.seedTask(task(1, 'feature', { status: 'in_progress', phase: 'implementation' }), { updatedAt: OLD });
+      h.tracker.seedTask(done(2), { open: false, updatedAt: OLD });
+      h.tracker.seedTask(done(3), { open: false, updatedAt: RECENT });
+      handMade(8, OLD);
+      handMade(9, RECENT);
+    });
+
+    it('scans open tasks and the tasks closed within closedLookbackDays of the clock', async () => {
+      const scan = vi.spyOn(h.tracker, 'scanTasks');
+
+      await statusReport(h.ctx, { staleDays: 7 });
+
+      expect(scan).toHaveBeenCalledTimes(1);
+      expect(scan).toHaveBeenCalledWith({ closedSince: '2026-05-02' });
+    });
+
+    it('leaves out tasks and untracked issues closed before the lookback, never an open task', async () => {
+      const report = await statusReport(h.ctx, { staleDays: 7 });
+
+      expect(issues(report.byStatus.in_progress)).toEqual([1]);
+      expect(issues(report.byStatus.done)).toEqual([3]);
+      expect(report.untracked).toEqual([{ issue: 9, title: 'Hand-made 9' }]);
+    });
+
+    it('lists everything with all', async () => {
+      const scan = vi.spyOn(h.tracker, 'scanTasks');
+
+      const report = await statusReport(h.ctx, { staleDays: 7, all: true });
+
+      expect(scan).toHaveBeenCalledTimes(1);
+      expect(scan).toHaveBeenCalledWith({});
+      expect(issues(report.byStatus.done)).toEqual([2, 3]);
+      expect(report.untracked.map(u => u.issue)).toEqual([8, 9]);
+    });
+
+    it('follows the configured lookback', async () => {
+      h = setup({ ...cfg, reconcile: { closedLookbackDays: 7 } });
+      const scan = vi.spyOn(h.tracker, 'scanTasks');
+
+      await statusReport(h.ctx, { staleDays: 7 });
+
+      expect(scan).toHaveBeenCalledWith({ closedSince: '2026-05-25' });
+    });
   });
 
   it('is empty for a repository without tasks', async () => {

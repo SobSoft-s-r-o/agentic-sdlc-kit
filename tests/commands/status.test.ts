@@ -146,6 +146,22 @@ describe('sdlc status', () => {
     expect(JSON.parse(h.out[0] as string)).toEqual(JSON.parse(JSON.stringify(await statusReport(h.ctx, { staleDays: 7 }))));
   });
 
+  it('scans the recently closed tasks, or every task with --all', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(1, { status: 'done', phase: 'delivery', outcome: 'completed', waitingOn: 'none' }), {
+      open: false,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const scan = vi.spyOn(h.tracker, 'scanTasks');
+
+    await run(h);
+    expect(h.out[0]).toBe('No tracked tasks.');
+    await run(h, '--all');
+    expect(h.out[1]).toContain('Done (1)');
+
+    expect(scan.mock.calls).toEqual([[{ closedSince: '2026-05-02' }], [{}]]);
+  });
+
   it('uses --stale-days for the staleness cut-off', async () => {
     const h = setup();
     h.tracker.seedTask(awaiting(2, ago(9)));

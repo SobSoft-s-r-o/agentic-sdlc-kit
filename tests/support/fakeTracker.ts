@@ -16,6 +16,7 @@ import {
   type PostedComment,
   type PrInfo,
   type ReleaseInfo,
+  type ScanOptions,
   type TrackedTask,
   type TaskScan,
   type Tracker,
@@ -30,6 +31,12 @@ export interface FakeIssue {
   open: boolean;
   closeReason?: 'completed' | 'not_planned';
   onBoard: boolean;
+  /**
+   * GitHub's `updated_at`, ISO 8601. `scanTasks({ closedSince })` drops a closed issue last updated
+   * before that date. Left out, the issue counts as updated just now, so only a test about the
+   * lookback needs to set it. The fake never moves it on its own writes.
+   */
+  updatedAt?: string;
 }
 
 /**
@@ -121,6 +128,8 @@ export class FakeTracker implements Tracker {
       /** For a closed issue; defaults to the reason the state's outcome closes it with. */
       closeReason?: 'completed' | 'not_planned';
       onBoard?: boolean;
+      /** The issue's `updated_at`; see `FakeIssue.updatedAt`. */
+      updatedAt?: string;
     } = {},
   ): void {
     if (this.issues.some(i => i.number === state.issue)) {
@@ -136,6 +145,7 @@ export class FakeTracker implements Tracker {
       open,
       ...(!open && { closeReason }),
       onBoard: options.onBoard ?? true,
+      ...(options.updatedAt !== undefined && { updatedAt: options.updatedAt }),
     });
     this.comments.push(this.newComment(state.issue, renderStateComment(state), this.login));
   }
@@ -179,10 +189,14 @@ export class FakeTracker implements Tracker {
     return this.trackedOf();
   }
 
-  /** Both lists from one call, as the real tracker reads them from one scan. */
-  async scanTasks(): Promise<TaskScan> {
+  /**
+   * Both lists from one call, as the real tracker reads them from one scan. With `closedSince`,
+   * every open issue and the closed ones updated on or after that date (an issue with no
+   * `updatedAt` counts as updated just now).
+   */
+  async scanTasks(opts: ScanOptions = {}): Promise<TaskScan> {
     this.begin('scanTasks');
-    const [tracked, untracked] = [this.trackedOf(), this.untrackedOf()];
+    const [tracked, untracked] = [this.trackedOf(opts), this.untrackedOf(opts)];
     return { tracked, untracked };
   }
 
@@ -354,8 +368,12 @@ export class FakeTracker implements Tracker {
     this.clock = 0;
   }
 
-  private sortedIssues(): FakeIssue[] {
-    return [...this.issues].sort((a, b) => a.number - b.number);
+  private sortedIssues(opts: ScanOptions = {}): FakeIssue[] {
+    const since = opts.closedSince === undefined ? -Infinity : Date.parse(opts.closedSince);
+    if (Number.isNaN(since)) throw new Error(`FakeTracker: invalid closedSince "${opts.closedSince}"`);
+    return this.issues
+      .filter(issue => issue.open || issue.updatedAt === undefined || Date.parse(issue.updatedAt) >= since)
+      .sort((a, b) => a.number - b.number);
   }
 
   private issue(number: number): FakeIssue {
@@ -408,8 +426,8 @@ export class FakeTracker implements Tracker {
       );
   }
 
-  private trackedOf(): TrackedTask[] {
-    return this.sortedIssues()
+  private trackedOf(opts?: ScanOptions): TrackedTask[] {
+    return this.sortedIssues(opts)
       .filter(issue => issue.labels.includes('sdlc:task'))
       .flatMap(issue => {
         const stateComment = this.findStateComment(issue.number);
@@ -423,8 +441,8 @@ export class FakeTracker implements Tracker {
       });
   }
 
-  private untrackedOf(): UntrackedIssue[] {
-    return this.sortedIssues()
+  private untrackedOf(opts?: ScanOptions): UntrackedIssue[] {
+    return this.sortedIssues(opts)
       .filter(issue => issue.labels.includes('sdlc:task'))
       .flatMap(issue => {
         const stateComment = this.findStateComment(issue.number);

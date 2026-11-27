@@ -14,8 +14,8 @@ Installable, agent-driven software development lifecycle for GitHub — works wi
 - `sdlc review handoff` - hand a task over for review with a linked pull request.
 - `sdlc approve` - record an owner decision: approve a stage, accept a result, confirm a run, or cancel.
 - `sdlc deploy record` - record that a commit is deployed to a target.
-- `sdlc reconcile` - bring tasks, the board and issues in line with merges, approvals and deployments (`--dry-run` only reports).
-- `sdlc status` - show tasks by status, what waits on the owner, what is stale (`--stale-days`, default 7), untracked issues and what reconcile would change.
+- `sdlc reconcile` - bring tasks, the board and issues in line with merges, approvals and deployments (`--dry-run` only reports). It reads open tasks and those closed within `reconcile.closed_lookback_days` (default 30); `--all` reads every task.
+- `sdlc status` - show tasks by status, what waits on the owner, what is stale (`--stale-days`, default 7), untracked issues and what reconcile would change (`--all` also lists tasks closed before the lookback).
 - `sdlc board ensure` - create the board or add its missing fields, options and views (add-only).
 
 Run `sdlc <command> --help` for the options of each command.

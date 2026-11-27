@@ -26,9 +26,19 @@ const ok = (match: string[], stdout: string): FakeGhStep => ({ match, stdout });
 const fromFixture = (match: string[], name: string): FakeGhStep => ok(match, fixture(name));
 const failing = (match: string[], stderr: string): FakeGhStep => ({ match, code: 1, stderr });
 
+/** `scanTasks()` without a lookback (`--all`): one query over every state. */
 const ISSUE_LIST = [
   'issue', 'list', '--repo', 'acme/shop', '--label', 'sdlc:task', '--state', 'all',
-  '--json', 'number,title,state,stateReason', '--limit', '500',
+  '--json', 'number,title,state,stateReason', '--limit', '2000',
+];
+/** `scanTasks({ closedSince })`: every open issue, then the closed ones updated since the date. */
+const OPEN_LIST = [
+  'issue', 'list', '--repo', 'acme/shop', '--label', 'sdlc:task', '--state', 'open',
+  '--json', 'number,title,state,stateReason', '--limit', '2000',
+];
+const closedList = (since: string): string[] => [
+  'issue', 'list', '--repo', 'acme/shop', '--label', 'sdlc:task', '--state', 'closed',
+  '--search', `updated:>=${since}`, '--json', 'number,title,state,stateReason', '--limit', '1000',
 ];
 const LOGIN = ok(['api', 'user', '-q', '.login'], 'octo-agent\n');
 const comments = (issue: number, name?: string): FakeGhStep =>
@@ -205,9 +215,108 @@ describe('GitHubTracker tracked tasks', () => {
   });
 
   it('refuses to list when the issue list may have been cut off', async () => {
-    const many = Array.from({ length: 500 }, (_, i) => ({ number: i + 1, title: `T${i}`, state: 'OPEN' }));
+    const many = Array.from({ length: 2000 }, (_, i) => ({ number: i + 1, title: `T${i}`, state: 'OPEN' }));
     const { tracker } = trackerFor([ok(ISSUE_LIST, JSON.stringify(many))]);
-    await expect(tracker.listTrackedTasks()).rejects.toThrow(/500/);
+    await expect(tracker.listTrackedTasks()).rejects.toThrow(/2000/);
+  });
+
+  describe('scanTasks with a closed lookback', () => {
+    const rows = (numbers: number[], state: 'OPEN' | 'CLOSED') =>
+      JSON.stringify(
+        numbers.map(number => ({
+          number,
+          title: `T${number}`,
+          state,
+          stateReason: state === 'CLOSED' ? 'COMPLETED' : '',
+        })),
+      );
+
+    it('reads every open issue, then the closed ones updated since the date', async () => {
+      const { run, tracker } = trackerFor([
+        ok(OPEN_LIST, rows([12], 'OPEN')),
+        ok(closedList('2026-10-28'), rows([13], 'CLOSED')),
+        LOGIN,
+        comments(12),
+        comments(13),
+      ]);
+
+      const { tracked, untracked } = await tracker.scanTasks({ closedSince: '2026-10-28' });
+
+      expect(run.calls[0]).toEqual([...OPEN_LIST]);
+      expect(run.calls[1]).toEqual([...closedList('2026-10-28')]);
+      expect(tracked.map(t => [t.issue, t.issueOpen, t.closeReason])).toEqual([
+        [12, true, undefined],
+        [13, false, 'completed'],
+      ]);
+      expect(untracked).toEqual([]);
+      expect(run.calls).toHaveLength(5);
+    });
+
+    it('sorts the open and the closed issues together, oldest first', async () => {
+      const { tracker } = trackerFor([
+        ok(OPEN_LIST, rows([14, 12], 'OPEN')),
+        ok(closedList('2026-10-28'), rows([13, 3], 'CLOSED')),
+        LOGIN,
+        comments(3, 'comments-14.json'),
+        comments(12),
+        comments(13),
+        comments(14),
+      ]);
+      const { tracked, untracked } = await tracker.scanTasks({ closedSince: '2026-10-28' });
+      expect(tracked.map(t => t.issue)).toEqual([12, 13]);
+      expect(untracked.map(u => u.issue)).toEqual([3, 14]);
+    });
+
+    it('reads an issue that is in both lists once, as the closed (later) snapshot', async () => {
+      // 12 was open when the open list was read and closed by the time the closed list was.
+      const { run, tracker } = trackerFor([
+        ok(OPEN_LIST, rows([12], 'OPEN')),
+        ok(closedList('2026-10-28'), rows([12], 'CLOSED')),
+        LOGIN,
+        comments(12),
+      ]);
+
+      const { tracked } = await tracker.scanTasks({ closedSince: '2026-10-28' });
+
+      expect(tracked).toHaveLength(1);
+      expect(tracked[0]).toMatchObject({ issue: 12, issueOpen: false, closeReason: 'completed' });
+      expect(run.calls).toHaveLength(4);
+    });
+
+    it('asks for nothing more when no issue is open or recently closed', async () => {
+      const { run, tracker } = trackerFor([ok(OPEN_LIST, '[]'), ok(closedList('2026-10-28'), '[]')]);
+      expect(await tracker.scanTasks({ closedSince: '2026-10-28' })).toEqual({ tracked: [], untracked: [] });
+      expect(run.calls).toHaveLength(2);
+    });
+
+    it('refuses to go on when the open list may have been cut off', async () => {
+      const many = Array.from({ length: 2000 }, (_, i) => ({ number: i + 1, title: `T${i}`, state: 'OPEN' }));
+      const { run, tracker } = trackerFor([ok(OPEN_LIST, JSON.stringify(many))]);
+      await expect(tracker.scanTasks({ closedSince: '2026-10-28' })).rejects.toThrow(/2000/);
+      expect(run.calls).toHaveLength(1);
+    });
+
+    it('refuses to go on when the closed list may have been cut off', async () => {
+      const many = Array.from({ length: 1000 }, (_, i) => ({ number: i + 1, title: `T${i}`, state: 'CLOSED' }));
+      const { tracker } = trackerFor([ok(OPEN_LIST, '[]'), ok(closedList('2026-10-28'), JSON.stringify(many))]);
+      await expect(tracker.scanTasks({ closedSince: '2026-10-28' })).rejects.toThrow(/1000/);
+    });
+
+    it('accepts 999 closed issues', async () => {
+      const many = Array.from({ length: 999 }, (_, i) => ({ number: i + 1, title: `T${i}`, state: 'CLOSED' }));
+      const steps = [ok(OPEN_LIST, '[]'), ok(closedList('2026-10-28'), JSON.stringify(many)), LOGIN];
+      for (const row of many) steps.push(ok(['api', '--paginate', `repos/acme/shop/issues/${row.number}/comments?per_page=100`], '[]'));
+      const { tracker } = trackerFor(steps);
+      const { untracked } = await tracker.scanTasks({ closedSince: '2026-10-28' });
+      expect(untracked).toHaveLength(999);
+    });
+
+    it('without a date reads one query over every state (--all)', async () => {
+      const { run, tracker } = trackerFor([ok(ISSUE_LIST, rows([13], 'CLOSED')), LOGIN, comments(13)]);
+      await tracker.scanTasks();
+      expect(run.calls[0]).toEqual([...ISSUE_LIST]);
+      expect(run.calls).toHaveLength(3);
+    });
   });
 
   it('getTask reads one issue and its state comment', async () => {
