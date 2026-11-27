@@ -16,12 +16,13 @@ export type RecordedDeployment = DeploymentInfo & { alreadyRecorded?: true };
 export type VerifyRunner = (command: string) => Promise<number>;
 
 /**
- * Runs `command` with `/bin/sh -c`, sharing this process's stdio. A command killed by a signal
- * exits with 128 plus the signal number, as a shell would report it.
+ * Runs `command` with `/bin/sh -c`. It reads this process's stdin and writes its stderr to ours;
+ * its stdout also goes to our stderr (fd 2), so `--json` output on stdout stays a valid document.
+ * A command killed by a signal exits with 128 plus the signal number, as a shell would report it.
  */
 export const runShell: VerifyRunner = command =>
   new Promise((resolve, reject) => {
-    const child = spawn('/bin/sh', ['-c', command], { stdio: 'inherit' });
+    const child = spawn('/bin/sh', ['-c', command], { stdio: ['inherit', 2, 'inherit'] });
     child.on('error', error =>
       reject(new Error(`verify command could not run: ${error.message}; no deployment recorded`)),
     );

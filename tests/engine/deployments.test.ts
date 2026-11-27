@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
@@ -10,6 +11,12 @@ import { newTask } from '../../src/core/stateMachine.js';
 import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
 import type { TaskState } from '../../src/core/types.js';
 import { FakeTracker, type FakeDeployment } from '../support/fakeTracker.js';
+
+// Wraps the real `spawn` so a test can see how the verify command is started.
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 
 const cfg = loadConfig(join(dirname(fileURLToPath(import.meta.url)), '../fixtures/config/valid.yaml'));
 
@@ -97,6 +104,17 @@ describe('deployRecord', () => {
     );
 
     expect(tracker.deployments).toEqual([]);
+  });
+
+  it('sends the verify command output to stderr so --json stdout stays valid', async () => {
+    const { tracker, ctx } = setup();
+    tracker.defaultBranchShas.add(A);
+    vi.mocked(spawn).mockClear();
+
+    await deployRecord(ctx, { target: 'web', sha: A, verify: 'exit 0' });
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn).toHaveBeenCalledWith('/bin/sh', ['-c', 'exit 0'], { stdio: ['inherit', 2, 'inherit'] });
   });
 
   it('records the deployment once the verify command passes', async () => {
