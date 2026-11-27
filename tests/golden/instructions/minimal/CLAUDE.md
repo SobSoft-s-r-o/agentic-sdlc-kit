@@ -46,3 +46,17 @@ One worktree per task, from fresh `origin/main`: `git fetch origin && git worktr
 
 ### Context survival
 Keep a running work index beside the plan (for example `docs/plans/<issue>-index.md`): goal, decisions, files touched, what is done, what is next, PR and commit refs. Update it after every step and re-read it first after a compaction or restart. Mirror progress on the board with `sdlc task checkpoint <issue> --current "<step>" --next "<step>"`.
+
+### Roles
+Delegate to the `sdlc-<role>` agent where the harness has them, otherwise take the role yourself. The tier is the model class to use. Agents never spawn agents.
+- `analyst` (standard): Turns a request into requirements, acceptance criteria and questions for the owner. Use at intake and analysis, before any design.
+- `architect` (deep): Makes and records design decisions, and splits work into steps. Use for brainstorming and planning. Reads code, never edits it.
+- `developer` (standard): Implements one scoped task with tests, in small commits. Use for implementation once the plan is approved.
+- `tester` (standard): Designs and writes tests from the acceptance criteria and finds untested behaviour. Use for test design, coverage gaps and regression tests.
+- `reviewer` (standard): Reviews one task's change against its spec and for quality, and never edits. Use after each task before the next one starts.
+- `final-reviewer` (deep): Reviews the whole branch before it goes to the owner, and never edits. Use once all tasks are done and reviewed, before the PR is handed over.
+- `security-reviewer` (standard): Reviews a change for security problems and secret handling, and never edits. Use for changes touching auth, input handling, secrets, permissions or dependencies.
+- `diagnostician` (deep): Finds the root cause of a bug from evidence, and never edits. Use for debugging before any fix is written.
+- `release-manager` (standard): Prepares delivery, checks readiness, writes the deploy checklist and records deployments. Use for the delivery phase; it never decides to deploy.
+- `docs-writer` (standard): Writes and updates documentation from the code as it is now. Use for READMEs, guides, reference pages and changelogs.
+- `scout` (fast): Answers quick lookup questions about the repository, read-only. Use to find where something is, what calls it, or what a file or setting does.

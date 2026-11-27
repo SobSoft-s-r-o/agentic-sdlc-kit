@@ -1,0 +1,11 @@
+file .gemini/agents/sdlc-analyst.md
+file .gemini/agents/sdlc-architect.md
+file .gemini/agents/sdlc-developer.md
+file .gemini/agents/sdlc-diagnostician.md
+file .gemini/agents/sdlc-docs-writer.md
+file .gemini/agents/sdlc-final-reviewer.md
+file .gemini/agents/sdlc-release-manager.md
+file .gemini/agents/sdlc-reviewer.md
+file .gemini/agents/sdlc-scout.md
+file .gemini/agents/sdlc-security-reviewer.md
+file .gemini/agents/sdlc-tester.md

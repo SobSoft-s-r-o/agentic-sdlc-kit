@@ -1,5 +1,6 @@
 import { typeRegistry, type Config, type Harness, type TargetConfig } from '../config/schema.js';
 import type { EndsOn, EvidenceKind } from '../core/types.js';
+import { builtinRoles } from './agents.js';
 import type { Change } from './changes.js';
 import { parseFrontMatter } from './frontMatter.js';
 import { renderTemplate } from './template.js';
@@ -52,7 +53,7 @@ export type RenderData = {
   contentLanguage: string;
   /** Which local-testing commands to show for `secrets.local_store`. */
   secrets: { localMacos: boolean; localLinux: boolean; localWindows: boolean; localOther: boolean };
-  /** The role library (Task 5 fills it); the Roles section is left out while it is empty. */
+  /** The role library, for the Roles section; the section is left out while it is empty. */
   roles: RenderRole[];
 };
 
@@ -102,8 +103,12 @@ function secretFlags(localStore: string): RenderData['secrets'] {
   };
 }
 
-/** The data every template (instructions, skills, agents, GitHub files) is rendered with. */
-export function renderData(cfg: Config): RenderData {
+/**
+ * The data every template (instructions, skills, agents, GitHub files) is rendered with. `roles`
+ * is the role library the block lists; it defaults to the built-in roles, and a repository with
+ * custom roles passes `loadRoles(fs).roles`. Pass `[]` to leave the Roles section out.
+ */
+export function renderData(cfg: Config, roles: readonly RenderRole[] = builtinRoles()): RenderData {
   const types = [...typeRegistry(cfg).values()].map(
     (def): RenderType => ({
       id: def.id,
@@ -136,7 +141,7 @@ export function renderData(cfg: Config): RenderData {
     superpowers: cfg.stack.superpowers,
     contentLanguage: cfg.contentLanguage,
     secrets: secretFlags(cfg.secrets.localStore),
-    roles: [],
+    roles: roles.map(({ role, description, tier }): RenderRole => ({ role, description, tier })),
   };
 }
 

@@ -111,7 +111,8 @@ describe('renderData', () => {
     expect(data.contentLanguage).toBe('en');
     expect(data.defaultBranch).toBe('main');
     expect(data.qualityGate).toEqual(['npm test', 'npm run lint']);
-    expect(data.roles).toEqual([]);
+    expect(data.roles).toHaveLength(11);
+    expect(renderData(cfg, []).roles).toEqual([]);
 
     const other = renderData(minimal('merge_policy: agent_on_request\ncontent_language: sk\n'));
     expect(other.enforce).toBe(false);
@@ -320,7 +321,6 @@ describe('the managed block', () => {
     expect(text).not.toMatch(/writing-plans|systematic-debugging|subagent-driven-development/);
     expect(text).not.toMatch(/graphify/i);
     expect(text).not.toMatch(/^### Production data/m);
-    expect(text).not.toMatch(/^### Roles/m);
     expect(text).not.toMatch(/sdlc evidence add/);
     // the sections every config has
     for (const heading of ['What this is', 'Starting work', 'Phases', 'Review and pull requests', 'Merge and deploy authority', 'Worktrees', 'Secrets', 'Context survival']) {
@@ -362,7 +362,7 @@ describe('the managed block', () => {
 
   it('lists the roles with their tier when there are roles, and not otherwise', () => {
     const cfg = full();
-    expect(blockText(cfg)).not.toMatch(/^### Roles/m);
+    expect(block(changesFor(cfg, 'agents-md', renderData(cfg, []))).content).not.toMatch(/^### Roles/m);
     const text = block(changesFor(cfg, 'agents-md', { ...renderData(cfg), roles: ROLES.slice(0, 2) })).content;
     expect(text).toMatch(/^### Roles$/m);
     expect(text).toContain('- `analyst` (standard): Does the analyst part of the work, and reports back in one line.');
