@@ -77,6 +77,8 @@ export interface TaskState {
   evidence: { kind: EvidenceKind; ref: string; at: string }[];
   outcome?: 'completed' | 'cancelled';
   cancelReason?: string;
+  /** The owner action that ended the task: set by `accepted`, `confirmed_ran`, `cancelled`. */
+  outcomeApproval?: Approval;
   resultPublishedAt?: string;
   deliveredBy?: string[];
   updatedAt: string;

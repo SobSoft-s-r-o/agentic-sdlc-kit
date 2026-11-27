@@ -1,4 +1,4 @@
-import type { EndsOn, Phase, PrRecord, TaskEvent, TaskState, TaskTypeDef } from './types.js';
+import type { Approval, EndsOn, Phase, PrRecord, TaskEvent, TaskState, TaskTypeDef } from './types.js';
 
 export class TransitionError extends Error {
   constructor(message: string) {
@@ -62,11 +62,21 @@ function upsertPr(state: TaskState, number: number, fields: Omit<PrRecord, 'numb
   }
 }
 
-function complete(state: TaskState): void {
+function complete(state: TaskState, approval?: Approval): void {
   state.status = 'done';
   state.outcome = 'completed';
   state.waitingOn = 'none';
+  if (approval) state.outcomeApproval = { ...approval };
 }
+
+/** Events that would pull a task back out of `awaiting_deployment` or start new work on it. */
+const BLOCKED_WHILE_AWAITING_DEPLOYMENT: ReadonlySet<TaskEvent['kind']> = new Set<TaskEvent['kind']>([
+  'phase_started',
+  'stage_published',
+  'stage_approved',
+  'evidence_added',
+  'review_handoff',
+]);
 
 function assertNever(event: never): never {
   throw new TransitionError(`unknown event: ${JSON.stringify(event)}`);
@@ -79,6 +89,9 @@ function assertNever(event: never): never {
 export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef, now: string): TaskState {
   if (state.status === 'done' && event.kind !== 'reopened' && event.kind !== 'checkpoint') {
     throw new TransitionError(`cannot apply "${event.kind}" to a done task`);
+  }
+  if (state.status === 'awaiting_deployment' && BLOCKED_WHILE_AWAITING_DEPLOYMENT.has(event.kind)) {
+    throw new TransitionError(`cannot apply "${event.kind}" while awaiting deployment`);
   }
 
   const next = structuredClone(state);
@@ -100,6 +113,9 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
     }
 
     case 'stage_published': {
+      if (!type.phases.includes(event.phase)) {
+        throw new TransitionError(`phase "${event.phase}" is not part of task type "${type.id}"`);
+      }
       const stage = next.stages[event.phase] ?? { revision: 0 };
       next.stages[event.phase] = { ...stage, revision: stage.revision + 1, publishedAt: now };
       if (event.needsApproval) {
@@ -153,7 +169,8 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
 
     case 'pr_merged': {
       upsertPr(next, event.pr, { scope: event.scope, mergeSha: event.mergeSha });
-      if (event.scope === 'partial') break;
+      // While awaiting deployment a merge is only recorded: it must not reset pending targets.
+      if (event.scope === 'partial' || state.status === 'awaiting_deployment') break;
 
       next.phase = 'delivery';
       switch (type.endsOn) {
@@ -200,7 +217,7 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
           `acceptance at ${event.approval.at} is not newer than the result published at ${next.resultPublishedAt}`,
         );
       }
-      complete(next);
+      complete(next, event.approval);
       break;
     }
 
@@ -211,7 +228,7 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
       if (!next.prs.some(pr => pr.scope === 'final' && pr.mergeSha !== undefined)) {
         throw new TransitionError('cannot confirm: the final PR has not been merged');
       }
-      complete(next);
+      complete(next, event.approval);
       break;
     }
 
@@ -219,6 +236,7 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
       next.status = 'done';
       next.outcome = 'cancelled';
       next.cancelReason = event.reason;
+      next.outcomeApproval = { ...event.approval };
       next.waitingOn = 'none';
       break;
     }
@@ -231,6 +249,7 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
       if (state.outcome === 'completed') delete next.resultPublishedAt;
       delete next.outcome;
       delete next.cancelReason;
+      delete next.outcomeApproval;
       next.status = 'in_progress';
       next.waitingOn = 'agent';
       break;
@@ -240,7 +259,8 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
       if (event.currentStep !== undefined) next.currentStep = event.currentStep;
       if (event.nextStep !== undefined) next.nextStep = event.nextStep;
       if (event.agent !== undefined) next.agent = event.agent;
-      if (next.status !== 'done') {
+      // Terminal and externally-driven statuses are owned by their own events, not by checkpoints.
+      if (next.status !== 'done' && next.status !== 'awaiting_deployment') {
         if (event.waitingOn !== undefined) next.waitingOn = event.waitingOn;
         if (event.status !== undefined) next.status = event.status;
       }

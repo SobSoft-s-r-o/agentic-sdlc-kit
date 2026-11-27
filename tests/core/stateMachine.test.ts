@@ -128,6 +128,20 @@ describe('stage_published', () => {
     expect(next.waitingOn).toBe('agent');
   });
 
+  it('rejects a phase that is not part of the task type', () => {
+    expect(() =>
+      applyEvent(fresh('feature'), { kind: 'stage_published', phase: 'debugging', needsApproval: false }, feature, ts(1)),
+    ).toThrow(TransitionError);
+    expect(() =>
+      applyEvent(fresh('analysis'), { kind: 'stage_published', phase: 'review', needsApproval: false }, typeDef('analysis'), ts(1)),
+    ).toThrow(TransitionError);
+  });
+
+  it('accepts a phase that belongs to the type even when other types lack it', () => {
+    const next = applyEvent(fresh('bugfix'), { kind: 'stage_published', phase: 'debugging', needsApproval: false }, typeDef('bugfix'), ts(1));
+    expect(next.stages.debugging?.revision).toBe(1);
+  });
+
   it('keeps the phase unchanged', () => {
     const next = applyEvent(fresh('feature'), { kind: 'stage_published', phase: 'planning', needsApproval: true }, feature, ts(1));
     expect(next.phase).toBe('intake');
@@ -390,6 +404,7 @@ describe('pr_merged', () => {
     expect(next.status).toBe('done');
     expect(next.outcome).toBe('completed');
     expect(next.waitingOn).toBe('none');
+    expect('outcomeApproval' in next).toBe(false);
   });
 
   it('on a final merge of a merge-or-acceptance type, is done and completed', () => {
@@ -535,6 +550,100 @@ describe('targets_deployed', () => {
   });
 });
 
+describe('while awaiting deployment', () => {
+  const feature = typeDef('feature');
+  const awaiting = (): TaskState =>
+    drive(
+      feature,
+      fresh('feature'),
+      [{ kind: 'stage_published', phase: 'planning', needsApproval: false }, 1],
+      [{ kind: 'review_handoff', pr: 11, scope: 'final', targets: ['web', 'api'] }, 2],
+      [{ kind: 'pr_merged', pr: 11, scope: 'final', mergeSha: 'sha-1' }, 3],
+    );
+
+  it('starts from awaiting_deployment with every target pending', () => {
+    expect(awaiting().status).toBe('awaiting_deployment');
+    expect(awaiting().pendingTargets).toEqual(['web', 'api']);
+  });
+
+  const blocked: Array<[string, TaskEvent]> = [
+    ['phase_started', { kind: 'phase_started', phase: 'delivery' }],
+    ['stage_published', { kind: 'stage_published', phase: 'delivery', needsApproval: true }],
+    ['stage_approved', { kind: 'stage_approved', phase: 'planning', approval: approval(ts(50)) }],
+    ['evidence_added', { kind: 'evidence_added', evidenceKind: 'backup', ref: 'b' }],
+    ['review_handoff', { kind: 'review_handoff', pr: 12, scope: 'final', targets: ['web'] }],
+  ];
+
+  it.each(blocked)('rejects %s so the task cannot be pulled out of deployment', (_name, event) => {
+    expect(() => applyEvent(awaiting(), event, feature, ts(60))).toThrow(TransitionError);
+    expect(() => applyEvent(awaiting(), event, feature, ts(60))).toThrow(/awaiting deployment/);
+  });
+
+  it('still completes through targets_deployed after a rejected event', () => {
+    const state = awaiting();
+    expect(() => applyEvent(state, { kind: 'phase_started', phase: 'delivery' }, feature, ts(60))).toThrow(TransitionError);
+    const done = applyEvent(state, { kind: 'targets_deployed', targets: ['web', 'api'], deploymentUrls: [] }, feature, ts(61));
+    expect(done.status).toBe('done');
+  });
+
+  it('lets a checkpoint update notes but ignores its status and waiting-on', () => {
+    const next = applyEvent(
+      awaiting(),
+      { kind: 'checkpoint', status: 'blocked', waitingOn: 'owner', currentStep: 'Watching the rollout', agent: 'claude/ops' },
+      feature,
+      ts(60),
+    );
+    expect(next.status).toBe('awaiting_deployment');
+    expect(next.waitingOn).toBe('external');
+    expect(next.currentStep).toBe('Watching the rollout');
+    expect(next.agent).toBe('claude/ops');
+  });
+
+  it('records a partial PR merge without touching status, phase or pending targets', () => {
+    const partial = applyEvent(awaiting(), { kind: 'pr_merged', pr: 12, scope: 'partial', mergeSha: 'sha-2' }, feature, ts(60));
+    expect(partial.prs).toEqual([
+      { number: 11, scope: 'final', mergeSha: 'sha-1' },
+      { number: 12, scope: 'partial', mergeSha: 'sha-2' },
+    ]);
+    expect(partial.status).toBe('awaiting_deployment');
+    expect(partial.pendingTargets).toEqual(['web', 'api']);
+  });
+
+  it('records another final PR merge without resetting targets that were already deployed', () => {
+    const afterWeb = applyEvent(
+      awaiting(),
+      { kind: 'targets_deployed', targets: ['web'], deploymentUrls: ['https://example.test/deploy/web'] },
+      feature,
+      ts(20),
+    );
+    const next = applyEvent(afterWeb, { kind: 'pr_merged', pr: 12, scope: 'final', mergeSha: 'sha-2' }, feature, ts(60));
+    expect(next.prs).toEqual([
+      { number: 11, scope: 'final', mergeSha: 'sha-1' },
+      { number: 12, scope: 'final', mergeSha: 'sha-2' },
+    ]);
+    expect(next.status).toBe('awaiting_deployment');
+    expect(next.phase).toBe('delivery');
+    expect(next.waitingOn).toBe('external');
+    expect(next.pendingTargets).toEqual(['api']);
+    expect(next.targets).toEqual(['web', 'api']);
+  });
+
+  it('can still be cancelled', () => {
+    const next = applyEvent(awaiting(), { kind: 'cancelled', reason: 'rolled back', approval: approval(ts(50)) }, feature, ts(60));
+    expect(next.status).toBe('done');
+    expect(next.outcome).toBe('cancelled');
+  });
+
+  it('rejects targets_deployed in every status other than awaiting_deployment', () => {
+    const event: TaskEvent = { kind: 'targets_deployed', targets: ['web'], deploymentUrls: [] };
+    const paused = applyEvent(fresh('feature'), { kind: 'stage_published', phase: 'planning', needsApproval: true }, feature, ts(1));
+    const blockedState = applyEvent(fresh('feature'), { kind: 'checkpoint', status: 'blocked' }, feature, ts(1));
+    for (const state of [fresh('feature'), paused, blockedState, featureInReview(['web'])]) {
+      expect(() => applyEvent(state, event, feature, ts(70))).toThrow(TransitionError);
+    }
+  });
+});
+
 describe('accepted', () => {
   const analysis = typeDef('analysis');
   const published = (): TaskState =>
@@ -545,6 +654,14 @@ describe('accepted', () => {
     expect(next.status).toBe('done');
     expect(next.outcome).toBe('completed');
     expect(next.waitingOn).toBe('none');
+  });
+
+  it('records the accepting approval as the outcome approval, without aliasing it', () => {
+    const a = approval(ts(11));
+    const next = applyEvent(published(), { kind: 'accepted', approval: a }, analysis, ts(12));
+    expect(next.outcomeApproval).toEqual(a);
+    a.by = 'someone-else';
+    expect(next.outcomeApproval?.by).toBe('owner-login');
   });
 
   it('acceptance after delivery reaches done in one event', () => {
@@ -623,6 +740,13 @@ describe('confirmed_ran', () => {
     expect(next.waitingOn).toBe('none');
   });
 
+  it('records the confirming approval as the outcome approval', () => {
+    const a = approval(ts(5), { source: 'prompt', ref: 'prompt-17' });
+    const merged = applyEvent(reviewReady(), { kind: 'pr_merged', pr: 8, scope: 'final', mergeSha: 's' }, prodData, ts(4));
+    const next = applyEvent(merged, { kind: 'confirmed_ran', approval: a }, prodData, ts(6));
+    expect(next.outcomeApproval).toEqual(a);
+  });
+
   it('rejects confirmation before the final PR merged', () => {
     expect(() => applyEvent(reviewReady(), { kind: 'confirmed_ran', approval: approval(ts(5)) }, prodData, ts(6))).toThrow(
       TransitionError,
@@ -671,6 +795,12 @@ describe('cancelled', () => {
     expect(next.outcome).toBe('cancelled');
     expect(next.cancelReason).toBe('no longer needed');
     expect(next.waitingOn).toBe('none');
+  });
+
+  it('records the cancelling approval as the outcome approval', () => {
+    const a = approval(ts(1), { source: 'prompt', ref: 'prompt-3' });
+    const next = applyEvent(fresh('feature'), { kind: 'cancelled', reason: 'dropped', approval: a }, feature, ts(2));
+    expect(next.outcomeApproval).toEqual(a);
   });
 
   it.each([
@@ -723,6 +853,7 @@ describe('reopened', () => {
     expect(reopened.outcome).toBeUndefined();
     expect('outcome' in reopened).toBe(false);
     expect(reopened.cancelReason).toBeUndefined();
+    expect('outcomeApproval' in reopened).toBe(false);
   });
 
   it('keeps the published result when a cancelled task is reopened, since nothing accepted it', () => {
@@ -752,6 +883,7 @@ describe('reopened', () => {
     expect(reopened.status).toBe('in_progress');
     expect(reopened.outcome).toBeUndefined();
     expect(reopened.resultPublishedAt).toBeUndefined();
+    expect('outcomeApproval' in reopened).toBe(false);
     // The earlier acceptance must not be able to close the reopened task again.
     expect(() => applyEvent(reopened, { kind: 'accepted', approval: approval(ts(2)) }, analysis, ts(5))).toThrow(
       TransitionError,
