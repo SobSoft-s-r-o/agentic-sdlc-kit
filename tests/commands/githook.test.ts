@@ -577,7 +577,8 @@ describe('runGitHook pre-commit: the secret guard', () => {
 
       expect(await runGitHook('pre-commit', [], h.ctx)).toBe(1);
       expect(everything(h)).not.toContain(sample.secret);
-      expect(everything(h)).not.toContain(sample.secret.slice(0, 8));
+      // The rule id is left out: `rubygems-token` spells the first characters of a `rubygems_` key itself.
+      expect(everything(h).split(sample.rule).join('')).not.toContain(sample.secret.slice(0, 8));
       expect(h.err[0]).toBe('sdlc secret guard: commit blocked');
     }
   });

@@ -9,7 +9,7 @@ import {
   scanChanges,
   scanFileName,
 } from '../../src/secrets/scan.js';
-import { githubToken, sampleFor, SAMPLES } from '../support/secrets.js';
+import { githubToken, sampleFor, SAMPLES, VARIANTS, word, type Sample } from '../support/secrets.js';
 
 const one = (text: string, allow: string[] = []) => scanAddedLines('src/a.ts', [{ line: 7, text }], allow);
 
@@ -18,13 +18,78 @@ describe('the content rules', () => {
     expect(SECRET_RULES.map(rule => rule.id)).toEqual([
       'github-token',
       'github-pat',
+      'gitlab-token',
       'aws-access-key',
+      'aws-bedrock-api-key',
       'gcp-api-key',
+      'gcp-oauth-client-secret',
+      'gcp-oauth-token',
+      'gcp-refresh-token',
+      'fcm-server-key',
+      'gcp-service-account-key',
+      'azure-storage-key',
+      'azure-shared-access-key',
+      'azure-sas-signature',
+      'azure-ad-client-secret',
+      'azure-acr-password',
       'private-key',
+      'private-key-base64',
+      'putty-private-key',
+      'age-secret-key',
       'slack-token',
+      'slack-app-token',
+      'slack-webhook',
       'stripe-live-key',
+      'stripe-webhook-secret',
       'anthropic-key',
       'openai-key',
+      'groq-key',
+      'replicate-key',
+      'perplexity-key',
+      'xai-key',
+      'huggingface-token',
+      'npm-token',
+      'pypi-token',
+      'rubygems-token',
+      'nuget-key',
+      'docker-pat',
+      'twilio-api-key',
+      'sendgrid-key',
+      'mailgun-key',
+      'mailchimp-key',
+      'shopify-token',
+      'databricks-token',
+      'digitalocean-token',
+      'vault-token',
+      'terraform-cloud-token',
+      'doppler-token',
+      'postman-key',
+      'grafana-token',
+      'newrelic-key',
+      'sentry-token',
+      'linear-key',
+      'notion-token',
+      'atlassian-token',
+      'supabase-key',
+      'planetscale-token',
+      'flyio-token',
+      'telegram-bot-token',
+      'discord-bot-token',
+      'discord-webhook',
+      'square-token',
+      'braintree-token',
+      'heroku-api-key',
+      'dynatrace-token',
+      'pulumi-token',
+      'brevo-key',
+      'sourcegraph-token',
+      'alibaba-access-key-id',
+      'aws-secret-access-key',
+      'aws-session-token',
+      'twilio-auth-token',
+      'npmrc-auth',
+      'nuget-config-password',
+      'url-credentials',
       'jwt',
       'generic-assignment',
     ]);
@@ -129,6 +194,289 @@ describe('the content rules', () => {
   });
 });
 
+describe('the broadened rule set', () => {
+  const rules = (text: string): string[] => one(text).map(finding => finding.rule);
+
+  it('has a unique id and a description for every rule, and the generic rule last', () => {
+    const ids = SECRET_RULES.map(rule => rule.id);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const rule of SECRET_RULES) expect(rule.description.length).toBeGreaterThan(10);
+    expect(ids.at(-1)).toBe('generic-assignment');
+    expect(ids.at(-2)).toBe('jwt');
+    // `openai-key` also matches an Anthropic key, so the specific rule must come first.
+    expect(ids.indexOf('anthropic-key')).toBeLessThan(ids.indexOf('openai-key'));
+  });
+
+  it.each(VARIANTS)('$rule: finds $name, once', variant => {
+    expect(rules(variant.text)).toEqual([variant.rule]);
+  });
+
+  it.each([
+    'groq-key',
+    'replicate-key',
+    'perplexity-key',
+    'xai-key',
+    'huggingface-token',
+    'npm-token',
+    'rubygems-token',
+    'docker-pat',
+    'shopify-token',
+    'databricks-token',
+    'digitalocean-token',
+    'doppler-token',
+    'postman-key',
+    'linear-key',
+    'supabase-key',
+    'pulumi-token',
+    'brevo-key',
+    'sourcegraph-token',
+    'heroku-api-key',
+    'atlassian-token',
+    'gcp-api-key',
+  ])('%s: a token that is longer than the usual one is found too (the prefix makes it a token)', rule => {
+    expect(rules(`${sampleFor(rule).text}0`)).toEqual([rule]);
+  });
+
+  describe('Firebase and Google Cloud API keys (AIza)', () => {
+    const key = sampleFor('gcp-api-key').secret;
+
+    it.each([
+      ['google-services.json', `        "current_key": "${key}"`],
+      ['GoogleService-Info.plist', `\t<string>${key}</string>`],
+      ['a Firebase web config in JS', `  apiKey: "${key}",`],
+      ['a Firebase web config, single quotes, one line', `const firebaseConfig = { apiKey: '${key}', authDomain: 'a.firebaseapp.com' };`],
+      ['a firebase_options.dart', `    apiKey: '${key}',`],
+      ['a Vite or Next env file', `NEXT_PUBLIC_FIREBASE_API_KEY=${key}`],
+      ['an Android resource', `    <string name="google_api_key" translatable="false">${key}</string>`],
+      ['a Maps URL', `<script src="https://maps.googleapis.com/maps/api/js?key=${key}&callback=init"></script>`],
+      ['a Gemini call', `curl "https://generativelanguage.googleapis.com/v1/models?key=${key}"`],
+    ])('%s: one finding, by gcp-api-key', (_name, line) => {
+      const found = one(line);
+
+      expect(found.map(finding => finding.rule)).toEqual(['gcp-api-key']);
+      expect(found[0]?.masked).toBe('AIza…(39 chars)');
+    });
+
+    it('finds a key that ends with a dash (the character class includes it)', () => {
+      const dashed = `${'AI' + 'za'}${word(34)}-`;
+
+      expect(one(`"current_key": "${dashed}"`).map(finding => ({ rule: finding.rule, masked: finding.masked }))).toEqual([
+        { rule: 'gcp-api-key', masked: 'AIza…(39 chars)' },
+      ]);
+    });
+
+    it('does not block google-services.json or GoogleService-Info.plist by name: they hold client keys, the content rule decides', () => {
+      expect(scanFileName('app/google-services.json')).toBeUndefined();
+      expect(scanFileName('ios/Runner/GoogleService-Info.plist')).toBeUndefined();
+    });
+
+    it('allowing one key by fingerprint lets the file through, and only that key', () => {
+      const [finding] = one(`"current_key": "${key}"`);
+      const other = `${'AI' + 'za'}${word(35).split('').reverse().join('')}`;
+
+      expect(one(`"current_key": "${key}"`, [finding?.fingerprint ?? ''])).toEqual([]);
+      expect(one(`"current_key": "${other}"`, [finding?.fingerprint ?? '']).map(item => item.rule)).toEqual(['gcp-api-key']);
+    });
+  });
+
+  describe('spans are reported once, by the most specific rule', () => {
+    it('a GitHub token in the user part of a URL is a github-token, not a url-credentials', () => {
+      expect(rules(`git clone https://${githubToken()}:x-oauth-basic@github.com/o/r.git`)).toEqual(['github-token']);
+    });
+
+    it('a URL whose user is a template and whose password only marks a token is not a secret', () => {
+      for (const user of ['${GITHUB_TOKEN}', '$GITHUB_TOKEN', '{token}', '%(token)s']) {
+        expect(rules(`git clone https://${user}:x-oauth-basic@github.com/o/r.git`)).toEqual([]);
+      }
+      expect(rules(`git clone https://${word(20)}:x-oauth-basic@github.com/o/r.git`)).toEqual(['url-credentials']);
+    });
+
+    it('an npm token in an .npmrc line is an npm-token, not an npmrc-auth', () => {
+      const token = sampleFor('npm-token').secret;
+
+      expect(rules(`//registry.npmjs.org/:_authToken=${token}`)).toEqual(['npm-token']);
+    });
+
+    it('a Slack webhook is a slack-webhook and nothing else', () => {
+      expect(rules(`SLACK_URL="https://${sampleFor('slack-webhook').secret}"`)).toEqual(['slack-webhook']);
+    });
+
+    it('a minified service-account JSON gives the key id and the key block, each once', () => {
+      const keyId = sampleFor('gcp-service-account-key').secret;
+      const block = sampleFor('private-key').secret;
+      const json = `{"type":"service_account",${keyId},"private_key":"${block}\\n${word(20)}\\n"}`;
+
+      expect(rules(json)).toEqual(['gcp-service-account-key', 'private-key']);
+    });
+
+    it('a base64 PEM and an Azure storage key on one line are two findings', () => {
+      const pem = sampleFor('private-key-base64').secret;
+      const storage = sampleFor('azure-storage-key').secret;
+
+      expect(rules(`${pem} ${storage}`)).toEqual(['azure-storage-key', 'private-key-base64']);
+    });
+  });
+
+  describe('placeholders and documentation examples are not secrets', () => {
+    const filler = (length: number): string => 'x'.repeat(length);
+
+    it('a token whose body is one repeated character is a filler', () => {
+      for (const line of [
+        `GITLAB_TOKEN=${'gl' + 'pat-'}${filler(20)}`,
+        `STRIPE_WEBHOOK=${'wh' + 'sec_'}${filler(32)}`,
+        `HF_TOKEN=${'hf' + '_'}${filler(34)}`,
+        `NPM=${'np' + 'm_'}${filler(36)}`,
+        `GROQ=${'gs' + 'k_'}${filler(52)}`,
+        `Authorization: Bearer ${'ya' + '29.'}${filler(60)}`,
+        `"client_secret": "${'GOC' + 'SPX-'}${filler(28)}"`,
+        `DOCKER=${'dckr' + '_pat_'}${filler(27)}`,
+      ]) {
+        expect(one(line)).toEqual([]);
+      }
+    });
+
+    it('the Slack webhook of the documentation (zeros and X) is not one', () => {
+      expect(one(`url: https://hooks.slack${'.com'}/services/T00000000/B00000000/${filler(24)}`)).toEqual([]);
+    });
+
+    it('the AWS documentation access key id (ends in EXAMPLE) is not one', () => {
+      expect(one(`AWS_ACCESS_KEY_ID=${'AK' + 'IAIOSFODNN7EXAMPLE'}`)).toEqual([]);
+      expect(one(`id: ${'AS' + 'IAIOSFODNN7EXAMPLE'}`)).toEqual([]);
+    });
+
+    it('an AWS secret key with EXAMPLE in it (the documentation key) is not one', () => {
+      expect(one(`aws_secret${'_access_key'} = ${word(30)}EXAMPLEKEY`)).toEqual([]);
+    });
+
+    it('an .npmrc token read from the environment is not one', () => {
+      expect(one('//registry.npmjs.org/:_authToken=${NPM_TOKEN}')).toEqual([]);
+      expect(one('//registry.npmjs.org/:_authToken=$NPM_TOKEN')).toEqual([]);
+    });
+
+    it('a NuGet password from the environment is not one', () => {
+      for (const value of ['%NUGET_PASSWORD%', '$(NUGET_PASSWORD)', '${NUGET_PASSWORD}', 'xxxxxxxxxxxx']) {
+        expect(one(`<add key="ClearText${'Password'}" value="${value}" />`)).toEqual([]);
+      }
+    });
+  });
+
+  describe('short prefixes inside base64 blobs are not tokens', () => {
+    it('EAAA and 60 characters are a Square token only as a whole word', () => {
+      const square = sampleFor('square-token').secret;
+
+      expect(rules(`SQUARE=${square}`)).toEqual(['square-token']);
+      expect(rules(`data:application/wasm;base64,${word(20)}/${square}`)).toEqual([]);
+      expect(rules(`blob = "${word(20)}+${square}"`)).toEqual([]);
+      expect(rules(`SQUARE=${square}${word(10)}`)).toEqual([]);
+    });
+
+    it('ABSK is a Bedrock key only at the start of a word', () => {
+      const bedrock = sampleFor('aws-bedrock-api-key').secret;
+
+      expect(rules(`KEY=${bedrock}`)).toEqual(['aws-bedrock-api-key']);
+      expect(rules(`blob = "${word(20)}/${bedrock}"`)).toEqual([]);
+    });
+  });
+
+  describe('url-credentials', () => {
+    const url = (password: string, user = 'app', scheme = 'postgres'): string => `${scheme}://${user}:${password}@db.internal:5432/app`;
+
+    it('flags a password, percent-encoded characters and symbols included', () => {
+      for (const password of [word(12), 'p%40ss%3Aw0rd', 'Zq7!Zq7#Zq7', 'a-b_c.d~e', 'hunter2hunter2']) {
+        expect(rules(url(password))).toEqual(['url-credentials']);
+      }
+    });
+
+    it('reports the match as the scheme, user and password only, never the host', () => {
+      const password = 'Zq7'.repeat(4);
+      const [finding] = one(url(password));
+
+      // `postgres://app:` + the password + `@`: the host and the port are not part of the match.
+      expect(finding?.masked).toBe(`post…(${'postgres://app:'.length + password.length + '@'.length} chars)`);
+    });
+
+    it('ignores references, templates and the placeholders of documentation', () => {
+      for (const password of [
+        '${DB_PASSWORD}',
+        '$DB_PASSWORD',
+        '$(cat /run/secrets/db)',
+        '{password}',
+        '{{ db_password }}',
+        '<password>',
+        '[password]',
+        '%s',
+        '%(password)s',
+        'password',
+        'PASSWORD',
+        'passwd',
+        'pass',
+        'pwd',
+        'secret',
+        'changeme',
+        'CHANGEME',
+        'change-me',
+        'example',
+        'placeholder',
+        'your-password',
+        'YOUR_PASSWORD',
+        'yourpassword',
+        'mypassword',
+        'xxx',
+        'xxxxxxxxxxxx',
+        '********',
+        '*****',
+        'xyz',
+        'foobar',
+        'test',
+        'somepassword',
+      ]) {
+        expect(one(url(password))).toEqual([]);
+      }
+    });
+
+    it('ignores a password that is the user name (a default credential) and the user:password examples', () => {
+      for (const [user, password] of [
+        ['postgres', 'postgres'],
+        ['admin', 'admin'],
+        ['root', 'root'],
+        ['Guest', 'guest'],
+        ['user', 'password'],
+        ['username', 'password'],
+        ['user', 'pass'],
+      ] as const) {
+        expect(one(url(password, user))).toEqual([]);
+      }
+      expect(one('redis://:password@cache:6379')).toEqual([]);
+    });
+
+    it('flags a literal password for a docker-compose style user', () => {
+      expect(rules(url('s3cr3tValue1', 'postgres'))).toEqual(['url-credentials']);
+    });
+
+    it('does not flag a URL without a password, a port, an email address or a path with an @', () => {
+      for (const line of [
+        'https://example.org:8080/path',
+        'http://localhost:3000/api/@me',
+        'ssh://git@github.com/org/repo.git',
+        'ssh://git@github.com:22/org/repo.git',
+        'mailto:someone@example.org',
+        'git@github.com:org/repo.git',
+        'https://example.org/a@b',
+        'see https://example.org:8080 and then user@example.org',
+        '"https://" + host + ":" + port + "@"',
+      ]) {
+        expect(one(line)).toEqual([]);
+      }
+    });
+
+    it('finds the credentials in a quoted URL, in a JSON value and after a jdbc prefix', () => {
+      expect(rules(`"url": "${url(word(12))}",`)).toEqual(['url-credentials']);
+      expect(rules(`spring.datasource.url=jdbc:${url(word(12), 'app', 'postgresql')}`)).toEqual(['url-credentials']);
+    });
+  });
+});
+
 describe('scanAddedLines', () => {
   it('skips a line with the allow marker, only that line', () => {
     const token = githubToken();
@@ -197,8 +545,9 @@ describe('masking', () => {
     const line = formatFinding(finding!);
     expect(line).not.toContain(sample.secret);
     expect(JSON.stringify(finding)).not.toContain(sample.secret);
-    // Nor more than four characters of the secret beyond what the pattern itself spells.
-    expect(line).not.toContain(sample.secret.slice(0, 8));
+    // Nor more than four characters of the secret. (The rule id is left out: `rubygems-token` spells the
+    // first characters of a `rubygems_` key itself.)
+    expect(line.replace(finding?.rule ?? '', '')).not.toContain(sample.secret.slice(0, 8));
   });
 });
 
@@ -248,6 +597,41 @@ describe('file-name rules', () => {
     'config/credentials.prod.json',
     'service-account.json',
     'infra/service-account-prod.json',
+    // Added with the broadened rules.
+    'AuthKey_ABC123DEF4.p8',
+    'certs/apns.P8',
+    'putty/work.ppk',
+    'release.jks',
+    'app/release.keystore',
+    'debug.keystore',
+    'firebase-adminsdk-abc12-0123456789.json',
+    'secrets/my-app-firebase-adminsdk-xyz.json',
+    '.aws/credentials',
+    'home/.aws/credentials',
+    'gcloud/application_default_credentials.json',
+    'kubeconfig',
+    'deploy/kubeconfig',
+    'cluster.kubeconfig',
+    '.kube/config',
+    'home/.kube/config',
+    'terraform.tfvars',
+    'infra/prod.auto.tfvars',
+    'infra/prod.tfvars.json',
+    'terraform.tfstate',
+    'infra/terraform.tfstate.backup',
+    'infra/prod.tfstate',
+    'terraform.tfstate.1700000000.backup',
+    '.npmrc',
+    'packages/web/.npmrc',
+    '.pypirc',
+    '.netrc',
+    '_netrc',
+    '.git-credentials',
+    '.pgpass',
+    '.htpasswd',
+    '.dockercfg',
+    'client.ovpn',
+    'vpn/work.OVPN',
   ];
   const allowed = [
     '.env.example',
@@ -268,6 +652,30 @@ describe('file-name rules', () => {
     'monkey.keyboard',
     'README.md',
     'src/credentials/index.ts',
+    // Not secret, or not a credential file.
+    'google-services.json',
+    'app/google-services.json',
+    'ios/Runner/GoogleService-Info.plist',
+    'terraform.tfvars.example',
+    'infra/prod.tfvars.example',
+    '.npmrc.example',
+    '.pypirc.template',
+    'netrc.md',
+    'credentials',
+    'src/aws/credentials',
+    'aws/credentials',
+    'kube/config',
+    'config',
+    'kubeconfig.md',
+    'main.tf',
+    'variables.tf',
+    'tfstate.md',
+    'keystore.md',
+    'release.jks.md',
+    'AuthKey_ABC123DEF4.p8.md',
+    'firebase.json',
+    'firebase-admin.ts',
+    'ovpn.md',
   ];
 
   it.each(blocked)('blocks %s', path => {
@@ -291,7 +699,25 @@ describe('file-name rules', () => {
     expect(scanFileName('credentials.json')?.rule).toBe('credentials-file');
     expect(scanFileName('a/tls.pem')?.fingerprint).toBe(fingerprintOf('key-file', 'a/tls.pem'));
     expect(scanFileName('a/tls.pem')?.fingerprint).not.toBe(scanFileName('b/tls.pem')?.fingerprint);
-    expect(FILE_NAME_RULES.map(rule => rule.id)).toEqual(['env-file', 'key-file', 'ssh-private-key-file', 'credentials-file']);
+    expect(scanFileName('release.jks')?.rule).toBe('keystore-file');
+    expect(scanFileName('x/firebase-adminsdk-1.json')?.rule).toBe('credentials-file');
+    expect(scanFileName('.aws/credentials')?.rule).toBe('cloud-credentials-file');
+    expect(scanFileName('.kube/config')?.rule).toBe('kubeconfig-file');
+    expect(scanFileName('terraform.tfvars')?.rule).toBe('terraform-secret-file');
+    expect(scanFileName('.npmrc')?.rule).toBe('credential-dotfile');
+    expect(scanFileName('a.ovpn')?.rule).toBe('vpn-profile-file');
+    expect(FILE_NAME_RULES.map(rule => rule.id)).toEqual([
+      'env-file',
+      'key-file',
+      'keystore-file',
+      'ssh-private-key-file',
+      'credentials-file',
+      'cloud-credentials-file',
+      'kubeconfig-file',
+      'terraform-secret-file',
+      'credential-dotfile',
+      'vpn-profile-file',
+    ]);
   });
 });
 
@@ -359,16 +785,56 @@ describe('long lines', () => {
     ['mixed', fill('token = "' + 'x'.repeat(11) + ' eyJ-sk--xoxb-')],
   ];
 
-  /** The fastest of three scans: a slow machine slows every run, a backtracking rule slows every run by seconds. */
+  /**
+   * The fastest of three scans: a slow machine slows every run, a backtracking rule slows every run by
+   * seconds. A scan that is fast the first time is not repeated.
+   */
   const bestOfThree = (text: string): number => {
     let best = Infinity;
-    for (let run = 0; run < 3; run += 1) {
+    for (let run = 0; run < 3 && best >= 200; run += 1) {
       const started = performance.now();
       scanAddedLines('min.js', [{ line: 1, text }], []);
       best = Math.min(best, performance.now() - started);
     }
     return best;
   };
+
+  /**
+   * What a rule can be made to work hard on: its own sample (or the near miss, or half of it) over and
+   * over, and the sample next to a very long run of every character class a pattern repeats over.
+   */
+  const adversarial = (text: string, nearMiss: string): Array<[string, string]> => [
+    ['sample repeated', fill(`${text} `)],
+    ['sample repeated, no separator', fill(text)],
+    ['near miss repeated', fill(nearMiss)],
+    ['near miss repeated, spaced', fill(`${nearMiss} `)],
+    ['half of the sample repeated', fill(text.slice(0, Math.ceil(text.length / 2)))],
+    ['sample, then letters', text + fill('a')],
+    ['sample, then dashes', text + fill('-')],
+    ['sample, then slashes', text + fill('/')],
+    ['sample, then equals signs', text + fill('=')],
+    ['sample, then spaces', text + fill(' ')],
+    ['letters, then sample', fill('a') + text],
+    ['dashes, then sample', fill('-') + text],
+    ['digits, then sample', fill('7') + text],
+    ['near miss, then letters', nearMiss + fill('a')],
+    ['near miss, then dashes', nearMiss + fill('-')],
+  ];
+
+  const expectFast = (text: string, nearMiss: string): void => {
+    for (const [name, line] of adversarial(text, nearMiss)) {
+      expect(line.length, name).toBeGreaterThanOrEqual(LONG - 500);
+      expect(bestOfThree(line), `${name}: ${line.length} characters`).toBeLessThan(1_000);
+    }
+  };
+
+  it.each(SAMPLES)('$rule: its sample, the near miss and a long run around them are scanned in well under a second', sample => {
+    expectFast(sample.text, sample.nearMiss);
+  });
+
+  it.each(VARIANTS)('$rule ($name): its variant and a long run around it are scanned in well under a second', variant => {
+    expectFast(variant.text, variant.text.slice(0, -1));
+  });
 
   it.each(shapes)('%s: a line of 100k characters is scanned in well under a second', (_name, text) => {
     expect(text.length).toBeGreaterThanOrEqual(LONG - 100);

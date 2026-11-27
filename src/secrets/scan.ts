@@ -53,8 +53,8 @@ const overlaps = (spans: ReadonlyArray<readonly [number, number]>, start: number
 /**
  * The secrets in the added lines of one file. A line with `sdlc:allow-secret` is skipped, and a
  * finding whose fingerprint is in `allow` is dropped. A span of a line is reported once, by the
- * first rule that matches it (a span the owner allowed counts as reported, so allowing the
- * specific finding silences the generic rule on the same text).
+ * first rule that matches it (a span the owner allowed, and a placeholder the rule ignores, count
+ * as reported, so neither shows up again as a finding of a later, more generic rule).
  */
 export function scanAddedLines(
   path: string,
@@ -77,8 +77,11 @@ export function scanAddedLines(
             rule.pattern.lastIndex += 1;
             continue;
           }
-          if (rule.ignore?.(match) || overlaps(spans, start, end)) continue;
+          if (overlaps(spans, start, end)) continue;
+          // A placeholder claims its span too: a documentation example (a prefix and a filler body, quoted
+          // under a `secret` key) is ignored by its own rule, and the generic rule must not report it instead.
           spans.push([start, end]);
+          if (rule.ignore?.(match)) continue;
           const fingerprint = fingerprintOf(rule.id, matched);
           if (accepted.has(fingerprint)) continue;
           findings.push({ path, line, rule: rule.id, masked: maskOf(matched), fingerprint });
@@ -95,7 +98,8 @@ export function scanAddedLines(
 export function scanFileName(path: string): Finding | undefined {
   const name = path.split('/').pop() ?? path;
   const lower = name.toLowerCase();
-  const rule = FILE_NAME_RULES.find(candidate => candidate.matches(lower));
+  const lowerPath = path.toLowerCase();
+  const rule = FILE_NAME_RULES.find(candidate => candidate.matches(lower, lowerPath));
   if (rule === undefined) return undefined;
   return { path, rule: rule.id, masked: name, fingerprint: fingerprintOf(rule.id, path) };
 }
