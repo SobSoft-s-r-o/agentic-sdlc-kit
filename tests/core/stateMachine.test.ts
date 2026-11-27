@@ -1027,6 +1027,27 @@ describe('reopened', () => {
     expect('outcomeApproval' in reopened).toBe(false);
   });
 
+  it('clears every stage approval, keeping the published revisions', () => {
+    const done = drive(
+      feature,
+      fresh('feature'),
+      [{ kind: 'stage_published', phase: 'brainstorming', needsApproval: true }, 1],
+      [{ kind: 'stage_approved', phase: 'brainstorming', approval: approval(ts(2)) }, 3],
+      [{ kind: 'stage_published', phase: 'planning', needsApproval: true }, 4],
+      [{ kind: 'stage_approved', phase: 'planning', approval: approval(ts(5)) }, 6],
+      [{ kind: 'cancelled', reason: 'on hold', approval: approval(ts(7)) }, 8],
+    );
+    expect(done.stages.planning?.approval).toBeDefined();
+
+    const reopened = applyEvent(done, { kind: 'reopened' }, feature, ts(9));
+
+    for (const phase of ['brainstorming', 'planning'] as const) {
+      expect(reopened.stages[phase]).toEqual({ revision: 1, publishedAt: done.stages[phase]?.publishedAt });
+      expect('approval' in reopened.stages[phase]!).toBe(false);
+    }
+    expect(done.stages.planning?.approval).toBeDefined(); // the input is not changed
+  });
+
   it('restarts at the first phase of the type and records when it was reopened', () => {
     const cancelled = applyEvent(
       fresh('feature'),

@@ -306,6 +306,8 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
       delete next.cancelReason;
       delete next.outcomeApproval;
       delete next.finalMergedAt;
+      // Approvals were for the work before the reopen; each stage must be approved again.
+      for (const stage of Object.values(next.stages)) if (stage) delete stage.approval;
       // Back to the start so work can resume at any phase; owner actions must now postdate the reopen.
       next.phase = type.phases[0];
       next.reopenedAt = now;
