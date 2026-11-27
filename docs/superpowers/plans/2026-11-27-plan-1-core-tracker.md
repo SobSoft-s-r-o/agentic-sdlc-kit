@@ -21,7 +21,7 @@
 - Hidden state comment marker: first line exactly `<!-- sdlc:state -->`, followed by a fenced ```json block.
 - Labels: `sdlc:task` (every tracked issue), `type:<id>`, `sdlc:partial` (PRs).
 - PR body conventions: `Related to #<issue>`, `Scope: partial` or `Scope: final` (default `final` if absent), `Targets: web, api` (optional). Closing keywords are never generated.
-- Board field names (exact, matched case-insensitively): `Status`, `Phase`, `Type`, `Waiting on`, `Summary`, `Current step`, `Next step`, `Pending targets`, `Agent`, `Last update`, `Start`, `Target date`.
+- Board field names (exact, matched case-insensitively): `Status`, `Phase`, `Task type`, `Waiting on`, `Summary`, `Current step`, `Next step`, `Pending targets`, `Agent`, `Last update`, `Start`, `Target date`.
 - Status option names: `Ready`, `In progress`, `Blocked`, `Paused`, `In review`, `Awaiting deployment`, `Done`. Waiting-on options: `Owner`, `Agent`, `External`, `—`.
 - Cancellation: Status `Done`, Current step `Cancelled — <reason>`, Next step `None`, issue closed `not_planned`.
 - Owner approval commands in comments (by a login in `owners`): `/approve`, `/accept`, `/ran`, `/cancel <reason>`; must be newer than the result they act on.
@@ -251,7 +251,7 @@ Transition rules (each a test):
 - Produces:
   - `interface ExistingField { id: string; name: string; dataType: 'SINGLE_SELECT'|'TEXT'|'DATE'|string; options?: { id: string; name: string }[] }`
   - `interface DesiredField { name: string; dataType: 'SINGLE_SELECT'|'TEXT'|'DATE'; options?: string[] }`
-  - `desiredFields(cfg: Config): DesiredField[]` (Phase options = union of enabled types' phases in canonical order; Type options = enabled type labels)
+  - `desiredFields(cfg: Config): DesiredField[]` (Phase options = union of enabled types' phases in canonical order; Task type options = enabled type labels)
   - `planBoardChanges(existing: ExistingField[], desired: DesiredField[]): { createFields: DesiredField[]; addOptions: { fieldId: string; fieldName: string; missing: string[] }[]; typeConflicts: string[] }` (case-insensitive name match; existing extra options untouched)
   - `ensureBoard(run: GhRunner, cfg: Config, opts: { dryRun: boolean }): Promise<{ projectNumber: number; projectId: string; created: boolean; plan: ReturnType<typeof planBoardChanges> }>` — creates the project when `cfg.github.project.number` is absent (`createProjectV2`, linked to the repo), creates fields (`createProjectV2Field`), and adds options.
   - `resolveFieldIds(run: GhRunner, cfg: Config): Promise<FieldMap>` caching to `.sdlc/cache/fields.json` keyed by project id; `type FieldMap = Record<keyof BoardFields | 'start' | 'targetDate', { id: string; options?: Record<string, string> }>`.
