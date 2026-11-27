@@ -71,7 +71,7 @@ The reference project is **not touched** and does not migrate to this project.
 - Works for org-owned and user-owned repositories and Projects (v2).
 - GitHub Actions must remain **optional** (the reference project disables them for
   billing reasons); every automation that runs in Actions also runs locally.
-- **Reference project access**: the builder may read the reference project
+- **Reference project access**: the builder may read the private reference project
   (read-only, location kept outside this repository) to extract rules and edge cases. It is
   **private**: no code, issue text, names, domain terms or identifiers from it may
   be copied into this public repository; regression tests are rewritten as generic
