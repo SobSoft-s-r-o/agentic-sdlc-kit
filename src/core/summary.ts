@@ -27,9 +27,12 @@ export function renderDeliveryReport(state: TaskState): string {
   return lines.join('\n');
 }
 
+/** The first line of every cancel report; reconcile looks for it to avoid posting a report twice. */
+export const CANCEL_REPORT_HEADING = '### Cancelled';
+
 /** The comment posted when a task is cancelled: why, and which owner action approved it. */
 export function renderCancelReport(state: TaskState): string {
-  const lines = ['### Cancelled', '', `**Reason:** ${cancelReasonOf(state)}`];
+  const lines = [CANCEL_REPORT_HEADING, '', `**Reason:** ${cancelReasonOf(state)}`];
   const approval = state.outcomeApproval;
   if (approval) {
     lines.push('', `Approved by ${approval.by} (${approval.ref})`);

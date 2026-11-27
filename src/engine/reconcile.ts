@@ -12,9 +12,14 @@ import {
   type ApprovalCommand,
 } from '../core/approvals.js';
 import { parsePrBody } from '../core/prBody.js';
-import { projectTask, type BoardFields } from '../core/projection.js';
+import { cancelReasonOf, projectTask, type BoardFields } from '../core/projection.js';
 import { applyEvent, TransitionError } from '../core/stateMachine.js';
-import { DELIVERY_REPORT_HEADING, renderDeliveryReport } from '../core/summary.js';
+import {
+  CANCEL_REPORT_HEADING,
+  DELIVERY_REPORT_HEADING,
+  renderCancelReport,
+  renderDeliveryReport,
+} from '../core/summary.js';
 import type { Approval, TaskEvent, TaskState, TaskTypeDef } from '../core/types.js';
 import type { IssueComment, PrInfo, TrackedTask, Tracker } from '../tracker/types.js';
 import { DEPLOYMENT_LOOKBACK, satisfiedTargets } from './deployments.js';
@@ -31,6 +36,7 @@ export interface ReconcileAction {
     | 'issue_closed'
     | 'fields_synced'
     | 'delivery_report'
+    | 'cancel_report'
     | 'skipped_unknown_type'
     | 'error';
   detail: string;
@@ -114,8 +120,10 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
  *    recorded as an approval is skipped silently; any other command that does not count is an
  *    `ignored_approval` saying why;
  * 4. a task awaiting deployment gets `targets_deployed` for the targets deployment evidence
- *    satisfies; when that completes it, the delivery report is posted (unless one already was
- *    since the last reopen) before the state is written;
+ *    satisfies. When a cancellation or the deployments end the task in this run, the cancel or
+ *    delivery report is posted before the state is written, unless a trusted author (tracker
+ *    login, owner, Actions bot) already posted one since the last reopen; a failed post writes
+ *    nothing;
  * 5. the state is written when it changed, the board fields are synced (every run; the tracker
  *    skips unchanged fields) and the issue is opened or closed to match the projection.
  * Done tasks get no events in steps 2-4. Events are timed with GitHub's clock: the merge time, the
@@ -210,7 +218,8 @@ async function reconcileTask(
     applyMerges(t, prs);
     await applyApprovals(t, prs);
   }
-  const reportPosted = await applyDeployments(t);
+  const deliveredNow = await applyDeployments(t);
+  const reportPosted = await postOutcomeReport(t, deliveredNow);
   await project(t, reportPosted);
 }
 
@@ -331,7 +340,7 @@ async function evidenceTime(t: TaskRun, targets: string[], urls: string[]): Prom
   return times.sort(byTime).at(-1);
 }
 
-/** Step 4: deployment evidence. Returns whether a delivery report was posted in this run. */
+/** Step 4: deployment evidence. Returns whether the deployments completed the task in this run. */
 async function applyDeployments(t: TaskRun): Promise<boolean> {
   const { ctx, task } = t;
   if (t.state.status !== 'awaiting_deployment') return false;
@@ -348,17 +357,50 @@ async function applyDeployments(t: TaskRun): Promise<boolean> {
   if (!applyOrReport(t, event, at)) return false;
   t.push('targets_deployed', `${found.targets.join(', ')} deployed (${found.urls.join(', ')})`);
   // `applyOrReport` replaced `t.state`, so the narrowing from the check above no longer holds.
-  if ((t.state as TaskState).status !== 'done') return false;
+  return (t.state as TaskState).status === 'done';
+}
 
-  // A report posted by an earlier run whose state write failed must not be posted again.
+/** The Actions runner's login; its comments count like the tracker's own. */
+const ACTIONS_BOT = 'github-actions[bot]';
+
+/**
+ * Whether a report starting with `heading` is already on the issue since the last reopen. Only
+ * comments by trusted authors count (the tracker login, an owner, the Actions bot, any letter
+ * case), so a forged heading from anyone else cannot suppress the real report.
+ */
+async function reportExists(t: TaskRun, heading: string): Promise<boolean> {
+  const { ctx, task } = t;
+  const login = await trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin());
+  const trusted = new Set(
+    [...ctx.cfg.owners, ACTIONS_BOT, ...(login === undefined ? [] : [login])].map(name => name.toLowerCase()),
+  );
   const since = task.state.reopenedAt;
   const comments = await trackerStep('listComments', task.issue, () => ctx.tracker.listComments(task.issue, since));
-  if (comments.some(comment => comment.body.trimStart().startsWith(DELIVERY_REPORT_HEADING))) return false;
-  const report = renderDeliveryReport(t.state);
+  return comments.some(
+    comment => trusted.has(comment.author.toLowerCase()) && comment.body.trimStart().startsWith(heading),
+  );
+}
+
+/**
+ * Posts the report for an outcome reached in this run, before the state is written: the cancel
+ * report for a cancellation, the delivery report when deployments completed the task. A report
+ * already posted (by an earlier run whose state write failed) is not posted again. A failed post
+ * rejects, so nothing is written. Returns whether a report was posted.
+ */
+async function postOutcomeReport(t: TaskRun, deliveredNow: boolean): Promise<boolean> {
+  const { ctx, task } = t;
+  if (task.state.status === 'done' || t.state.status !== 'done') return false;
+  const cancelled = t.state.outcome === 'cancelled';
+  if (!cancelled && !deliveredNow) return false;
+
+  const heading = cancelled ? CANCEL_REPORT_HEADING : DELIVERY_REPORT_HEADING;
+  if (await reportExists(t, heading)) return false;
+  const report = cancelled ? renderCancelReport(t.state) : renderDeliveryReport(t.state);
   if (!t.dryRun) {
     await trackerStep('postComment', task.issue, () => ctx.tracker.postComment(task.issue, report), 'the state was not changed');
   }
-  t.push('delivery_report', `delivery report posted (${(t.state.deliveredBy ?? []).join(', ')})`);
+  if (cancelled) t.push('cancel_report', `cancel report posted (${cancelReasonOf(t.state)})`);
+  else t.push('delivery_report', `delivery report posted (${(t.state.deliveredBy ?? []).join(', ')})`);
   return true;
 }
 
@@ -370,7 +412,7 @@ async function project(t: TaskRun, reportPosted: boolean): Promise<void> {
   const { ctx, task, state, dryRun } = t;
   const { issue } = task;
   if (!isDeepStrictEqual(task.state, state) && !dryRun) {
-    const hint = reportPosted ? 'the delivery report was posted; the state was not changed' : 'the state was not changed';
+    const hint = reportPosted ? 'the report was posted; the state was not changed' : 'the state was not changed';
     await trackerStep('writeState', issue, () => ctx.tracker.writeState(issue, state), hint);
   }
 

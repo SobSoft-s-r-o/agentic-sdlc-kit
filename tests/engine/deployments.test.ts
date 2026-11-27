@@ -246,6 +246,7 @@ describe('deployRecord', () => {
       url: existing.url,
       createdAt: existing.createdAt,
       alreadyRecorded: true,
+      reconcile: { actions: [], errors: 0 },
     });
     expect(tracker.deployments).toHaveLength(1);
     expect(tracker.writes).toBe(0);
@@ -678,6 +679,7 @@ describe('sdlc deploy record', () => {
       environment: 'production-web',
       url: 'https://github.test/deployments/8',
       createdAt: expect.any(String),
+      reconcile: { actions: [], errors: 0 },
     });
   });
 

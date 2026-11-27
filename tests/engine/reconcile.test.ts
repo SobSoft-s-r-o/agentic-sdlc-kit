@@ -272,6 +272,33 @@ describe('deployments', () => {
     expect((await stateOf(h, 1)).status).toBe('done');
   });
 
+  it('ignores a forged delivery report by an untrusted author and posts the real one', async () => {
+    const h = setup();
+    h.tracker.seedTask(awaiting(1));
+    const url = deployedToWeb(h);
+    comment(h, 1, '### Delivered\n\nnothing to see', AFTER, 'drive-by');
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(kinds(result.actions)).toContain('delivery_report');
+    const reports = visible(h, 1).filter(c => c.body.startsWith('### Delivered'));
+    expect(reports.map(c => c.author)).toEqual(['drive-by', h.tracker.login]);
+    expect(reports[1]!.body).toContain(url);
+  });
+
+  it('counts a report by an owner or the Actions bot as already posted', async () => {
+    for (const author of ['Shop-Owner', 'GitHub-Actions[bot]']) {
+      const h = setup();
+      h.tracker.seedTask(awaiting(1));
+      deployedToWeb(h);
+      comment(h, 1, '### Delivered', AFTER, author);
+
+      const result = await reconcile(h.ctx, {});
+      expect(kinds(result.actions)).not.toContain('delivery_report');
+      expect((await stateOf(h, 1)).status).toBe('done');
+    }
+  });
+
   it('reports an awaiting task without pending targets as an error', async () => {
     const h = setup();
     h.tracker.seedTask(awaiting(1, { targets: [], pendingTargets: [] }));
@@ -427,6 +454,58 @@ describe('approvals', () => {
     expect(await stateOf(h, 1)).toMatchObject({ status: 'done', outcome: 'cancelled', cancelReason: 'superseded by #9' });
     expect(issueOf(h, 1)).toMatchObject({ open: false, closeReason: 'not_planned' });
     expect(h.tracker.fields.get(1)?.currentStep).toBe('Cancelled — superseded by #9');
+  });
+
+  it('posts the cancel report before the state write', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(1, 'feature'));
+    const url = comment(h, 1, '/cancel superseded by #9', AFTER);
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(kinds(result.actions)).toEqual(['approval', 'cancel_report', 'fields_synced', 'issue_closed']);
+    const report = visible(h, 1).at(-1)!;
+    expect(report.author).toBe(h.tracker.login);
+    expect(report.body).toContain('### Cancelled');
+    expect(report.body).toContain('**Reason:** superseded by #9');
+    expect(report.body).toContain(`Approved by ${OWNER} (${url})`);
+    const stateComment = h.tracker.comments.find(c => c.body.startsWith(STATE_MARKER))!;
+    expect(Date.parse(stateComment.updatedAt)).toBeGreaterThan(Date.parse(report.createdAt));
+  });
+
+  it('writes nothing when the cancel report cannot be posted, and retries next run', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(1, 'feature'));
+    comment(h, 1, '/cancel dropped', AFTER);
+    h.tracker.failNext('postComment');
+
+    const failed = await reconcile(h.ctx, {});
+    expect(failed.errors).toBe(1);
+    expect(failed.actions.at(-1)).toMatchObject({ issue: 1, kind: 'error', detail: expect.stringMatching(/postComment failed/) });
+    expect((await stateOf(h, 1)).status).toBe('in_progress');
+    expect(issueOf(h, 1).open).toBe(true);
+    expect(visible(h, 1)).toHaveLength(1);
+
+    const retried = await reconcile(h.ctx, {});
+    expect(retried.errors).toBe(0);
+    expect((await stateOf(h, 1)).outcome).toBe('cancelled');
+    expect(visible(h, 1).filter(c => c.body.startsWith('### Cancelled'))).toHaveLength(1);
+  });
+
+  it('does not post the cancel report twice when the state write failed after it', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(1, 'feature'));
+    comment(h, 1, '/cancel dropped', AFTER);
+    h.tracker.failNext('writeState');
+
+    expect((await reconcile(h.ctx, {})).errors).toBe(1);
+    expect((await stateOf(h, 1)).status).toBe('in_progress');
+
+    const retried = await reconcile(h.ctx, {});
+    expect(retried.errors).toBe(0);
+    expect(kinds(retried.actions)).not.toContain('cancel_report');
+    expect(visible(h, 1).filter(c => c.body.startsWith('### Cancelled'))).toHaveLength(1);
+    expect((await stateOf(h, 1)).outcome).toBe('cancelled');
   });
 
   it('applies /ran only after the final PR merged, using the merge time from GitHub', async () => {
@@ -624,8 +703,8 @@ describe('deployRecord', () => {
     const recorded = await deployRecord(h.ctx, { target: 'web', sha: B });
 
     expect(recorded.sha).toBe(B);
-    expect(recorded.reconcile?.errors).toBe(0);
-    expect(kinds(recorded.reconcile?.actions ?? [])).toEqual([
+    expect(recorded.reconcile.errors).toBe(0);
+    expect(kinds(recorded.reconcile.actions)).toEqual([
       'targets_deployed',
       'delivery_report',
       'fields_synced',

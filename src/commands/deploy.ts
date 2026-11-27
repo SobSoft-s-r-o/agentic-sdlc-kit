@@ -13,9 +13,9 @@ const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
 
 /**
  * A deployment, flagged `alreadyRecorded` when it was found instead of created. `reconcile` is the
- * deployment reconcile run that followed, present when it reported any action.
+ * deployment reconcile run that followed.
  */
-export type RecordedDeployment = DeploymentInfo & { alreadyRecorded?: true; reconcile?: ReconcileResult };
+export type RecordedDeployment = DeploymentInfo & { alreadyRecorded?: true; reconcile: ReconcileResult };
 
 /** Runs a shell command and resolves with its exit code. */
 export type VerifyRunner = (command: string) => Promise<number>;
@@ -44,7 +44,7 @@ export const runShell: VerifyRunner = command =>
  * A successful deployment of exactly `sha` (ignoring letter case) to the environment is returned
  * as it is, flagged `alreadyRecorded`, instead of recording a second one. Either way, the tasks
  * awaiting deployment are then reconciled (`reconcile(ctx, { only: 'deployments' })`); its result is
- * returned as `reconcile` when it has any action. A reconcile error does not reject.
+ * returned as `reconcile`. A reconcile error does not reject.
  */
 export async function deployRecord(
   ctx: CommandContext,
@@ -69,7 +69,7 @@ export async function deployRecord(
     ctx.tracker.listSuccessfulDeployments(target.environment, DEPLOYMENT_LOOKBACK),
   );
   const found = existing.find(d => d.sha.toLowerCase() === sha.toLowerCase());
-  const recorded: RecordedDeployment = found
+  const recorded: Omit<RecordedDeployment, 'reconcile'> = found
     ? { ...found, alreadyRecorded: true }
     : await trackerStep('createDeployment', undefined, () =>
         ctx.tracker.createDeployment({
@@ -81,14 +81,14 @@ export async function deployRecord(
       );
 
   const reconciled = await reconcile(ctx, { only: 'deployments' });
-  return reconciled.actions.length > 0 ? { ...recorded, reconcile: reconciled } : recorded;
+  return { ...recorded, reconcile: reconciled };
 }
 
 const describeRecorded = (d: RecordedDeployment): string => {
   const line = d.alreadyRecorded
     ? `Deployment ${d.id} of ${d.sha} to ${d.environment} was already recorded: ${d.url}`
     : `Recorded deployment ${d.id} of ${d.sha} to ${d.environment}: ${d.url}`;
-  return d.reconcile ? `${line}\n${describeReconcile(d.reconcile)}` : line;
+  return d.reconcile.actions.length > 0 ? `${line}\n${describeReconcile(d.reconcile)}` : line;
 };
 
 /** Registers `sdlc deploy record`. */
@@ -108,7 +108,7 @@ export function registerDeployCommand(program: Command, makeContext: ContextFact
         options,
         async ctx => {
           const recorded = await deployRecord(ctx, { target: options.target, sha: options.sha, verify: options.verify });
-          if ((recorded.reconcile?.errors ?? 0) > 0) process.exitCode = 1;
+          if (recorded.reconcile.errors > 0) process.exitCode = 1;
           return recorded;
         },
         describeRecorded,
