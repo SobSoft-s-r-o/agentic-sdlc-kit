@@ -2,7 +2,7 @@
 
 Installable, agent-driven software development lifecycle for GitHub — works with Claude Code, Gemini CLI, OpenAI Codex and any `AGENTS.md`-aware agent.
 
-> Status: design phase. See [the design](docs/superpowers/specs/2026-11-27-agentic-sdlc-design.md).
+> Status: the core CLI (`sdlc`, below) is available; the installer that sets it up for each agent is still to come. See [the design](docs/superpowers/specs/2026-11-27-agentic-sdlc-design.md).
 
 ## CLI
 
