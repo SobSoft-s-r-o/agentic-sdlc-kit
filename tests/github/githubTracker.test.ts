@@ -408,7 +408,35 @@ describe('GitHubTracker issues and comments', () => {
       author: 'shop-owner',
       body: 'Please keep the export streaming.',
       createdAt: '2026-11-19T08:00:00Z',
+      updatedAt: '2026-11-19T08:00:00Z',
     });
+  });
+
+  it('carries updated_at so an edited comment can be told from an untouched one', async () => {
+    const row = (id: number, created: string, updated?: string) => ({
+      id,
+      html_url: `https://github.com/acme/shop/issues/12#issuecomment-${id}`,
+      user: { login: 'shop-owner' },
+      body: '/approve',
+      created_at: created,
+      ...(updated && { updated_at: updated }),
+    });
+    const { tracker } = trackerFor([
+      ok(
+        ['api', '--paginate', 'repos/acme/shop/issues/12/comments?per_page=100'],
+        JSON.stringify([
+          row(1, '2026-11-19T08:00:00Z', '2026-11-19T08:00:00Z'),
+          row(2, '2026-11-19T09:00:00Z', '2026-11-20T09:00:00Z'),
+          row(3, '2026-11-19T10:00:00Z'),
+        ]),
+      ),
+    ]);
+    const listed = await tracker.listComments(12);
+    expect(listed.map(c => [c.createdAt, c.updatedAt])).toEqual([
+      ['2026-11-19T08:00:00Z', '2026-11-19T08:00:00Z'],
+      ['2026-11-19T09:00:00Z', '2026-11-20T09:00:00Z'],
+      ['2026-11-19T10:00:00Z', '2026-11-19T10:00:00Z'],
+    ]);
   });
 
   it('keeps only comments created strictly after since, whatever the server returned', async () => {

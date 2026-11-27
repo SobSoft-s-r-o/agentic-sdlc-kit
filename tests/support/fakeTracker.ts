@@ -203,7 +203,7 @@ export class FakeTracker implements Tracker {
     return this.comments
       .filter(c => c.issue === issue && Date.parse(c.createdAt) > since)
       .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
-      .map(({ id, url, author, body, createdAt }) => ({ id, url, author, body, createdAt }));
+      .map(({ id, url, author, body, createdAt, updatedAt }) => ({ id, url, author, body, createdAt, updatedAt }));
   }
 
   async setIssueOpen(

@@ -105,10 +105,10 @@ const ownerComment = (
   tracker: FakeTracker,
   thread: number,
   createdAt: string,
-  options: { author?: string; body?: string } = {},
+  options: { author?: string; body?: string; updatedAt?: string } = {},
 ): string => {
-  const { author = OWNER, body = '/approve' } = options;
-  const id = tracker.seedComment(thread, { body, author, createdAt });
+  const { author = OWNER, body = '/approve', updatedAt } = options;
+  const id = tracker.seedComment(thread, { body, author, createdAt, updatedAt });
   return tracker.comments.find(c => c.id === id)!.url;
 };
 
@@ -269,6 +269,20 @@ describe('stagePublish', () => {
     expect(h.tracker.writes).toBe(writes);
   });
 
+  it('says the summary was posted when the state write fails after it', async () => {
+    const h = setup();
+    const issue = await newTask(h);
+    const before = await stateOf(h.tracker, issue);
+    h.tracker.failNext('writeState');
+
+    await expect(
+      stagePublish(h.ctx, issue, 'planning', { file: await summaryFile(), needsApproval: true }),
+    ).rejects.toThrow(/writeState failed for #1.*\(the stage summary was posted; the state was not changed\)/);
+
+    expect(visibleComments(h.tracker, issue)).toHaveLength(1);
+    expect(await stateOf(h.tracker, issue)).toEqual(before);
+  });
+
   it('posts no comment for a phase the task type does not have', async () => {
     const h = setup();
     const issue = await newTask(h);
@@ -374,6 +388,21 @@ describe('taskSetType', () => {
     expect((await stateOf(h.tracker, issue)).type).toBe('tooling');
     expect(issueOf(h.tracker, issue).labels).toEqual(['sdlc:task', 'type:tooling']);
     expect(h.tracker.fields.get(issue)?.type).toBe('Tooling');
+  });
+
+  it("keeps the phase when the new type has it, and resets it to the new type's first when not", async () => {
+    const h = setup();
+    const kept = await newTask(h, 'feature');
+    await stageStart(h.ctx, kept, 'planning');
+    expect((await taskSetType(h.ctx, kept, 'tooling')).phase).toBe('planning');
+
+    const reset = await newTask(h, 'feature');
+    await stageStart(h.ctx, reset, 'planning');
+    // `analysis` has only intake, analysis and delivery, so `planning` would strand the task.
+    const state = await taskSetType(h.ctx, reset, 'analysis');
+    expect(state).toMatchObject({ type: 'analysis', phase: 'intake' });
+    expect(await stateOf(h.tracker, reset)).toMatchObject({ type: 'analysis', phase: 'intake' });
+    expect(h.tracker.fields.get(reset)).toMatchObject({ type: 'Analysis' });
   });
 
   it('refuses a type that is not enabled and leaves the labels alone', async () => {
@@ -609,10 +638,106 @@ describe('approve sources', () => {
     for (const body of bodies) {
       const url = ownerComment(h.tracker, issue, AFTER, { body });
       await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
-        `Comment ${url} is not a /approve command`,
+        `comment ${url} is not a /approve command`,
       );
     }
     expect((await stateOf(h.tracker, issue)).status).toBe('paused');
+  });
+
+  it('refuses an owner comment that was edited after it was posted', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    const url = ownerComment(h.tracker, issue, AFTER, { updatedAt: '2026-07-02T00:00:00.000Z' });
+    const before = await stateOf(h.tracker, issue);
+    const writes = h.tracker.writes;
+
+    await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
+      `comment ${url} was edited after posting; post a new /approve comment`,
+    );
+
+    expect(await stateOf(h.tracker, issue)).toEqual(before);
+    expect(h.tracker.writes).toBe(writes);
+  });
+
+  it('names the command to repost for every kind of edited comment', async () => {
+    const h = setup();
+    const issue = await newTask(h);
+    const url = ownerComment(h.tracker, issue, AFTER, { body: '/cancel dropped', updatedAt: '2026-07-02T00:00:00.000Z' });
+    await expect(approve(h.ctx, issue, { action: 'cancel', commentUrl: url })).rejects.toThrow(
+      `comment ${url} was edited after posting; post a new /cancel comment`,
+    );
+    expect(visibleComments(h.tracker, issue)).toHaveLength(1);
+    expect((await stateOf(h.tracker, issue)).status).toBe('in_progress');
+  });
+
+  it('accepts a comment whose updatedAt equals its createdAt', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    const url = ownerComment(h.tracker, issue, AFTER, { updatedAt: AFTER });
+    const state = await approve(h.ctx, issue, { action: 'approve', commentUrl: url });
+    expect(state.stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: url });
+  });
+
+  describe("an owner comment written by the tool's own login", () => {
+    it('is refused in enforce mode, whatever the letter case of the login', async () => {
+      const h = setup(enforceCfg);
+      h.tracker.login = 'SHOP-OWNER';
+      const issue = await pausedFeature(h);
+      const url = ownerComment(h.tracker, issue, AFTER);
+      const before = await stateOf(h.tracker, issue);
+      const writes = h.tracker.writes;
+
+      await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
+        `comment ${url} is authored by the agent's own login (SHOP-OWNER); ` +
+          'approve via prompt or run agents under a separate account',
+      );
+
+      expect(await stateOf(h.tracker, issue)).toEqual(before);
+      expect(h.tracker.writes).toBe(writes);
+    });
+
+    it('is accepted in observe mode but recorded as unverified, keeping the comment url', async () => {
+      const h = setup();
+      h.tracker.login = OWNER;
+      const issue = await pausedFeature(h);
+      const url = ownerComment(h.tracker, issue, AFTER);
+
+      const state = await approve(h.ctx, issue, { action: 'approve', commentUrl: url });
+
+      expect(state.stages.brainstorming?.approval).toEqual({ source: 'unverified', ref: url, by: OWNER, at: AFTER });
+      expect(state).toMatchObject({ status: 'in_progress', waitingOn: 'agent' });
+    });
+
+    it('does not stop a separate account in enforce mode', async () => {
+      const h = setup(enforceCfg);
+      h.tracker.login = 'sdlc-bot';
+      const issue = await pausedFeature(h);
+      const url = ownerComment(h.tracker, issue, AFTER);
+      const state = await approve(h.ctx, issue, { action: 'approve', commentUrl: url });
+      expect(state.stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: url, by: OWNER });
+    });
+
+    it('still applies the other checks first (command, edits)', async () => {
+      const h = setup(enforceCfg);
+      h.tracker.login = OWNER;
+      const issue = await pausedFeature(h);
+      const wrong = ownerComment(h.tracker, issue, AFTER, { body: 'Looks good' });
+      await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: wrong })).rejects.toThrow(/is not a \/approve command/);
+      const edited = ownerComment(h.tracker, issue, AFTER, { updatedAt: '2026-07-02T00:00:00.000Z' });
+      await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: edited })).rejects.toThrow(/was edited after posting/);
+    });
+
+    it('names a failed login lookup and changes nothing', async () => {
+      const h = setup();
+      const issue = await pausedFeature(h);
+      const url = ownerComment(h.tracker, issue, AFTER);
+      const writes = h.tracker.writes;
+      h.tracker.failNext('authenticatedLogin');
+      await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
+        /authenticatedLogin failed/,
+      );
+      expect(h.tracker.writes).toBe(writes);
+    });
   });
 
   it('accepts the command in any letter case with a note after it', async () => {
@@ -639,7 +764,7 @@ describe('approve sources', () => {
     linkPr(h.tracker, issue, 50, 'Related to #1');
     await expect(
       approve(h.ctx, issue, { action: 'approve', commentUrl: 'https://github.test/issues/9#issuecomment-404' }),
-    ).rejects.toThrow('Comment https://github.test/issues/9#issuecomment-404 was not found on #1 or its pull requests');
+    ).rejects.toThrow('comment https://github.test/issues/9#issuecomment-404 was not found on #1 or its pull requests');
   });
 
   it('names a failed comment lookup', async () => {
@@ -803,6 +928,37 @@ describe('approve actions', () => {
       expect(h.tracker.writes).toBe(writes);
     });
 
+    it('says the report was posted when the state write fails after it', async () => {
+      const h = setup();
+      const issue = await newTask(h);
+      h.tracker.failNext('writeState');
+
+      await expect(approve(h.ctx, issue, { action: 'cancel', reason: 'r', unverified: true })).rejects.toThrow(
+        /writeState failed for #1.*\(the cancel report was posted; the state was not changed\)/,
+      );
+
+      expect(visibleComments(h.tracker, issue)).toHaveLength(1);
+      expect((await stateOf(h.tracker, issue)).status).toBe('in_progress');
+      expect(issueOf(h.tracker, issue).open).toBe(true);
+    });
+
+    it('refuses a cancel without a reason before posting or writing anything', async () => {
+      const h = setup();
+      const issue = await newTask(h);
+      const writes = h.tracker.writes;
+
+      for (const reason of [undefined, '', '   ']) {
+        await expect(approve(h.ctx, issue, { action: 'cancel', reason, unverified: true })).rejects.toThrow(
+          'cancel needs a reason (--reason <text>)',
+        );
+      }
+
+      expect(visibleComments(h.tracker, issue)).toHaveLength(0);
+      expect(h.tracker.writes).toBe(writes);
+      expect((await stateOf(h.tracker, issue)).status).toBe('in_progress');
+      expect(issueOf(h.tracker, issue).open).toBe(true);
+    });
+
     it('posts no report for a task that cannot be cancelled', async () => {
       const h = setup();
       const issue = await newTask(h);
@@ -849,7 +1005,7 @@ describe('approve actions', () => {
       const issue = await newTask(h);
       const url = ownerComment(h.tracker, issue, AFTER, { body: '/cancel' });
       await expect(approve(h.ctx, issue, { action: 'cancel', commentUrl: url })).rejects.toThrow(
-        `Comment ${url} is not a /cancel command`,
+        `comment ${url} is not a /cancel command`,
       );
       expect((await stateOf(h.tracker, issue)).status).toBe('in_progress');
     });

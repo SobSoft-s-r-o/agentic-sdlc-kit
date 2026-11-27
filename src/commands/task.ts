@@ -42,7 +42,10 @@ export async function taskNew(
   return { issue, url: created.url };
 }
 
-/** Moves the task to another enabled type: swaps the `type:` label and updates the state. Not for done tasks. */
+/**
+ * Moves the task to another enabled type: swaps the `type:` label and updates the state, resetting
+ * the phase to the new type's first when the new type has no such phase. Not for done tasks.
+ */
 export async function taskSetType(ctx: CommandContext, issue: number, typeId: string): Promise<TaskState> {
   const type = resolveType(ctx.cfg, typeId);
   const task = await fetchTask(ctx, issue);
@@ -52,7 +55,9 @@ export async function taskSetType(ctx: CommandContext, issue: number, typeId: st
   // The label goes first: if the state write then fails, running the same command again converges.
   const remove = state.type === type.id ? [] : [`type:${state.type}`];
   await trackerStep('setLabels', issue, () => ctx.tracker.setLabels(issue, [`type:${type.id}`], remove));
-  const next: TaskState = { ...state, type: type.id, updatedAt: ctx.now() };
+  // A phase the new type does not have would strand the task; start it over at the new type's first.
+  const phase = type.phases.includes(state.phase) ? state.phase : type.phases[0];
+  const next: TaskState = { ...state, type: type.id, phase, updatedAt: ctx.now() };
   return persist(ctx, { task, type }, next);
 }
 

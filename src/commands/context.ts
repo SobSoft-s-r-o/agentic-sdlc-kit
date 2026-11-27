@@ -118,6 +118,8 @@ export interface CommitOptions {
    * leaves the task untouched. Used to post the comment that must precede the state change.
    */
   beforeWrite?: (next: TaskState, previous: TaskState) => Promise<void>;
+  /** Added to the error when the state write itself fails: what `beforeWrite` already did. */
+  writeHint?: string;
 }
 
 /** Saves `next` for an already loaded task: `beforeWrite`, then `writeState` -> `syncFields` -> issue open/close. */
@@ -128,7 +130,9 @@ export async function persist(
   options: CommitOptions = {},
 ): Promise<TaskState> {
   await options.beforeWrite?.(next, loaded.task.state);
-  await saveAndSync(ctx, loaded.task.issue, next, loaded.type, loaded.task.issueOpen);
+  await saveAndSync(ctx, loaded.task.issue, next, loaded.type, loaded.task.issueOpen, {
+    writeHint: options.writeHint,
+  });
   return next;
 }
 

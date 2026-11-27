@@ -228,6 +228,7 @@ const toIssueComment = (c: RestComment): IssueComment => ({
   author: c.user?.login ?? '',
   body: c.body ?? '',
   createdAt: c.created_at,
+  updatedAt: c.updated_at ?? c.created_at,
 });
 
 const toDeploymentInfo = (d: DeploymentRow): DeploymentInfo => ({

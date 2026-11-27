@@ -24,6 +24,8 @@ export interface IssueComment {
   author: string;
   body: string;
   createdAt: string;
+  /** GitHub's `updated_at`: equals `createdAt` until the comment is edited. */
+  updatedAt: string;
 }
 
 export interface PrInfo {

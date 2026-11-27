@@ -51,6 +51,7 @@ export async function stagePublish(
         });
         await trackerStep('postComment', issue, () => ctx.tracker.postComment(issue, body), 'the state was not changed');
       },
+      writeHint: 'the stage summary was posted; the state was not changed',
     },
   );
 }

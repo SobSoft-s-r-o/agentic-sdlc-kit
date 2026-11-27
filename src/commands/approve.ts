@@ -70,7 +70,7 @@ async function findComment(
     const onPr = await onThread(pr.number);
     if (onPr) return onPr;
   }
-  throw new Error(`Comment ${url} was not found on #${issue} or its pull requests`);
+  throw new Error(`comment ${url} was not found on #${issue} or its pull requests`);
 }
 
 /**
@@ -86,9 +86,11 @@ function finalMergeTime(state: TaskState, prs: PrInfo[]): string | undefined {
 /**
  * Records an owner decision on the task: `approve` a published stage, `accept` the published result,
  * confirm the production-data run (`ran`) or `cancel`. The decision needs a source: an owner's
- * `commentUrl`, which must be that command (`/approve`, `/accept`, `/ran`, `/cancel <reason>`) and
- * newer than what it acts on, or `unverified` (observe mode only). `cancel` takes its reason from
- * `input.reason`, else from the comment, and posts the cancel report before the state is written.
+ * `commentUrl`, or `unverified` (observe mode only). The comment must be that command (`/approve`,
+ * `/accept`, `/ran`, `/cancel <reason>`), never edited after posting, and newer than what it acts
+ * on. A comment by the tool's own login is the agent approving itself: refused in enforce mode,
+ * recorded as unverified in observe mode. `cancel` needs a reason, from `input.reason` or else the
+ * comment, and posts the cancel report before the state is written.
  */
 export async function approve(ctx: CommandContext, issue: number, input: ApproveInput): Promise<TaskState> {
   const { action, commentUrl, unverified = false } = input;
@@ -120,12 +122,25 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
   } else {
     const comment = await findComment(ctx, issue, commentUrl, listPrs);
     if (!ctx.cfg.owners.some(owner => owner.toLowerCase() === comment.author.toLowerCase())) {
-      throw new Error(`Comment ${comment.url} is by ${comment.author || 'an unknown author'}, who is not a configured owner`);
+      throw new Error(`comment ${comment.url} is by ${comment.author || 'an unknown author'}, who is not a configured owner`);
     }
     const command = parseOwnerCommand(comment.body);
-    if (command?.action !== action) throw new Error(`Comment ${comment.url} is not a /${action} command`);
+    if (command?.action !== action) throw new Error(`comment ${comment.url} is not a /${action} command`);
+    // Anyone who can write to the repo can edit an owner's comment into a command.
+    if (Date.parse(comment.updatedAt) > Date.parse(comment.createdAt)) {
+      throw new Error(`comment ${comment.url} was edited after posting; post a new /${action} comment`);
+    }
     if (!reason) reason = command.reason ?? '';
-    approval = { source: 'comment', ref: comment.url, by: comment.author, at: comment.createdAt };
+
+    const login = await trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin());
+    const ownComment = login !== undefined && login.toLowerCase() === comment.author.toLowerCase();
+    if (ownComment && ctx.cfg.mode === 'enforce') {
+      throw new Error(
+        `comment ${comment.url} is authored by the agent's own login (${login}); ` +
+          'approve via prompt or run agents under a separate account',
+      );
+    }
+    approval = { source: ownComment ? 'unverified' : 'comment', ref: comment.url, by: comment.author, at: comment.createdAt };
 
     // The state machine checks the comment against the publication and the reopen; it does not
     // know when the final PR really merged (its own record is later), so `ran` is checked here.
@@ -139,6 +154,8 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
     }
   }
 
+  if (action === 'cancel' && !reason) throw new Error('cancel needs a reason (--reason <text>)');
+
   return commitLoaded(ctx, loaded, eventWith(approval), {
     beforeWrite:
       action === 'cancel'
@@ -147,6 +164,7 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
             await trackerStep('postComment', issue, () => ctx.tracker.postComment(issue, report), 'the state was not changed');
           }
         : undefined,
+    writeHint: action === 'cancel' ? 'the cancel report was posted; the state was not changed' : undefined,
   });
 }
 

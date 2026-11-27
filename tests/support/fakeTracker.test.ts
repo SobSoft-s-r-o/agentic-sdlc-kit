@@ -339,10 +339,25 @@ describe('FakeTracker comments', () => {
       author: tracker.login,
       body: 'one',
       createdAt: all[0]!.createdAt,
+      updatedAt: all[0]!.createdAt,
     });
 
     const later = await tracker.listComments(number, all[0]!.createdAt);
     expect(later.map(c => c.body)).toEqual(['two']);
+  });
+
+  it('lists an edited comment with its later updatedAt', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('T', '', []);
+    tracker.seedComment(number, { body: 'a', author: 'x', createdAt: '2026-02-01T00:00:00.000Z' });
+    tracker.seedComment(number, {
+      body: 'b',
+      author: 'x',
+      createdAt: '2026-02-02T00:00:00.000Z',
+      updatedAt: '2026-02-03T00:00:00.000Z',
+    });
+    const listed = await tracker.listComments(number);
+    expect(listed.map(c => c.updatedAt)).toEqual(['2026-02-01T00:00:00.000Z', '2026-02-03T00:00:00.000Z']);
   });
 
   it('serves PR numbers as well as issue numbers', async () => {
