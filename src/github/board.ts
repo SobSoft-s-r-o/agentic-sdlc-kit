@@ -214,11 +214,8 @@ async function fetchProjectById(run: GhRunner, id: string): Promise<ProjectSnaps
   return snapshotOf(data.node);
 }
 
-/** Creates the project, linked to the configured repository. */
-async function createProject(
-  run: GhRunner,
-  cfg: Config,
-): Promise<{ project: ProjectSnapshot; url?: string }> {
+/** Creates the project, linked to the configured repository; its identity comes from the mutation response. */
+async function createProject(run: GhRunner, cfg: Config): Promise<CreatedProject> {
   const { owner, ownerType } = cfg.github.project;
   const [repoOwner, repoName] = cfg.github.repo.split('/') as [string, string];
   const root = ownerType === 'org' ? 'organization' : 'user';
@@ -241,8 +238,8 @@ async function createProject(
     }`,
     { input: { ownerId: ids.owner.id, repositoryId: ids.repo.id, title: `${repoName} SDLC tasks` } },
   );
-  const { id, url } = created.createProjectV2.projectV2;
-  return { project: await fetchProjectById(run, id), url };
+  const { id, number, url } = created.createProjectV2.projectV2;
+  return { id, number, url };
 }
 
 /** Ids of the given fields that have a value on at least one item of the project. */
@@ -548,23 +545,22 @@ export async function ensureBoard(
   const preservesValues = opts.optionUpdatesPreserveValues ?? OPTION_UPDATE_PRESERVES_VALUES;
   const desired = desiredFields(cfg);
 
-  let project: ProjectSnapshot;
+  // `existing` stays undefined when this run creates the project; it is read back once created.
+  let existing: ProjectSnapshot | undefined;
   let createdProject: CreatedProject | undefined;
   let wouldCreateProject = false;
   if (cfg.github.project.number !== undefined) {
-    project = await fetchProject(run, cfg);
+    existing = await fetchProject(run, cfg);
   } else if (opts.dryRun) {
     wouldCreateProject = true;
-    project = { id: '', number: 0, fields: NEW_PROJECT_FIELDS, viewNames: [] };
+    existing = { id: '', number: 0, fields: NEW_PROJECT_FIELDS, viewNames: [] };
   } else {
-    const made = await createProject(run, cfg);
-    project = made.project;
-    createdProject = { number: project.number, id: project.id, url: made.url };
+    createdProject = await createProject(run, cfg);
     opts.onProjectCreated?.(createdProject);
   }
   const created = createdProject !== undefined;
 
-  const provision = async (): Promise<EnsureBoardResult> => {
+  const provision = async (project: ProjectSnapshot): Promise<EnsureBoardResult> => {
     const plan = planBoardChanges(project.fields, desired);
     if (plan.typeConflicts.length > 0) {
       throw new BoardError(
@@ -608,9 +604,9 @@ export async function ensureBoard(
     return { ...base, ...(views.length > 0 ? await createViews(run, cfg, project, views) : noViews) };
   };
 
-  if (!createdProject) return provision();
+  if (!createdProject) return provision(existing as ProjectSnapshot);
   try {
-    return await provision();
+    return await provision(await fetchProjectById(run, createdProject.id));
   } catch (error) {
     // The project exists now; without its number in the config a rerun would create another one.
     const where = `#${createdProject.number}${createdProject.url ? ` (${createdProject.url})` : ''}`;

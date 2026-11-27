@@ -608,8 +608,8 @@ describe('ensureBoard', () => {
         title: 'shop SDLC tasks',
       });
       expect(announced).toEqual([{ number: 12, id: 'PVT_new', url: createdUrl }]);
-      // Announced right after the project exists, before any field is written.
-      expect(callsWhenAnnounced).toEqual([3]);
+      // Announced as soon as the mutation answered: before the project is read back or written to.
+      expect(callsWhenAnnounced).toEqual([2]);
       expect(result).toMatchObject({ created: true, projectNumber: 12, projectId: 'PVT_new' });
       expect(result.viewsCreated).toHaveLength(4);
       // Every later write targets the project that was just created.
@@ -643,16 +643,64 @@ describe('ensureBoard', () => {
       expect(run.calls).toHaveLength(4);
     });
 
-    it('does not announce a project in a dry run, and a failure before creation has no created project', async () => {
+    it.each([
+      ['the project cannot be read back (GhError)', { match: ['graphql'], code: 1, stderr: 'gh: Bad Gateway (HTTP 502)' }, 'HTTP 502'],
+      ['the project is not found when read back', gql({ node: null }), 'not found right after creating it'],
+    ] as [string, FakeGhStep, string][])(
+      'names the created project when %s',
+      async (_, readBack, reason) => {
+        const run = fakeGh([...createSteps().slice(0, 2), readBack]);
+        const announced: number[] = [];
+        const error = await ensureBoard(run, newCfg, {
+          dryRun: false,
+          onProjectCreated: project => announced.push(project.number),
+        }).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(BoardError);
+        const boardError = error as BoardError;
+        expect(boardError.message).toContain('Project #12');
+        expect(boardError.message).toContain(createdUrl);
+        expect(boardError.message).toContain('created but provisioning failed');
+        expect(boardError.message).toContain(reason);
+        expect(boardError.message).toContain('github.project.number: 12');
+        expect(boardError.createdProject).toEqual({ number: 12, id: 'PVT_new', url: createdUrl });
+        expect(announced).toEqual([12]);
+        expect(run.calls).toHaveLength(3);
+      },
+    );
+
+    it('does not announce a project in a dry run', async () => {
       const announced: number[] = [];
       const dry = fakeGh([]);
       await ensureBoard(dry, newCfg, { dryRun: true, onProjectCreated: p => announced.push(p.number) });
       expect(announced).toEqual([]);
-
-      const failing = fakeGh([{ match: ['graphql'], code: 1, stderr: 'gh: Server Error (HTTP 500)' }]);
-      const error = await ensureBoard(failing, newCfg, { dryRun: false }).catch((e: unknown) => e);
-      expect(error).not.toBeInstanceOf(BoardError);
+      expect(dry.calls).toEqual([]);
     });
+
+    it.each([
+      ['the owner and repository lookup fails', [{ match: ['graphql'], code: 1, stderr: 'gh: Server Error (HTTP 500)' }]],
+      ['the owner is not found', [gql({ owner: null, repo: { id: 'R_shop' } })]],
+      ['the repository is not found', [gql({ owner: { id: 'O_acme' }, repo: null })]],
+      [
+        'createProjectV2 itself fails',
+        [createSteps()[0] as FakeGhStep, { match: ['graphql'], code: 1, stderr: 'gh: Server Error (HTTP 500)' }],
+      ],
+    ] as [string, FakeGhStep[]][])(
+      'reports no created project and announces nothing when %s',
+      async (_, script) => {
+        const run = fakeGh(script);
+        const announced: number[] = [];
+        const error = await ensureBoard(run, newCfg, {
+          dryRun: false,
+          onProjectCreated: project => announced.push(project.number),
+        }).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(Error);
+        expect((error as BoardError).createdProject).toBeUndefined();
+        expect((error as Error).message).not.toContain('was created');
+        expect(announced).toEqual([]);
+      },
+    );
   });
 
   it('fails clearly when the configured project does not exist', async () => {
