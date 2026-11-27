@@ -3,6 +3,7 @@ import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 import { buildTypeRegistry, ConfigError } from '../core/taskTypes.js';
 import type { EndsOn, EvidenceKind, Phase, TaskTypeDef } from '../core/types.js';
+import { validateMcpIds } from '../render/mcp.js';
 import { packageVersion } from '../version.js';
 
 /** Type-level guard: resolves to `never` unless `V` lists every member of the union `T`. */
@@ -47,22 +48,15 @@ const KIT_REF_MESSAGE = 'must be a git tag or branch name (letters, digits, ".",
 const SECRET_FINGERPRINT = /^[0-9a-f]{16}$/;
 const SECRET_FINGERPRINT_MESSAGE = 'must be a fingerprint of 16 lowercase hex characters ([0-9a-f]{16})';
 
-/** Servers of the built-in MCP catalog; the catalog (Task 6) takes over through `setMcpIdValidator`. */
-const DEFAULT_MCP_IDS = ['github', 'context7', 'playwright'] as const;
-
 /** Returns one error message per problem found in the MCP server ids; none means they are all known. */
 export type McpIdValidator = (ids: string[]) => string[];
 
-const defaultMcpIdValidator: McpIdValidator = ids =>
-  ids
-    .filter(id => !(DEFAULT_MCP_IDS as readonly string[]).includes(id))
-    .map(id => `unknown MCP server "${id}" (catalog ids: ${DEFAULT_MCP_IDS.join(', ')})`);
-
-let mcpIdValidator: McpIdValidator = defaultMcpIdValidator;
+/** The catalog decides which ids exist, so loading a config never needs the catalog module imported first. */
+let mcpIdValidator: McpIdValidator = validateMcpIds;
 
 /**
- * Replaces the validator that `mcp.servers` is checked with; the catalog installs
- * `validateMcpIds` here. Returns a function that puts the previous validator back.
+ * Replaces the validator that `mcp.servers` is checked with (`validateMcpIds`, the MCP catalog, by
+ * default); for tests. Returns a function that puts the previous validator back.
  */
 export function setMcpIdValidator(validator: McpIdValidator): () => void {
   const previous = mcpIdValidator;

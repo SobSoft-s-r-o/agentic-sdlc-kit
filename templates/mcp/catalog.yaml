@@ -1,0 +1,40 @@
+# MCP servers the kit can wire into each harness. `sdlc.config.yaml` picks ids from this list
+# (`mcp.servers`); src/render/mcp.ts renders them per harness.
+#
+# - `remote.auth` never holds a value: `env` names the environment variable the harness reads the
+#   token from. Only the header `Authorization` with the scheme `Bearer` is supported.
+# - `local.env` lists variable names the harness forwards to the server process; never values.
+# - `default: true` marks a server the kit offers by default (`mcp.servers` defaults to `[github]`).
+#
+# Sources (checked 2026-11-27):
+# - github: https://github.com/github/github-mcp-server (remote endpoint and docker command)
+# - context7: https://github.com/upstash/context7 (`npx -y @upstash/context7-mcp`)
+# - playwright: https://github.com/microsoft/playwright-mcp (`npx @playwright/mcp@latest`)
+
+- id: github
+  description: "GitHub's official MCP server: repositories, issues, pull requests and Actions."
+  default: true
+  remote:
+    url: https://api.githubcopilot.com/mcp/
+    auth:
+      header: Authorization
+      scheme: Bearer
+      env: GITHUB_PERSONAL_ACCESS_TOKEN
+  local:
+    command: docker
+    args: [run, -i, --rm, -e, GITHUB_PERSONAL_ACCESS_TOKEN, ghcr.io/github/github-mcp-server]
+    env: [GITHUB_PERSONAL_ACCESS_TOKEN]
+
+- id: context7
+  description: Up-to-date library documentation for the agent to look things up in.
+  default: false
+  local:
+    command: npx
+    args: [-y, "@upstash/context7-mcp"]
+
+- id: playwright
+  description: Browser automation and page inspection through Playwright.
+  default: false
+  local:
+    command: npx
+    args: ["@playwright/mcp@latest"]
