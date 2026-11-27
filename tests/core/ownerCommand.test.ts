@@ -37,6 +37,17 @@ describe('parseOwnerCommand', () => {
     expect(parseOwnerCommand(body)).toEqual(expected);
   });
 
+  it('reads the type of a type-change approval, /approve type <id>, in any letter case', () => {
+    expect(parseOwnerCommand('/approve type artifact')).toEqual({ action: 'approve', typeId: 'artifact' });
+    expect(parseOwnerCommand('/Approve TYPE Production-Data  ok\nthanks')).toEqual({
+      action: 'approve',
+      typeId: 'production-data',
+    });
+    expect(parseOwnerCommand('/approve type')).toEqual({ action: 'approve', typeId: '' });
+    expect(parseOwnerCommand('/approve typescript')).toEqual({ action: 'approve' });
+    expect(parseOwnerCommand('/approve the type change')).toEqual({ action: 'approve' });
+  });
+
   it('gives no reason for commands that take none', () => {
     expect(parseOwnerCommand('/approve because')).not.toHaveProperty('reason');
   });

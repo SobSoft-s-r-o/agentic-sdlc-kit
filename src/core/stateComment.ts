@@ -72,5 +72,8 @@ export function parseStateComment(body: string): TaskState | null {
   if (typeof stages !== 'object' || stages === null || Array.isArray(stages)) {
     throw new StateCommentError('state comment has invalid "stages": expected an object');
   }
+  if (candidate.typeChanges !== undefined && !Array.isArray(candidate.typeChanges)) {
+    throw new StateCommentError('state comment has invalid "typeChanges": expected an array');
+  }
   return parsed as TaskState;
 }

@@ -75,6 +75,19 @@ describe('parseStateComment', () => {
     expect(parseStateComment(renderStateComment(state))).toStrictEqual(state);
   });
 
+  it('round-trips type changes, reads state written before they existed, and refuses a malformed list', () => {
+    const changed: TaskState = {
+      ...base(),
+      typeChanges: [
+        { from: 'feature', to: 'tooling', at: '2026-01-02T00:00:00.000Z', ref: 'https://github.test/issues/42#issuecomment-7', source: 'comment' },
+      ],
+    };
+    expect(parseStateComment(renderStateComment(changed))).toStrictEqual(changed);
+    expect(parseStateComment(renderStateComment(base()))).not.toHaveProperty('typeChanges');
+    const malformed = renderStateComment(base()).replace('"schema": 1', '"schema": 1, "typeChanges": {}');
+    expect(() => parseStateComment(malformed)).toThrow('invalid "typeChanges"');
+  });
+
   it('round-trips text that contains code fences, markers and markdown', () => {
     const state = { ...base(), summary: 'Use ```json\n{}\n``` and <!-- sdlc:state --> in docs' };
     expect(parseStateComment(renderStateComment(state))).toStrictEqual(state);

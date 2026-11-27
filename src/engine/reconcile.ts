@@ -345,6 +345,8 @@ async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void>
     if (recordedRefs(t.state).has(normalizeCommentUrl(comment.url))) continue;
     const ignore = (why: string): void => t.push('ignored_approval', `/${action} (${comment.url}): ${why}`);
     try {
+      // Authorizes `task set-type` only; a recorded one was skipped above.
+      if (command.typeId !== undefined) throw new ApprovalRefusedError('type-change approval');
       const shared = sharedPr.get(comment);
       if (shared !== undefined) throw new ApprovalRefusedError(`PR #${shared} links several tasks`);
       const state = t.state;

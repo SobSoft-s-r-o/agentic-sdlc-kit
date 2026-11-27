@@ -539,6 +539,22 @@ describe('approvals', () => {
     expect((await stateOf(observe, 1)).stages.brainstorming?.approval).toMatchObject({ source: 'unverified', ref: url });
   });
 
+  it('does not take a type-change approval (/approve type <id>) as a stage approval', async () => {
+    const h = setup();
+    h.tracker.seedTask(pausedOn(1));
+    const url = comment(h, 1, '/approve type tooling', AFTER);
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(result.actions).toContainEqual({
+      issue: 1,
+      kind: 'ignored_approval',
+      detail: `/approve (${url}): type-change approval`,
+    });
+    expect(await stateOf(h, 1)).toMatchObject({ status: 'paused', waitingOn: 'owner' });
+    expect((await stateOf(h, 1)).stages.brainstorming?.approval).toBeUndefined();
+  });
+
   it('ignores owner commands on a PR that links several tasks', async () => {
     const h = setup();
     h.tracker.seedTask(pausedOn(1));

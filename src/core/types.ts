@@ -59,6 +59,16 @@ export interface StageRecord {
   approval?: Approval;
 }
 
+/** A `task set-type` change that weakened how the task ends, with the approval that allowed it. */
+export interface TypeChange {
+  from: string;
+  to: string;
+  at: string;
+  /** The owner's `/approve type <to>` comment URL, or `unverified` (observe mode). */
+  ref: string;
+  source: Approval['source'];
+}
+
 export interface TaskState {
   schema: 1;
   issue: number;
@@ -85,6 +95,8 @@ export interface TaskState {
   /** When the task was last reopened; owner actions that end the task must be newer. */
   reopenedAt?: string;
   deliveredBy?: string[];
+  /** Weakening type changes and their approvals; absent in state written before it existed. */
+  typeChanges?: TypeChange[];
   updatedAt: string;
 }
 

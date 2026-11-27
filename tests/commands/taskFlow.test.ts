@@ -23,6 +23,7 @@ import {
 } from '../../src/commands/task.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
 import { STATE_MARKER } from '../../src/core/stateComment.js';
+import { reconcile } from '../../src/engine/reconcile.js';
 import { applyEvent, newTask as newTaskState } from '../../src/core/stateMachine.js';
 import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
 import type { TaskState } from '../../src/core/types.js';
@@ -105,6 +106,8 @@ async function pausedFeature(h: Harness): Promise<number> {
 }
 
 /** Seeds a comment (an `/approve` by the owner unless told otherwise) and returns its URL. */
+const APPROVE_TOOLING = '/approve type tooling';
+
 const ownerComment = (
   tracker: FakeTracker,
   thread: number,
@@ -530,13 +533,79 @@ describe('taskSetType', () => {
       const issue = await newTask(h, 'feature');
       await expect(taskSetType(h.ctx, issue, 'tooling')).rejects.toThrow(
         'changing #1 from "feature" (ends on deploy) to "tooling" (ends on merge) weakens how it ends; ' +
-          'pass --comment-url with an owner\'s /approve comment',
+          'pass --comment-url with an owner\'s "/approve type tooling" comment',
       );
       expect(issueOf(h.tracker, issue).labels).toEqual(['sdlc:task', 'type:feature']);
       expect((await stateOf(h.tracker, issue)).type).toBe('feature');
 
+      const url = ownerComment(h.tracker, issue, AFTER, { body: '/approve type Tooling' });
+      const state = await taskSetType(h.ctx, issue, 'tooling', { commentUrl: url });
+      expect(state.type).toBe('tooling');
+      expect(state.typeChanges).toEqual([{ from: 'feature', to: 'tooling', at: state.updatedAt, ref: url, source: 'comment' }]);
+    });
+
+    it('treats acceptance to merge-or-acceptance as weakening: analysis -> artifact is refused without approval', async () => {
+      const h = setup(enforceCfg);
+      const issue = await newTask(h, 'analysis');
+      await expect(taskSetType(h.ctx, issue, 'artifact')).rejects.toThrow(
+        'changing #1 from "analysis" (ends on owner_acceptance) to "artifact" (ends on merge_or_acceptance) weakens how it ends',
+      );
+      expect((await stateOf(h.tracker, issue)).type).toBe('analysis');
+      const other = await newTask(h, 'production-data');
+      await expect(taskSetType(h.ctx, other, 'artifact')).rejects.toThrow(/weakens how it ends/);
+    });
+
+    it('needs an approval naming this type: a plain /approve or one for another type does not authorize it', async () => {
+      const h = setup(enforceCfg);
+      const issue = await newTask(h, 'feature');
+      for (const body of ['/approve', '/approve type bugfix', '/approve type']) {
+        const url = ownerComment(h.tracker, issue, AFTER, { body });
+        await expect(taskSetType(h.ctx, issue, 'tooling', { commentUrl: url })).rejects.toThrow(
+          `comment ${url} does not approve this change; post "/approve type tooling"`,
+        );
+      }
+      expect((await stateOf(h.tracker, issue)).type).toBe('feature');
+    });
+
+    it('does not accept the comment that approved the plan', async () => {
+      const h = setup(enforceCfg);
+      const issue = await pausedFeature(h);
       const url = ownerComment(h.tracker, issue, AFTER);
-      expect((await taskSetType(h.ctx, issue, 'tooling', { commentUrl: url })).type).toBe('tooling');
+      await approve(h.ctx, issue, { action: 'approve', commentUrl: url });
+
+      await expect(taskSetType(h.ctx, issue, 'tooling', { commentUrl: url })).rejects.toThrow(
+        `comment ${url} is already recorded as an approval of #${issue}`,
+      );
+      expect((await stateOf(h.tracker, issue)).type).toBe('feature');
+    });
+
+    it('refuses a type-change approval already used once', async () => {
+      const h = setup(enforceCfg);
+      const issue = await newTask(h, 'feature');
+      const url = ownerComment(h.tracker, issue, AFTER, { body: '/approve type tooling' });
+      await taskSetType(h.ctx, issue, 'tooling', { commentUrl: url });
+      await taskSetType(h.ctx, issue, 'feature');
+
+      await expect(taskSetType(h.ctx, issue, 'tooling', { commentUrl: url })).rejects.toThrow(
+        `comment ${url} is already recorded as an approval of #${issue}`,
+      );
+      expect((await stateOf(h.tracker, issue)).type).toBe('feature');
+    });
+
+    it('is not applied again by reconcile as a stage approval', async () => {
+      const h = setup(enforceCfg);
+      const issue = await pausedFeature(h);
+      const url = ownerComment(h.tracker, issue, AFTER, { body: '/approve type tooling' });
+      await taskSetType(h.ctx, issue, 'tooling', { commentUrl: url });
+      const before = await stateOf(h.tracker, issue);
+
+      const result = await reconcile(h.ctx, {});
+
+      const after = await stateOf(h.tracker, issue);
+      expect(after.stages.brainstorming?.approval).toBeUndefined();
+      expect(after.status).toBe(before.status);
+      expect(result.actions.filter(a => a.issue === issue && a.kind === 'approval')).toEqual([]);
+      expect(result.actions.filter(a => a.issue === issue && a.kind === 'ignored_approval')).toEqual([]);
     });
 
     it('treats acceptance or confirmation to merge as weakening too', async () => {
@@ -552,11 +621,14 @@ describe('taskSetType', () => {
       const h = setup(agentsCfg);
       const issue = await newTask(h, 'feature');
       const cases: Array<[string, RegExp]> = [
-        [ownerComment(h.tracker, issue, AFTER, { author: 'agent-bot' }), /an agent login/],
-        [ownerComment(h.tracker, issue, AFTER, { author: 'drive-by' }), /not a configured owner/],
-        [ownerComment(h.tracker, issue, AFTER, { updatedAt: '2026-07-02T00:00:00.000Z' }), /was edited/],
-        [ownerComment(h.tracker, issue, AFTER, { body: '/accept' }), /is not a \/approve command/],
-        [ownerComment(h.tracker, issue, BEFORE), /is not newer than the task's last change at/],
+        [ownerComment(h.tracker, issue, AFTER, { author: 'agent-bot', body: APPROVE_TOOLING }), /an agent login/],
+        [ownerComment(h.tracker, issue, AFTER, { author: 'drive-by', body: APPROVE_TOOLING }), /not a configured owner/],
+        [
+          ownerComment(h.tracker, issue, AFTER, { updatedAt: '2026-07-02T00:00:00.000Z', body: APPROVE_TOOLING }),
+          /was edited/,
+        ],
+        [ownerComment(h.tracker, issue, AFTER, { body: '/accept' }), /does not approve this change/],
+        [ownerComment(h.tracker, issue, BEFORE, { body: APPROVE_TOOLING }), /is not newer than the task's last change at/],
       ];
       for (const [url, message] of cases) {
         await expect(taskSetType(h.ctx, issue, 'tooling', { commentUrl: url })).rejects.toThrow(message);
@@ -564,13 +636,17 @@ describe('taskSetType', () => {
       expect((await stateOf(h.tracker, issue)).type).toBe('feature');
     });
 
-    it('is allowed in observe mode, with a warning that it is unverified', async () => {
+    it('is allowed in observe mode, with a warning, and recorded as unverified', async () => {
       const h = setup();
       const issue = await newTask(h, 'feature');
-      expect((await taskSetType(h.ctx, issue, 'tooling')).type).toBe('tooling');
+      const state = await taskSetType(h.ctx, issue, 'tooling');
+      expect(state.type).toBe('tooling');
       expect(h.err).toEqual([
         'warning: changing #1 from "feature" (ends on deploy) to "tooling" (ends on merge) weakens how it ends; ' +
           'recorded without owner approval (unverified, observe mode)',
+      ]);
+      expect(state.typeChanges).toEqual([
+        { from: 'feature', to: 'tooling', at: state.updatedAt, ref: 'unverified', source: 'unverified' },
       ]);
     });
 
@@ -983,6 +1059,15 @@ describe('approve sources', () => {
     expect((await stateOf(h.tracker, issue)).status).toBe('paused');
   });
 
+  it('refuses a type-change approval as a stage approval', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    const url = ownerComment(h.tracker, issue, AFTER, { body: '/approve type tooling' });
+    await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
+      `comment ${url} is a type-change approval, not a /approve of the stage`,
+    );
+  });
+
   it('refuses a comment already recorded as another approval', async () => {
     const h = setup();
     const issue = await pausedFeature(h);
@@ -1321,7 +1406,8 @@ describe('commander wiring', () => {
     await run(root, 'review', 'handoff', '1', '--pr', '50', '--targets', 'Web');
     await run(root, 'task', 'set-type', '1', 'artifact');
 
-    expect(h.err).toEqual([]);
+    // Confirmation to merge-or-acceptance weakens how the task ends: observe mode warns.
+    expect(h.err).toEqual([expect.stringMatching(/weakens how it ends; recorded without owner approval/)]);
     expect(await stateOf(h.tracker, 1)).toMatchObject({ type: 'artifact', status: 'in_review', targets: ['web'] });
   });
 
@@ -1346,7 +1432,7 @@ describe('commander wiring', () => {
     const h = setup(enforceCfg);
     const root = program(h);
     await run(root, 'task', 'new', '--title', 'T', '--summary', 'S', '--type', 'feature');
-    const url = ownerComment(h.tracker, 1, AFTER);
+    const url = ownerComment(h.tracker, 1, AFTER, { body: APPROVE_TOOLING });
     await run(root, 'task', 'set-type', '1', 'tooling', '--comment-url', url);
     expect(h.err).toEqual([]);
     expect((await stateOf(h.tracker, 1)).type).toBe('tooling');

@@ -44,6 +44,8 @@ export interface ApprovalCommand {
   action: ApprovalAction;
   /** Only `cancel`: the rest of its line. */
   reason?: string;
+  /** Only `/approve type <id>`: a type-change approval, never a stage approval. */
+  typeId?: string;
   comment: IssueComment;
 }
 
@@ -68,12 +70,17 @@ export const isOwner = includesLogin;
 export const normalizeCommentUrl = (url: string): string =>
   url.trim().replace(/\/pull\/(\d+)/, '/issues/$1').toLowerCase();
 
-/** Comment URLs already recorded as approvals in `state` (any stage, or the outcome), normalized. */
+/**
+ * Comment URLs already recorded as approvals in `state` (any stage, the outcome, or a type change),
+ * normalized. One comment is one decision: a recorded one never counts again.
+ */
 export function recordedRefs(state: TaskState): Set<string> {
   const approvals = [state.outcomeApproval, ...Object.values(state.stages).map(stage => stage?.approval)];
-  return new Set(
-    approvals.filter((a): a is Approval => a !== undefined && a.ref !== '').map(a => normalizeCommentUrl(a.ref)),
-  );
+  const refs = [
+    ...approvals.filter((a): a is Approval => a !== undefined).map(a => a.ref),
+    ...(state.typeChanges ?? []).map(change => change.ref),
+  ];
+  return new Set(refs.filter(ref => ref !== '').map(normalizeCommentUrl));
 }
 
 const isApprovalAction = (action: OwnerCommand['action']): action is ApprovalAction =>
@@ -93,6 +100,7 @@ export function parseApprovalCommands(comments: readonly IssueComment[], owners:
     const command: ApprovalCommand = {
       action: parsed.action,
       ...(parsed.reason !== undefined && { reason: parsed.reason }),
+      ...(parsed.typeId !== undefined && { typeId: parsed.typeId }),
       comment,
     };
     (isOwner(owners, comment.author) ? commands : ignored).push(command);
@@ -130,6 +138,11 @@ export interface OwnerCommentCheck {
   cfg: Pick<Config, 'owners' | 'agents' | 'mode'>;
   /** The tool's own login, read only once the comment passes the cheaper checks; `undefined` when unknown. */
   login: () => Promise<string | undefined>;
+  /**
+   * For `task set-type`: the comment must be `/approve type <typeId>` (any letter case). Without
+   * it, a type-change approval is refused as the plain `/<action>`.
+   */
+  typeId?: string;
 }
 
 const AGENTS_HINT = 'list agent logins under `agents` in sdlc.config.yaml';
@@ -140,7 +153,8 @@ const AGENTS_HINT = 'list agent logins under `agents` in sdlc.config.yaml';
  * - a comment by a login under `agents` (any letter case) is an agent's: refused in enforce mode,
  *   recorded with source `unverified` in observe mode, whoever runs `sdlc`;
  * - otherwise the author must be a configured owner (any letter case);
- * - the first non-empty line is the `/<action>` command (`parseOwnerCommand`);
+ * - the first non-empty line is the `/<action>` command (`parseOwnerCommand`), not a type-change
+ *   approval; with `typeId`, it is `/approve type <typeId>` instead;
  * - the comment was not edited after posting (anyone who can write to the repo can edit it); an
  *   unreadable timestamp counts as edited;
  * - it is not by the tool's own login: that is the agent approving itself, refused in enforce
@@ -166,7 +180,18 @@ export async function validateOwnerComment(check: OwnerCommentCheck): Promise<{
     );
   }
   const command = parseOwnerCommand(comment.body);
-  if (command?.action !== action) throw new ApprovalRefusedError(`comment ${comment.url} is not a /${action} command`);
+  if (check.typeId !== undefined) {
+    if (command?.action !== 'approve' || command.typeId !== check.typeId.toLowerCase()) {
+      throw new ApprovalRefusedError(
+        `comment ${comment.url} does not approve this change; post "/approve type ${check.typeId}"`,
+      );
+    }
+  } else {
+    if (command?.action !== action) throw new ApprovalRefusedError(`comment ${comment.url} is not a /${action} command`);
+    if (command.typeId !== undefined) {
+      throw new ApprovalRefusedError(`comment ${comment.url} is a type-change approval, not a /${action} of the stage`);
+    }
+  }
   const created = Date.parse(comment.createdAt);
   const updated = Date.parse(comment.updatedAt);
   if (Number.isNaN(created) || Number.isNaN(updated) || updated > created) {

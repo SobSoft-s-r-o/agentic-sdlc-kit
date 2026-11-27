@@ -1,8 +1,8 @@
 import type { Command } from 'commander';
 import { newTask, TransitionError } from '../core/stateMachine.js';
 import { typeRegistry } from '../config/schema.js';
-import { validateOwnerComment } from '../core/approvals.js';
-import type { EndsOn, TaskState, WaitingOn } from '../core/types.js';
+import { normalizeCommentUrl, recordedRefs, validateOwnerComment } from '../core/approvals.js';
+import type { Approval, EndsOn, TaskState, TypeChange, WaitingOn } from '../core/types.js';
 import { StateCommentError } from '../core/stateComment.js';
 import { NoStateCommentError } from '../tracker/types.js';
 import { findComment } from './approve.js';
@@ -86,19 +86,26 @@ async function adoptIssue(
   return { issue, url: found.url };
 }
 
-/** Ends that need an owner, or a deployment, beyond the merge. */
-const OWNER_ENDS: readonly EndsOn[] = ['owner_acceptance', 'owner_confirmation', 'merge_or_acceptance'];
+/** Ends that need the owner beyond the merge. */
+const OWNER_ENDS: readonly EndsOn[] = ['owner_acceptance', 'owner_confirmation'];
 
-/** Whether moving from `from` to `to` lets the task end with less: no deployment, or a merge alone. */
+/**
+ * Whether moving from `from` to `to` lets the task end with less: no deployment; the owner's
+ * acceptance or confirmation replaced by a merge (alone, or as an alternative); or a merge alone
+ * instead of merge-or-acceptance.
+ */
 const weakensEnd = (from: EndsOn, to: EndsOn): boolean =>
-  (from === 'deploy' && to !== 'deploy') || (OWNER_ENDS.includes(from) && to === 'merge');
+  (from === 'deploy' && to !== 'deploy') ||
+  (OWNER_ENDS.includes(from) && (to === 'merge' || to === 'merge_or_acceptance')) ||
+  (from === 'merge_or_acceptance' && to === 'merge');
 
 /**
  * Moves the task to another enabled type: swaps the `type:` label and updates the state, resetting
  * the phase to the new type's first when the new type has no such phase. Not for done tasks, nor
- * for one awaiting deployment. A change that weakens how the task ends (dropping the deployment,
- * or the owner's acceptance or confirmation, for a merge) needs an owner's `/approve` comment newer
- * than the task's last change in enforce mode; observe mode allows it with a warning.
+ * for one awaiting deployment. A change that weakens how the task ends (`weakensEnd`) needs, in
+ * enforce mode, an owner's `/approve type <new-id>` comment newer than the task's last change and
+ * not recorded before; observe mode allows it without one, with a warning. The approval used (or
+ * `unverified`) is recorded in `typeChanges`, so the comment never counts again.
  */
 export async function taskSetType(
   ctx: CommandContext,
@@ -114,17 +121,27 @@ export async function taskSetType(
     throw new TransitionError(`cannot change the type of #${issue} while it is awaiting deployment`);
   }
 
+  const now = ctx.now();
   const from = typeRegistry(ctx.cfg).get(state.type);
+  let typeChange: TypeChange | undefined;
   if (from && weakensEnd(from.endsOn, type.endsOn)) {
     const change =
       `changing #${issue} from "${from.id}" (ends on ${from.endsOn}) to "${type.id}" (ends on ${type.endsOn}) ` +
       'weakens how it ends';
+    const record = (approval: Pick<Approval, 'ref' | 'source'>): TypeChange => ({
+      from: from.id,
+      to: type.id,
+      at: now,
+      ref: approval.ref,
+      source: approval.source,
+    });
     if (input.commentUrl !== undefined) {
-      await requireOwnerApproval(ctx, issue, state, input.commentUrl);
+      typeChange = record(await requireTypeApproval(ctx, issue, state, type.id, input.commentUrl));
     } else if (ctx.cfg.mode === 'enforce') {
-      throw new Error(`${change}; pass --comment-url with an owner's /approve comment`);
+      throw new Error(`${change}; pass --comment-url with an owner's "/approve type ${type.id}" comment`);
     } else {
       ctx.err?.(`warning: ${change}; recorded without owner approval (unverified, observe mode)`);
+      typeChange = record({ ref: 'unverified', source: 'unverified' });
     }
   }
 
@@ -133,18 +150,37 @@ export async function taskSetType(
   await trackerStep('setLabels', issue, () => ctx.tracker.setLabels(issue, [`type:${type.id}`], remove));
   // A phase the new type does not have would strand the task; start it over at the new type's first.
   const phase = type.phases.includes(state.phase) ? state.phase : type.phases[0];
-  const next: TaskState = { ...state, type: type.id, phase, updatedAt: ctx.now() };
+  const next: TaskState = {
+    ...state,
+    type: type.id,
+    phase,
+    updatedAt: now,
+    ...(typeChange && { typeChanges: [...(state.typeChanges ?? []), typeChange] }),
+  };
   return persist(ctx, { task, type }, next);
 }
 
-/** Checks `url` is an owner's `/approve` on the task (or its PRs), newer than the task's last change. */
-async function requireOwnerApproval(ctx: CommandContext, issue: number, state: TaskState, url: string): Promise<void> {
+/**
+ * Checks `url` is an owner's `/approve type <typeId>` on the task (or its PRs), not recorded as any
+ * approval before, and newer than the task's last change. Returns the approval to record.
+ */
+async function requireTypeApproval(
+  ctx: CommandContext,
+  issue: number,
+  state: TaskState,
+  typeId: string,
+  url: string,
+): Promise<Approval> {
+  if (recordedRefs(state).has(normalizeCommentUrl(url))) {
+    throw new Error(`comment ${url} is already recorded as an approval of #${issue}`);
+  }
   const comment = await findComment(ctx, issue, url, () =>
     trackerStep('listTaskPrs', issue, () => ctx.tracker.listTaskPrs(issue)),
   );
   const { approval } = await validateOwnerComment({
     comment,
     action: 'approve',
+    typeId,
     cfg: ctx.cfg,
     login: () => trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin()),
   });
@@ -156,6 +192,7 @@ async function requireOwnerApproval(ctx: CommandContext, issue: number, state: T
   if (approval.source === 'unverified') {
     ctx.err?.(`warning: comment ${url} is recorded as unverified (observe mode)`);
   }
+  return approval;
 }
 
 export function taskCheckpoint(
@@ -220,7 +257,7 @@ export function registerTaskCommand(program: Command, makeContext: ContextFactor
     .description('Change the task type of a task that is not done')
     .argument('<issue>', 'issue number')
     .argument('<type>', 'task type id')
-    .option('--comment-url <url>', "an owner's /approve comment; needed in enforce mode when the change weakens how the task ends")
+    .option('--comment-url <url>', 'an owner\'s "/approve type <type>" comment; needed in enforce mode when the change weakens how the task ends')
     .option('--json', 'print machine-readable JSON')
     .action(async (issue: string, type: string, options: { commentUrl?: string; json?: boolean }) => {
       await runCommand(
