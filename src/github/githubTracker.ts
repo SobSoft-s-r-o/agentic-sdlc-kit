@@ -29,6 +29,8 @@ import { GhError, ghJson, graphql, type GhRunner } from './gh.js';
 
 /** What `gh api` prints when GitHub refuses to edit a comment: not the author's, or no longer there. */
 const EDIT_REFUSED = /\bHTTP (?:403|404)\b/;
+/** A 403 that is GitHub throttling, not refusing: posting a new comment instead would duplicate it. */
+const RATE_LIMITED = /rate limit|secondary rate|abuse/i;
 /** What `gh pr view` prints for a number that is not a pull request. */
 const PR_NOT_FOUND = /could not resolve to a pullrequest|no pull requests? found/i;
 /** `gh issue list` and `gh pr list` cap their output; reaching the cap means results may be missing. */
@@ -371,7 +373,9 @@ export class GitHubTracker implements Tracker {
         await this.send('PATCH', `repos/${this.repo}/issues/comments/${existing.id}`, { body });
         return;
       } catch (error) {
-        if (!(error instanceof GhError && EDIT_REFUSED.test(error.stderr))) throw error;
+        if (!(error instanceof GhError && EDIT_REFUSED.test(error.stderr)) || RATE_LIMITED.test(error.stderr)) {
+          throw error;
+        }
       }
     }
     await this.send('POST', `repos/${this.repo}/issues/${issue}/comments`, { body });

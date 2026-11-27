@@ -434,6 +434,16 @@ describe('GitHubTracker.writeState', () => {
       expect(run.calls).toHaveLength(3);
     });
 
+    it.each([
+      ['a primary rate limit', 'gh: API rate limit exceeded for user ID 2202. (HTTP 403)'],
+      ['a secondary rate limit', 'gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)'],
+      ['abuse detection', 'gh: You have triggered an abuse detection mechanism. (HTTP 403)'],
+    ])('rejects, and posts no duplicate state comment, on %s', async (_what, stderr) => {
+      const { run, tracker } = trackerFor([LOGIN, comments(12), patch(stderr), post]);
+      await expect(tracker.writeState(12, task(12))).rejects.toBeInstanceOf(GhError);
+      expect(run.calls).toHaveLength(3);
+    });
+
     it('rejects when the fallback POST fails too', async () => {
       const { tracker } = trackerFor([
         LOGIN,
