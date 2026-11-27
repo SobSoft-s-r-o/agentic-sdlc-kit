@@ -1,4 +1,4 @@
-# agentic-sdlc
+# agentic-sdlc-kit
 
 Installable, agent-driven software development lifecycle for GitHub — works with Claude Code, Gemini CLI, OpenAI Codex and any `AGENTS.md`-aware agent.
 

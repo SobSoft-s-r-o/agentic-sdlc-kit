@@ -1,4 +1,4 @@
-# agentic-sdlc Plan 1 — Core & Tracker CLI Implementation Plan
+# agentic-sdlc-kit Plan 1 — Core & Tracker CLI Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -16,7 +16,7 @@
 
 - Node ≥ 20; TypeScript `strict: true`, `module`/`moduleResolution: NodeNext`, ESM only.
 - Runtime dependencies limited to `commander`, `yaml`, `zod`. No Octokit; all GitHub calls go through `gh` (`gh api`, `gh api graphql`).
-- Package name `@sobsoft/agentic-sdlc`, binary `sdlc` (npm name `agentic-sdlc` is taken). Until npm publishing (Plan 4), run via `npx github:SobSoft-s-r-o/agentic-sdlc`.
+- Package name `agentic-sdlc-kit`, binary `sdlc`. Until npm publishing (Plan 4), run via `npx github:SobSoft-s-r-o/agentic-sdlc-kit`.
 - Everything English. **No code, text, names, identifiers or domain terms from the private reference project** may appear in this repo; regression tests are generic scenarios.
 - Hidden state comment marker: first line exactly `<!-- sdlc:state -->`, followed by a fenced ```json block.
 - Labels: `sdlc:task` (every tracked issue), `type:<id>`, `sdlc:partial` (PRs).

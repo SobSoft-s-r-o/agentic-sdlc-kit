@@ -1,6 +1,6 @@
-# agentic-sdlc — Design
+# agentic-sdlc-kit — Design
 
-Date: 2026-11-27 · Status: approved by owner 2026-11-27 · Name: `agentic-sdlc` · Repository: `SobSoft-s-r-o/agentic-sdlc` (public) · License: MIT
+Date: 2026-11-27 · Status: approved by owner 2026-11-27 · Name: `agentic-sdlc-kit` · Repository: `SobSoft-s-r-o/agentic-sdlc-kit` (public) · License: MIT
 
 ## 1. Intent
 
@@ -63,7 +63,7 @@ The reference project is **not touched** and does not migrate to this project.
 ## 3. Constraints
 
 - Language: everything English (prompts, board labels, docs, CLI).
-- License: MIT (owner decision). Repository `SobSoft-s-r-o/agentic-sdlc`, public.
+- License: MIT (owner decision). Repository `SobSoft-s-r-o/agentic-sdlc-kit`, public.
 - Runtime: Node.js ≥ 20 (present wherever Claude Code, Gemini CLI and Codex are
   installed, all of which ship via npm). No Python requirement for the core.
 - GitHub access through `gh` CLI (auth reused; needs `project` scope) — the
@@ -95,7 +95,7 @@ The reference project is **not touched** and does not migrate to this project.
 **Install mechanism**
 - **A. Agent-driven install (chosen).** Bootstrap prompt → agent reads `INSTALL.md`
   from the repo → asks questions in chat → writes `sdlc.config.yaml` → runs
-  `npx agentic-sdlc init --config sdlc.config.yaml` (non-interactive, idempotent).
+  `npx agentic-sdlc-kit init --config sdlc.config.yaml` (non-interactive, idempotent).
   Natural, identical across harnesses, repeatable (config is committed).
 - B. Interactive terminal wizard. Simpler, but agents drive interactive TTYs badly;
   the "install by prompt" property is lost.
@@ -113,7 +113,7 @@ The reference project is **not touched** and does not migrate to this project.
 ## 5. Architecture
 
 ```
-agentic-sdlc (npm package, CLI binary `sdlc`)
+agentic-sdlc-kit (npm package, CLI binary `sdlc`)
 ├── installer      init / upgrade / doctor / uninstall — reads sdlc.config.yaml,
 │                  renders files, provisions GitHub (board, fields, labels, protection)
 ├── core           task model, task types, state machine, reconcile engine
@@ -137,20 +137,20 @@ Every agent interacts through the same CLI (`sdlc task …`, `sdlc stage …`,
 ## 6. Install flow
 
 1. User pastes the bootstrap prompt (published in README), e.g.
-   *"Install agentic-sdlc from https://github.com/<owner>/agentic-sdlc into this
+   *"Install agentic-sdlc-kit from https://github.com/<owner>/agentic-sdlc-kit into this
    repository. Follow its INSTALL.md."*
-2. Agent reads `INSTALL.md`, runs `npx agentic-sdlc@<version> doctor --preflight`
+2. Agent reads `INSTALL.md`, runs `npx agentic-sdlc-kit@<version> doctor --preflight`
    (git repo? `gh` authenticated with `repo`,`project` scopes? Node ≥ 20? default
    branch? existing instruction files? existing board?).
 3. Agent asks the questions below **one topic at a time** in chat, proposing
    defaults detected from the repo (e.g. detected deploy scripts, workflows with
    `environment:`).
 4. Agent writes `sdlc.config.yaml`, shows it, gets the owner's OK.
-5. Agent runs `npx agentic-sdlc init --config sdlc.config.yaml`. The installer is
+5. Agent runs `npx agentic-sdlc-kit init --config sdlc.config.yaml`. The installer is
    idempotent and prints a change summary; `--dry-run` shows the plan first (the
    agent runs dry-run before the real run).
 6. Installer commits nothing by itself; the agent opens an install PR
-   (`chore: install agentic-sdlc`) tracked as the first task (type `tooling`).
+   (`chore: install agentic-sdlc-kit`) tracked as the first task (type `tooling`).
 7. `sdlc doctor` verifies: hooks fire for each harness, board fields exist, labels
    exist, a test event round-trips.
 
@@ -472,7 +472,7 @@ template the owner fills).
   multi-target partial deployment, cancellation and reopen, offline outbox replay.
 - GitHub client tested against recorded fixtures; an opt-in e2e suite runs against
   a sandbox repo + Project (`SDLC_E2E_REPO`), never by default.
-- The repo dogfoods itself: agentic-sdlc is installed in its own repo.
+- The repo dogfoods itself: agentic-sdlc-kit is installed in its own repo.
 
 ## 16. Open-source packaging
 
