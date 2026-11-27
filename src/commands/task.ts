@@ -1,6 +1,9 @@
 import type { Command } from 'commander';
 import { newTask, TransitionError } from '../core/stateMachine.js';
-import type { TaskState, WaitingOn } from '../core/types.js';
+import { typeRegistry } from '../config/schema.js';
+import { validateOwnerComment } from '../core/approvals.js';
+import type { EndsOn, TaskState, WaitingOn } from '../core/types.js';
+import { findComment } from './approve.js';
 import {
   commit,
   describeState,
@@ -42,15 +45,47 @@ export async function taskNew(
   return { issue, url: created.url };
 }
 
+/** Ends that need an owner, or a deployment, beyond the merge. */
+const OWNER_ENDS: readonly EndsOn[] = ['owner_acceptance', 'owner_confirmation', 'merge_or_acceptance'];
+
+/** Whether moving from `from` to `to` lets the task end with less: no deployment, or a merge alone. */
+const weakensEnd = (from: EndsOn, to: EndsOn): boolean =>
+  (from === 'deploy' && to !== 'deploy') || (OWNER_ENDS.includes(from) && to === 'merge');
+
 /**
  * Moves the task to another enabled type: swaps the `type:` label and updates the state, resetting
- * the phase to the new type's first when the new type has no such phase. Not for done tasks.
+ * the phase to the new type's first when the new type has no such phase. Not for done tasks, nor
+ * for one awaiting deployment. A change that weakens how the task ends (dropping the deployment,
+ * or the owner's acceptance or confirmation, for a merge) needs an owner's `/approve` comment newer
+ * than the task's last change in enforce mode; observe mode allows it with a warning.
  */
-export async function taskSetType(ctx: CommandContext, issue: number, typeId: string): Promise<TaskState> {
+export async function taskSetType(
+  ctx: CommandContext,
+  issue: number,
+  typeId: string,
+  input: { commentUrl?: string } = {},
+): Promise<TaskState> {
   const type = resolveType(ctx.cfg, typeId);
   const task = await fetchTask(ctx, issue);
   const { state } = task;
   if (state.status === 'done') throw new TransitionError(`cannot change the type of #${issue}: the task is done`);
+  if (state.status === 'awaiting_deployment') {
+    throw new TransitionError(`cannot change the type of #${issue} while it is awaiting deployment`);
+  }
+
+  const from = typeRegistry(ctx.cfg).get(state.type);
+  if (from && weakensEnd(from.endsOn, type.endsOn)) {
+    const change =
+      `changing #${issue} from "${from.id}" (ends on ${from.endsOn}) to "${type.id}" (ends on ${type.endsOn}) ` +
+      'weakens how it ends';
+    if (input.commentUrl !== undefined) {
+      await requireOwnerApproval(ctx, issue, state, input.commentUrl);
+    } else if (ctx.cfg.mode === 'enforce') {
+      throw new Error(`${change}; pass --comment-url with an owner's /approve comment`);
+    } else {
+      ctx.err?.(`warning: ${change}; recorded without owner approval (unverified, observe mode)`);
+    }
+  }
 
   // The label goes first: if the state write then fails, running the same command again converges.
   const remove = state.type === type.id ? [] : [`type:${state.type}`];
@@ -59,6 +94,27 @@ export async function taskSetType(ctx: CommandContext, issue: number, typeId: st
   const phase = type.phases.includes(state.phase) ? state.phase : type.phases[0];
   const next: TaskState = { ...state, type: type.id, phase, updatedAt: ctx.now() };
   return persist(ctx, { task, type }, next);
+}
+
+/** Checks `url` is an owner's `/approve` on the task (or its PRs), newer than the task's last change. */
+async function requireOwnerApproval(ctx: CommandContext, issue: number, state: TaskState, url: string): Promise<void> {
+  const comment = await findComment(ctx, issue, url, () =>
+    trackerStep('listTaskPrs', issue, () => ctx.tracker.listTaskPrs(issue)),
+  );
+  const { approval } = await validateOwnerComment({
+    comment,
+    action: 'approve',
+    cfg: ctx.cfg,
+    login: () => trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin()),
+  });
+  const at = Date.parse(approval.at);
+  const last = Date.parse(state.updatedAt);
+  if (Number.isNaN(at) || Number.isNaN(last) || at <= last) {
+    throw new Error(`comment ${url} at ${approval.at} is not newer than the task's last change at ${state.updatedAt}`);
+  }
+  if (approval.source === 'unverified') {
+    ctx.err?.(`warning: comment ${url} is recorded as unverified (observe mode)`);
+  }
 }
 
 export function taskCheckpoint(
@@ -113,9 +169,15 @@ export function registerTaskCommand(program: Command, makeContext: ContextFactor
     .description('Change the task type of a task that is not done')
     .argument('<issue>', 'issue number')
     .argument('<type>', 'task type id')
+    .option('--comment-url <url>', "an owner's /approve comment; needed in enforce mode when the change weakens how the task ends")
     .option('--json', 'print machine-readable JSON')
-    .action(async (issue: string, type: string, options: { json?: boolean }) => {
-      await runCommand(makeContext, options, ctx => taskSetType(ctx, parseIssueNumber(issue), type), describeState);
+    .action(async (issue: string, type: string, options: { commentUrl?: string; json?: boolean }) => {
+      await runCommand(
+        makeContext,
+        options,
+        ctx => taskSetType(ctx, parseIssueNumber(issue), type, { commentUrl: options.commentUrl }),
+        describeState,
+      );
     });
 
   task

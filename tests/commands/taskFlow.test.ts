@@ -23,7 +23,8 @@ import {
 } from '../../src/commands/task.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
 import { STATE_MARKER } from '../../src/core/stateComment.js';
-import { applyEvent } from '../../src/core/stateMachine.js';
+import { applyEvent, newTask as newTaskState } from '../../src/core/stateMachine.js';
+import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
 import type { TaskState } from '../../src/core/types.js';
 import { FakeTracker } from '../support/fakeTracker.js';
 
@@ -419,6 +420,82 @@ describe('taskSetType', () => {
     await approve(h.ctx, issue, { action: 'cancel', reason: 'r', unverified: true });
     await expect(taskSetType(h.ctx, issue, 'tooling')).rejects.toThrow(/the task is done/);
     expect(issueOf(h.tracker, issue).labels).toEqual(['sdlc:task', 'type:feature']);
+  });
+
+  it('refuses a task awaiting deployment', async () => {
+    const h = setup();
+    h.tracker.seedTask({
+      ...newTaskState({ issue: 5, type: BUILTIN_TYPES.find(t => t.id === 'feature')!, summary: 's', now: BEFORE }),
+      phase: 'delivery',
+      status: 'awaiting_deployment',
+      waitingOn: 'external',
+      targets: ['web'],
+      pendingTargets: ['web'],
+    });
+    await expect(taskSetType(h.ctx, 5, 'tooling')).rejects.toThrow(
+      'cannot change the type of #5 while it is awaiting deployment',
+    );
+    expect((await stateOf(h.tracker, 5)).type).toBe('feature');
+  });
+
+  describe('a change that weakens how the task ends', () => {
+    it('needs an owner /approve comment in enforce mode', async () => {
+      const h = setup(enforceCfg);
+      const issue = await newTask(h, 'feature');
+      await expect(taskSetType(h.ctx, issue, 'tooling')).rejects.toThrow(
+        'changing #1 from "feature" (ends on deploy) to "tooling" (ends on merge) weakens how it ends; ' +
+          'pass --comment-url with an owner\'s /approve comment',
+      );
+      expect(issueOf(h.tracker, issue).labels).toEqual(['sdlc:task', 'type:feature']);
+      expect((await stateOf(h.tracker, issue)).type).toBe('feature');
+
+      const url = ownerComment(h.tracker, issue, AFTER);
+      expect((await taskSetType(h.ctx, issue, 'tooling', { commentUrl: url })).type).toBe('tooling');
+    });
+
+    it('treats acceptance or confirmation to merge as weakening too', async () => {
+      const h = setup(enforceCfg);
+      for (const from of ['analysis', 'production-data', 'spike']) {
+        const issue = await newTask(h, from);
+        await expect(taskSetType(h.ctx, issue, 'tooling')).rejects.toThrow(/weakens how it ends/);
+      }
+    });
+
+    it('refuses an agent, non-owner, edited, wrong or stale comment in enforce mode', async () => {
+      const agentsCfg: Config = { ...enforceCfg, agents: ['agent-bot'] };
+      const h = setup(agentsCfg);
+      const issue = await newTask(h, 'feature');
+      const cases: Array<[string, RegExp]> = [
+        [ownerComment(h.tracker, issue, AFTER, { author: 'agent-bot' }), /an agent login/],
+        [ownerComment(h.tracker, issue, AFTER, { author: 'drive-by' }), /not a configured owner/],
+        [ownerComment(h.tracker, issue, AFTER, { updatedAt: '2026-07-02T00:00:00.000Z' }), /was edited/],
+        [ownerComment(h.tracker, issue, AFTER, { body: '/accept' }), /is not a \/approve command/],
+        [ownerComment(h.tracker, issue, BEFORE), /is not newer than the task's last change at/],
+      ];
+      for (const [url, message] of cases) {
+        await expect(taskSetType(h.ctx, issue, 'tooling', { commentUrl: url })).rejects.toThrow(message);
+      }
+      expect((await stateOf(h.tracker, issue)).type).toBe('feature');
+    });
+
+    it('is allowed in observe mode, with a warning that it is unverified', async () => {
+      const h = setup();
+      const issue = await newTask(h, 'feature');
+      expect((await taskSetType(h.ctx, issue, 'tooling')).type).toBe('tooling');
+      expect(h.err).toEqual([
+        'warning: changing #1 from "feature" (ends on deploy) to "tooling" (ends on merge) weakens how it ends; ' +
+          'recorded without owner approval (unverified, observe mode)',
+      ]);
+    });
+
+    it('needs nothing for a change that does not weaken the end', async () => {
+      const h = setup(enforceCfg);
+      const issue = await newTask(h, 'tooling');
+      expect((await taskSetType(h.ctx, issue, 'feature')).type).toBe('feature');
+      const other = await newTask(h, 'feature');
+      expect((await taskSetType(h.ctx, other, 'bugfix')).type).toBe('bugfix');
+      expect(h.err).toEqual([]);
+    });
   });
 
   it('can move a task off a type that is no longer enabled', async () => {
@@ -1123,10 +1200,20 @@ describe('commander wiring', () => {
     await run(root, 'evidence', 'add', '1', '--kind', 'backup', '--ref', 'snap-1');
     linkPr(h.tracker, 1, 50, 'Related to #1');
     await run(root, 'review', 'handoff', '1', '--pr', '50', '--targets', 'Web');
-    await run(root, 'task', 'set-type', '1', 'tooling');
+    await run(root, 'task', 'set-type', '1', 'artifact');
 
     expect(h.err).toEqual([]);
-    expect(await stateOf(h.tracker, 1)).toMatchObject({ type: 'tooling', status: 'in_review', targets: ['web'] });
+    expect(await stateOf(h.tracker, 1)).toMatchObject({ type: 'artifact', status: 'in_review', targets: ['web'] });
+  });
+
+  it('passes --comment-url to set-type', async () => {
+    const h = setup(enforceCfg);
+    const root = program(h);
+    await run(root, 'task', 'new', '--title', 'T', '--summary', 'S', '--type', 'feature');
+    const url = ownerComment(h.tracker, 1, AFTER);
+    await run(root, 'task', 'set-type', '1', 'tooling', '--comment-url', url);
+    expect(h.err).toEqual([]);
+    expect((await stateOf(h.tracker, 1)).type).toBe('tooling');
   });
 
   it('prints JSON with --json', async () => {
