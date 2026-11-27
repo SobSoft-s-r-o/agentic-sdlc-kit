@@ -40,6 +40,8 @@ const hex = (length: number): string => cycle('0a1b2c3d', length);
 const letters = (length: number): string => cycle('AbCd', length);
 const lower32 = (length: number): string => cycle('ab23cd45', length);
 const url64 = (length: number): string => cycle('Ab1_-', length);
+/** The first segment of a Discord bot token: the base64 of the user id, a decimal string (here 18 digits). */
+const discordUserId = (): string => Buffer.from('1'.repeat(9) + '2'.repeat(9)).toString('base64');
 const std64 = (length: number): string => cycle('Ab1+/', length);
 const bech32 = (length: number): string => cycle('QPZRY9X8', length);
 
@@ -168,8 +170,8 @@ export const SAMPLES: Sample[] = [
   make('telegram-bot-token', '123456789' + ':AA' + url64(33), '123456789' + ':AA' + url64(32), value => `BOT=${value}`),
   make(
     'discord-bot-token',
-    'M' + 'T' + word(22) + '.' + word(6) + '.' + url64(27),
-    'M' + 'T' + word(22) + '.' + word(6) + '.' + url64(26),
+    discordUserId() + '.' + word(6) + '.' + url64(27),
+    discordUserId() + '.' + word(6) + '.' + url64(26),
     value => `DISCORD=${value}`,
   ),
   make(

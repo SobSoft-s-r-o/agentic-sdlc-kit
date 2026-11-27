@@ -173,6 +173,20 @@ describe('the content rules', () => {
       expect(found('short')).toEqual([]);
     });
 
+    it('ignores a value that is a whole environment variable reference, in a JSON config as the kit renders it', () => {
+      expect(one('        "GITHUB_PERSONAL_ACCESS_TOKEN": "$GITHUB_PERSONAL_ACCESS_TOKEN"')).toEqual([]);
+      expect(one('"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"')).toEqual([]);
+      for (const value of ['$DATABASE_PASSWORD_VALUE', '${DATABASE_PASSWORD}', '%DATABASE_PASSWORD%', '%DatabasePassword%']) {
+        expect(found(value), value).toEqual([]);
+      }
+    });
+
+    it('flags a real value that starts with a dollar sign or a percent escape', () => {
+      for (const value of ['$Up3rS3cretXk9abc', '$5ecretValue1234', '%21Xk9mQ2pL7vRtZ', '%2FXk9mQ2pL7vRtZ']) {
+        expect(found(value), value).toEqual(['generic-assignment']);
+      }
+    });
+
     it('does not flag an unquoted value or a plain mention', () => {
       expect(one(`${key}: Zq7Zq7Zq7Zq7Zq7`)).toEqual([]);
       expect(one('the token is stored in the keystore')).toEqual([]);
@@ -379,11 +393,55 @@ describe('the broadened rule set', () => {
     });
   });
 
+  describe('discord-bot-token', () => {
+    const sample = sampleFor('discord-bot-token');
+    const token = sample.secret;
+
+    it('finds a token as an environment value, quoted, after a header word and before a full stop', () => {
+      for (const line of [`DISCORD=${token}`, `"token": "${token}"`, `Authorization: Bot ${token}`, `the token is ${token}.`, `(${token})`, token]) {
+        expect(rules(line), line.replace(token, '<token>')).toEqual(['discord-bot-token']);
+      }
+    });
+
+    it('does not read a dotted identifier as a token, with or without a context', () => {
+      const identifier = ['NTLMAuthenticationProvide', 'method', 'thisIsAVeryLongMethodNameForTesting'].join('.');
+      for (const line of [
+        identifier,
+        `${identifier}()`,
+        `com.example.${identifier}()`,
+        `${identifier}.andThenSomeMore`,
+        `${identifier}AndMoreWordsOnTheEnd`,
+        `x = ${identifier};`,
+      ]) {
+        expect(rules(line), line).toEqual([]);
+      }
+    });
+
+    it('needs a first segment that is the base64 of a decimal user id, as Discord makes it', () => {
+      const [, timestamp, hmac] = token.split('.');
+      const idOfLetters = 'M' + 'T' + word(22);
+      expect(rules(`${idOfLetters}.${timestamp}.${hmac}`)).toEqual([]);
+      // 17 to 19 digit ids are 23 to 26 characters of base64.
+      for (const id of ['12345678901234567', '123456789012345678', '1234567890123456789']) {
+        const first = Buffer.from(id).toString('base64').replace(/=+$/, '');
+        expect(rules(`${first}.${timestamp}.${hmac}`), `${id.length} digits`).toEqual(['discord-bot-token']);
+      }
+    });
+
+    it('does not read a token that is glued to a longer word or a dotted chain', () => {
+      // (A third segment of up to 38 characters is a token: a few characters after a short one are part of it.)
+      const longTail = 's'.repeat(12);
+      for (const line of [`prefix${token}`, `foo.${token}`, `${token}.suffix`, `${token}${longTail}`, `${token}-${longTail}`]) {
+        expect(rules(line), line.replace(token, '<token>')).toEqual([]);
+      }
+    });
+  });
+
   describe('url-credentials', () => {
     const url = (password: string, user = 'app', scheme = 'postgres'): string => `${scheme}://${user}:${password}@db.internal:5432/app`;
 
     it('flags a password, percent-encoded characters and symbols included', () => {
-      for (const password of [word(12), 'p%40ss%3Aw0rd', 'Zq7!Zq7#Zq7', 'a-b_c.d~e', 'hunter2hunter2']) {
+      for (const password of [word(12), 'p%40ss%3Aw0rd', 'Zq7!Zq7*Zq7', 'a-b_c.d~e', 'hunter2hunter2']) {
         expect(rules(url(password))).toEqual(['url-credentials']);
       }
     });
@@ -448,6 +506,33 @@ describe('the broadened rule set', () => {
         expect(one(url(password, user))).toEqual([]);
       }
       expect(one('redis://:password@cache:6379')).toEqual([]);
+    });
+
+    it('flags a real password that starts with a percent escape or a dollar sign', () => {
+      // The short form of the owner's probes, assembled so that no URL with a password is in this file.
+      expect(rules(['postgres://app', '%21Xk9mQ2pL7vRt@db'].join(':'))).toEqual(['url-credentials']);
+      expect(rules(['postgres://app', '$Up3rS3cretXk9@db'].join(':'))).toEqual(['url-credentials']);
+      for (const password of ['%21Xk9mQ2pL7vRt', '%2FXk9mQ2pL7vRt', '%40admin', '%7Ejk3', '$Up3rS3cretXk9', '$5ecret', '$ab12']) {
+        expect(rules(url(password)), password).toEqual(['url-credentials']);
+      }
+    });
+
+    it('ignores a Windows %VAR%, a printf placeholder and an environment variable reference', () => {
+      for (const password of ['%DB_PASSWORD%', '%DbPassword%', '%_SECRET%', '%s', '%d', '%(db_password)s', '$DB_PASSWORD', '$_X1', '${db_password}', '${DB_PASSWORD:-x}']) {
+        expect(one(url(password)), password).toEqual([]);
+      }
+    });
+
+    it('does not read a query string or a fragment as a password', () => {
+      for (const line of [
+        'http://example.com:8080?next=@foo',
+        'https://example.com:8080#section@here',
+        'http://example.com:8080/?next=@foo',
+        'https://example.org:443?redirect=@me',
+        'http://host:80?a=b@c.d',
+      ]) {
+        expect(one(line), line).toEqual([]);
+      }
     });
 
     it('flags a literal password for a docker-compose style user', () => {

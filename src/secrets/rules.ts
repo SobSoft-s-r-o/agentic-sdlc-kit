@@ -89,8 +89,14 @@ const PLACEHOLDER_PASSWORDS = new Set([
   'somepassword',
 ]);
 
-/** A whole value that names a variable or a template slot: `$DB_PASSWORD`, `{password}`, `[password]`, `%(password)s`. */
-const REFERENCE_VALUE = /^(?:\$\w+|\$\{[^}]*\}|\[[^\]]*\]|\{[^}]*\}|%\(\w+\)s|%\w+%?)$/;
+/**
+ * A whole value that names a variable or a template slot: `$DB_PASSWORD`, `${DB_PASSWORD}`, the Windows
+ * `%DB_PASSWORD%`, the format placeholders `%s`, `%d` and `%(password)s`, and `{password}`, `[password]`.
+ * It is deliberately narrow: the dollar form is a variable name in its usual shape (upper case, so
+ * `$Up3rS3cretXk9` is a password) and the percent form needs a letter after the percent sign and a closing
+ * one (so `%21Xk9mQ2pL7vRt` and `%2F…`, a password that starts with a percent escape, is a password).
+ */
+const REFERENCE_VALUE = /^(?:\$[A-Z_][A-Z0-9_]*|\$\{[^}]*\}|\[[^\]]*\]|\{[^}]*\}|%\(\w+\)s|%[sd]|%[A-Za-z_]\w*%)$/;
 
 /** The literal password of a URL that carries its token in the user part (`https://<token>:x-oauth-basic@github.com`). */
 const TOKEN_MARKER_PASSWORDS = new Set(['x-oauth-basic', 'x-access-token', 'x-token-auth']);
@@ -511,8 +517,12 @@ export const SECRET_RULES: readonly SecretRule[] = [
   {
     id: 'discord-bot-token',
     description: 'Discord bot token',
-    // TruffleHog discordbottoken: base64 of the bot's user id (starts M, N or O), a timestamp and an HMAC.
-    pattern: /\b[MNO][DTjz][A-Za-z0-9_-]{21,24}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,38}/,
+    // TruffleHog discordbottoken: base64 of the bot's user id, a timestamp and an HMAC. The first segment is the
+    // base64 of a decimal id, so it is groups of four characters from a small alphabet ([MNO] for the first digit,
+    // [DTjz] for the next, ...): a dotted identifier (`NTLMAuthenticationProvide.method.longMethodName`) is not
+    // one. The token is not inside a longer word or a dotted chain, before or after.
+    pattern:
+      /(?<![A-Za-z0-9_-])(?<![A-Za-z0-9_-]\.)(?:[MNO][DTjz][AEIMQUYcgk][wxyz0-5]){4,6}(?:[MNO][DTjz][AEIMQUYcgk]|[MNO][AQgw])?\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,38}(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])/,
   },
   {
     id: 'discord-webhook',
@@ -617,7 +627,9 @@ export const SECRET_RULES: readonly SecretRule[] = [
     description: 'user and password in a URL (scheme://user:password@host)',
     // RFC 3986 userinfo. The scheme starts after a character that cannot be in a scheme (no quadratic scan of a
     // long word). Templates, documentation words (user:password@) and a password equal to the user are ignored.
-    pattern: /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}:\/\/([^/\s:@"'<>]{0,128}):([^/\s:@"'<>]{3,1024})@/i,
+    // `?` and `#` end the authority (RFC 3986 asks for them to be percent-encoded in a password), so a query
+    // string or a fragment with an @ in it (`http://example.com:8080?next=@foo`) is not a password.
+    pattern: /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}:\/\/([^/\s:@"'<>?#]{0,128}):([^/\s:@"'<>?#]{3,1024})@/i,
     ignore: isPlaceholderCredential,
   },
   {
@@ -633,7 +645,8 @@ export const SECRET_RULES: readonly SecretRule[] = [
     // Group 2 is the value; `ignore` drops placeholders.
     // The optional quote after the key name makes it match JSON, YAML and dict keys ("api_key": "...").
     pattern: /(password|passwd|secret|token|api[_-]?key)["']?\s*[:=]\s*["']([^"'\s]{12,})["']/i,
-    ignore: match => isPlaceholderValue(match[2] ?? ''),
+    // A whole `$NAME`, `${NAME}` or `%NAME%` is a reference to a secret (the kit's own MCP config has one).
+    ignore: match => isReference(match[2] ?? ''),
   },
 ];
 
