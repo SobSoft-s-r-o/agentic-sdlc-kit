@@ -55,7 +55,20 @@ export interface GitHookContext {
   out(text: string): void;
   /** Prints one line to stderr. */
   err(text: string): void;
+  /** How long the hooks wait for the tracker; the defaults are `PRE_PUSH_LOOKUP_TIMEOUT_MS` and `POST_CHECKOUT_LOOKUP_TIMEOUT_MS`. */
+  timeouts?: { prePushMs?: number; postCheckoutMs?: number };
+  /**
+   * Ends the process with `code`. Called, after everything is printed, only when a tracker call was
+   * abandoned on its deadline: that call is still running and would keep the process, and so git,
+   * waiting. Without it the process ends by itself.
+   */
+  exit?(code: number): void;
 }
+
+/** Longest pre-push waits, in all, for the tracker; past it the push is allowed with a warning. */
+export const PRE_PUSH_LOOKUP_TIMEOUT_MS = 10_000;
+/** Longest post-checkout waits for the tracker; past it the line is left out. */
+export const POST_CHECKOUT_LOOKUP_TIMEOUT_MS = 5_000;
 
 const reasonOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const firstLine = (text: string): string => text.split('\n')[0]?.trim() ?? '';
@@ -131,12 +144,13 @@ export async function decidePrePush(
     }
     const issue = taskIssueOf(branch);
     if (issue === undefined) continue;
-    let known = asked.get(issue);
-    if (known === undefined) {
-      known = lookup(issue);
-      asked.set(issue, known);
-    }
     try {
+      // Inside the try, and started from a promise, so a lookup that throws at once is a failed lookup too.
+      let known = asked.get(issue);
+      if (known === undefined) {
+        known = Promise.resolve().then(() => lookup(issue));
+        asked.set(issue, known);
+      }
       if (!(await known)) {
         messages.push(
           rule(cfg, `branch ${branch} has no tracked task #${issue}; run sdlc task new or sdlc task new --issue ${issue}`),
@@ -203,10 +217,66 @@ function report(ctx: GitHookContext, decision: HookDecision): number {
 /** Each step returns an exit code; every step runs, and the hook exits with the highest one. */
 type Step = () => Promise<number> | number;
 
-async function runSteps(steps: readonly Step[]): Promise<number> {
+/**
+ * Runs every step and gives the highest exit code. It never throws: a step that fails warns and
+ * counts as 0, so it can neither stop the steps after it nor erase a block an earlier step decided.
+ */
+export async function runSteps(ctx: GitHookContext, hook: HookName, steps: readonly Step[]): Promise<number> {
   let code = 0;
-  for (const step of steps) code = Math.max(code, await step());
+  for (const step of steps) {
+    try {
+      code = Math.max(code, await step());
+    } catch (error) {
+      ctx.err(warning(`git hook ${hook} failed (${firstLine(reasonOf(error))}); skipped`));
+    }
+  }
   return code;
+}
+
+/**
+ * A deadline shared by all the tracker calls of one hook, started by the first of them. A call
+ * that is still running when it passes is abandoned: `run` rejects and `abandoned` turns true.
+ * Calls made after the deadline are refused without being started. `stop` must be called when the
+ * hook is done.
+ */
+interface Deadline {
+  /** A tracker call was still running at the deadline; it keeps running in the background. */
+  readonly abandoned: boolean;
+  run<T>(work: () => Promise<T>): Promise<T>;
+  stop(): void;
+}
+
+function deadlineOf(totalMs: number): Deadline {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let expiry: Promise<never> | undefined;
+  let passed = false;
+  let abandoned = false;
+  let pending = 0;
+  const timedOut = (): Error => new Error(`timed out after ${totalMs / 1000}s`);
+  return {
+    get abandoned() {
+      return abandoned;
+    },
+    run: work => {
+      if (passed) return Promise.reject(timedOut());
+      expiry ??= new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          passed = true;
+          abandoned = pending > 0;
+          reject(timedOut());
+        }, totalMs);
+      });
+      // Started from a promise, so work that throws at once is a rejected call like any other.
+      const call = Promise.resolve().then(work);
+      pending += 1;
+      const settled = (): void => {
+        pending -= 1;
+      };
+      call.then(settled, settled);
+      return Promise.race([call, expiry]);
+    },
+    stop: () => clearTimeout(timer),
+  };
 }
 
 /**
@@ -233,7 +303,7 @@ function configReader(ctx: GitHookContext, hook: HookName, quiet = false): () =>
 type ConfigReader = () => Config | undefined;
 
 async function preCommit(ctx: GitHookContext, config: ConfigReader): Promise<number> {
-  return runSteps([
+  return runSteps(ctx, 'pre-commit', [
     // The secret guard is a step that goes first: it blocks in both modes and also when the config
     // could not be read (it must never fail open over config), so it handles its own errors.
     async () => {
@@ -245,16 +315,17 @@ async function preCommit(ctx: GitHookContext, config: ConfigReader): Promise<num
   ]);
 }
 
-async function prePush(ctx: GitHookContext, config: ConfigReader): Promise<number> {
+async function prePush(ctx: GitHookContext, config: ConfigReader, deadline: Deadline): Promise<number> {
   const lines = (await ctx.readStdin()).split('\n');
-  return runSteps([
+  return runSteps(ctx, 'pre-push', [
     // The secret guard step goes first here too; see `preCommit`.
     async () => {
       if (!parsePushUpdates(lines).some(update => !update.deleting)) return 0;
       const cfg = config();
       if (cfg === undefined) return 0;
       let tracker: Tracker | undefined;
-      const lookup: TaskLookup = issue => lookupTrackedTask((tracker ??= ctx.makeTracker(cfg)))(issue);
+      const lookup: TaskLookup = issue =>
+        deadline.run(() => lookupTrackedTask((tracker ??= ctx.makeTracker(cfg)))(issue));
       return report(ctx, await decidePrePush(lines, cfg, lookup));
     },
   ]);
@@ -277,13 +348,18 @@ async function postMerge(ctx: GitHookContext, config: ConfigReader): Promise<num
 }
 
 /** One status line when a task branch is checked out; says nothing when it cannot (it must never get in the way). */
-async function postCheckout(ctx: GitHookContext, config: ConfigReader, args: readonly string[]): Promise<number> {
+async function postCheckout(
+  ctx: GitHookContext,
+  config: ConfigReader,
+  deadline: Deadline,
+  args: readonly string[],
+): Promise<number> {
   // The third argument is 1 for a branch checkout and 0 for a file checkout.
   if (args[2] !== '1') return 0;
   const issue = taskIssueOf(await currentBranch(ctx.git));
   const cfg = issue === undefined ? undefined : config();
   if (issue === undefined || cfg === undefined) return 0;
-  const task = await ctx.makeTracker(cfg).getTask(issue);
+  const task = await deadline.run(() => ctx.makeTracker(cfg).getTask(issue));
   ctx.out(describeCheckout(task.state));
   return 0;
 }
@@ -302,21 +378,36 @@ export async function runGitHook(name: string, args: readonly string[], ctx: Git
   }
   const quiet = name === 'post-checkout';
   const config = configReader(ctx, name, quiet);
+  const deadline = deadlineOf(
+    quiet
+      ? (ctx.timeouts?.postCheckoutMs ?? POST_CHECKOUT_LOOKUP_TIMEOUT_MS)
+      : (ctx.timeouts?.prePushMs ?? PRE_PUSH_LOOKUP_TIMEOUT_MS),
+  );
+  let code = 0;
   try {
     switch (name) {
       case 'pre-commit':
-        return await preCommit(ctx, config);
+        code = await preCommit(ctx, config);
+        break;
       case 'pre-push':
-        return await prePush(ctx, config);
+        code = await prePush(ctx, config, deadline);
+        break;
       case 'post-merge':
-        return await postMerge(ctx, config);
+        code = await postMerge(ctx, config);
+        break;
       case 'post-checkout':
-        return await postCheckout(ctx, config, args);
+        code = await postCheckout(ctx, config, deadline, args);
+        break;
     }
   } catch (error) {
+    // Only what happens outside the steps of pre-commit and pre-push gets here, before anything is decided.
     if (!quiet) ctx.err(warning(`git hook ${name} failed (${firstLine(reasonOf(error))}); skipped`));
-    return 0;
+    code = 0;
+  } finally {
+    deadline.stop();
   }
+  if (deadline.abandoned) ctx.exit?.(code);
+  return code;
 }
 
 // -- real I/O ------------------------------------------------------------------------------------------
@@ -358,6 +449,23 @@ export async function readAllStdin(stdin: NodeJS.ReadStream = process.stdin): Pr
   const chunks: Buffer[] = [];
   for await (const chunk of stdin) chunks.push(Buffer.from(chunk as Uint8Array));
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * Ends the process with `code` once what was written to `streams` has been flushed (a pipe may still
+ * hold the last lines). For a hook that abandoned a hanging `gh` call, which would keep it alive.
+ */
+export function exitAfterFlush(
+  code: number,
+  exit: (code: number) => void = process.exit,
+  streams: ReadonlyArray<Pick<NodeJS.WriteStream, 'write'>> = [process.stdout, process.stderr],
+): void {
+  const flush = (index: number): void => {
+    const stream = streams[index];
+    if (stream === undefined) exit(code);
+    else stream.write('', () => flush(index + 1));
+  };
+  flush(0);
 }
 
 /**

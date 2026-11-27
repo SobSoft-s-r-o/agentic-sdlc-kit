@@ -5,7 +5,8 @@ if command -v sdlc >/dev/null 2>&1; then
   exec sdlc githook pre-commit "$@"
 fi
 # --no-install: a hook must never download a package, and npx would ask before doing so.
-if command -v npx >/dev/null 2>&1 && npx --no-install sdlc --version >/dev/null 2>&1; then
+# </dev/null: the probe must not read the stdin that git feeds pre-push.
+if command -v npx >/dev/null 2>&1 && npx --no-install sdlc --version >/dev/null 2>&1 </dev/null; then
   exec npx --no-install sdlc githook pre-commit "$@"
 fi
 echo "sdlc not found; agentic-sdlc-kit git hook pre-commit skipped (install: see INSTALL.md); the secret guard is NOT active" >&2

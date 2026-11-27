@@ -8,11 +8,15 @@ import {
   decidePreCommit,
   decidePrePush,
   describeCheckout,
+  exitAfterFlush,
   HOOK_NAMES,
   lookupTrackedTask,
+  POST_CHECKOUT_LOOKUP_TIMEOUT_MS,
+  PRE_PUSH_LOOKUP_TIMEOUT_MS,
   registerGitHookCommand,
   RECONCILE_LOG,
   runGitHook,
+  runSteps,
   spawnDetachedLogged,
   type GitHookContext,
   type TaskLookup,
@@ -196,6 +200,23 @@ describe('decidePrePush', () => {
     expect(asked).toEqual([7, 8]);
   });
 
+  it('a lookup that throws at once is a failed lookup, and keeps the block of an earlier ref', async () => {
+    const lines = [pushLine('refs/heads/main'), pushLine('refs/heads/task/3-x')];
+    const throwsAtOnce: TaskLookup = () => {
+      throw new Error('boom');
+    };
+
+    const result = await decidePrePush(lines, enforce, throwsAtOnce);
+
+    expect(result).toEqual({
+      exitCode: 1,
+      messages: [
+        { level: 'error', text: 'pushing directly to main; work on a task branch (task/<issue>-<slug>)' },
+        { level: 'warn', text: 'could not verify task #3 (boom); push allowed' },
+      ],
+    });
+  });
+
   it('a failed lookup does not hide a block from another ref', async () => {
     const lines = [pushLine('refs/heads/main'), pushLine('refs/heads/task/3-x')];
 
@@ -282,6 +303,7 @@ interface Harness {
   tracker: FakeTracker;
   spawned: string[];
   gitCalls: string[][];
+  exits: number[];
   configLoads: number;
   trackerBuilds: number;
 }
@@ -293,6 +315,7 @@ interface Options {
   stdin?: string;
   spawnFails?: Error;
   repoRoot?: string;
+  timeouts?: { prePushMs?: number; postCheckoutMs?: number };
 }
 
 function setup(options: Options = {}): Harness {
@@ -304,6 +327,7 @@ function setup(options: Options = {}): Harness {
     tracker,
     spawned: [],
     gitCalls: [],
+    exits: [],
     configLoads: 0,
     trackerBuilds: 0,
     ctx: undefined as unknown as GitHookContext,
@@ -333,6 +357,8 @@ function setup(options: Options = {}): Harness {
     },
     out: text => harness.out.push(text),
     err: text => harness.err.push(text),
+    exit: code => harness.exits.push(code),
+    ...(options.timeouts && { timeouts: options.timeouts }),
   };
   return harness;
 }
@@ -457,6 +483,196 @@ describe('runGitHook pre-push', () => {
 
     expect(await runGitHook('pre-push', [], h.ctx)).toBe(0);
     expect(h.err).toEqual(['sdlc: warning: could not load the config (boom); git hook pre-push skipped']);
+  });
+});
+
+describe('runSteps', () => {
+  const stepsHarness = () => setup();
+
+  it('gives the highest exit code of the steps', async () => {
+    const h = stepsHarness();
+
+    expect(await runSteps(h.ctx, 'pre-commit', [() => 0, async () => 1, () => 0])).toBe(1);
+    expect(await runSteps(h.ctx, 'pre-commit', [() => 0, () => 0])).toBe(0);
+    expect(await runSteps(h.ctx, 'pre-commit', [])).toBe(0);
+    expect(h.err).toEqual([]);
+  });
+
+  it('a step that throws warns and counts as 0, so it cannot erase an earlier block', async () => {
+    const h = stepsHarness();
+    const steps = [
+      async () => 1,
+      async () => {
+        throw new Error('git not found\nsecond line');
+      },
+    ];
+
+    expect(await runSteps(h.ctx, 'pre-commit', steps)).toBe(1);
+    expect(h.err).toEqual(['sdlc: warning: git hook pre-commit failed (git not found); skipped']);
+  });
+
+  it('a step that throws does not stop the steps after it, even one that throws synchronously', async () => {
+    const h = stepsHarness();
+    const ran: string[] = [];
+    const steps = [
+      () => {
+        throw new Error('first');
+      },
+      () => {
+        ran.push('second');
+        return 1;
+      },
+    ];
+
+    expect(await runSteps(h.ctx, 'pre-push', steps)).toBe(1);
+    expect(ran).toEqual(['second']);
+    expect(h.err).toEqual(['sdlc: warning: git hook pre-push failed (first); skipped']);
+  });
+});
+
+describe('runGitHook when the tracker cannot be used', () => {
+  it('a tracker that cannot even be built is a failed lookup: the block of another ref stays', async () => {
+    const h = setup({
+      cfg: enforce,
+      stdin: `${pushLine('refs/heads/main')}\n${pushLine('refs/heads/task/3-x')}\n`,
+    });
+    h.ctx.makeTracker = () => {
+      throw new Error('no gh');
+    };
+
+    expect(await runGitHook('pre-push', [], h.ctx)).toBe(1);
+    expect(h.err).toEqual([
+      'sdlc: error: pushing directly to main; work on a task branch (task/<issue>-<slug>)',
+      'sdlc: warning: could not verify task #3 (no gh); push allowed',
+    ]);
+  });
+
+  it('a tracker call that throws at once is a failed lookup', async () => {
+    const h = setup({ cfg: enforce, stdin: `${pushLine('refs/heads/main')}\n${pushLine('refs/heads/task/3-x')}\n` });
+    h.tracker.getTask = (() => {
+      throw new Error('sync boom');
+    }) as unknown as FakeTracker['getTask'];
+
+    expect(await runGitHook('pre-push', [], h.ctx)).toBe(1);
+    expect(h.err[1]).toBe('sdlc: warning: could not verify task #3 (sync boom); push allowed');
+  });
+});
+
+describe('the deadline on tracker calls', () => {
+  const hang = (h: Harness): void => {
+    h.tracker.getTask = (() => new Promise(() => undefined)) as FakeTracker['getTask'];
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('uses 10 seconds for pre-push and 5 for post-checkout', () => {
+    expect(PRE_PUSH_LOOKUP_TIMEOUT_MS).toBe(10_000);
+    expect(POST_CHECKOUT_LOOKUP_TIMEOUT_MS).toBe(5_000);
+  });
+
+  it('pre-push: a lookup that hangs is a failed lookup, the push is allowed and the process is told to exit', async () => {
+    const h = setup({ cfg: enforce, stdin: `${pushLine('refs/heads/task/12-x')}\n`, timeouts: { prePushMs: 20 } });
+    hang(h);
+
+    expect(await runGitHook('pre-push', [], h.ctx)).toBe(0);
+    expect(h.err).toEqual(['sdlc: warning: could not verify task #12 (timed out after 0.02s); push allowed']);
+    expect(h.exits).toEqual([0]);
+  });
+
+  it('pre-push: a block decided from the other refs survives a hanging lookup, and exit gets its code', async () => {
+    const h = setup({
+      cfg: enforce,
+      stdin: `${pushLine('refs/heads/main')}\n${pushLine('refs/heads/task/12-x')}\n`,
+      timeouts: { prePushMs: 20 },
+    });
+    hang(h);
+
+    expect(await runGitHook('pre-push', [], h.ctx)).toBe(1);
+    expect(h.exits).toEqual([1]);
+  });
+
+  it('pre-push: the deadline is shared, so the lookups after it are not even started', async () => {
+    const h = setup({
+      cfg: enforce,
+      stdin: `${pushLine('refs/heads/task/1-a')}\n${pushLine('refs/heads/task/2-b')}\n${pushLine('refs/heads/task/3-c')}\n`,
+      timeouts: { prePushMs: 20 },
+    });
+    const asked: number[] = [];
+    h.tracker.getTask = ((issue: number) => {
+      asked.push(issue);
+      return new Promise(() => undefined);
+    }) as FakeTracker['getTask'];
+
+    expect(await runGitHook('pre-push', [], h.ctx)).toBe(0);
+    expect(asked).toEqual([1]);
+    expect(h.err.map(line => line.replace(/ \(timed out.*/, ''))).toEqual([
+      'sdlc: warning: could not verify task #1',
+      'sdlc: warning: could not verify task #2',
+      'sdlc: warning: could not verify task #3',
+    ]);
+  });
+
+  it('pre-push: a lookup that answers in time does not ask the process to exit', async () => {
+    const h = setup({ cfg: enforce, stdin: `${pushLine('refs/heads/task/12-x')}\n`, timeouts: { prePushMs: 5_000 } });
+    h.tracker.seedTask(taskState(12));
+
+    expect(await runGitHook('pre-push', [], h.ctx)).toBe(0);
+    expect(h.exits).toEqual([]);
+  });
+
+  it('post-checkout: a call that hangs prints nothing, exits 0 and asks the process to exit', async () => {
+    const h = setup({ branch: 'task/12-x', timeouts: { postCheckoutMs: 20 } });
+    hang(h);
+
+    expect(await runGitHook('post-checkout', ['a', 'b', '1'], h.ctx)).toBe(0);
+    expect(h.out).toEqual([]);
+    expect(h.err).toEqual([]);
+    expect(h.exits).toEqual([0]);
+  });
+
+  it('the defaults are 10 s for pre-push and 5 s for post-checkout', async () => {
+    vi.useFakeTimers();
+    const push = setup({ cfg: enforce, stdin: `${pushLine('refs/heads/task/12-x')}\n` });
+    const checkout = setup({ branch: 'task/12-x' });
+    hang(push);
+    hang(checkout);
+    const settled: string[] = [];
+    void runGitHook('pre-push', [], push.ctx).then(() => settled.push('pre-push'));
+    void runGitHook('post-checkout', ['a', 'b', '1'], checkout.ctx).then(() => settled.push('post-checkout'));
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(settled).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toEqual(['post-checkout']);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(settled).toEqual(['post-checkout']);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toEqual(['post-checkout', 'pre-push']);
+    expect(push.err).toEqual(['sdlc: warning: could not verify task #12 (timed out after 10s); push allowed']);
+  });
+});
+
+describe('exitAfterFlush', () => {
+  it('exits with the code only after every stream has flushed, in order', async () => {
+    const events: string[] = [];
+    const stream = (name: string) => ({
+      write: (chunk: string, callback: () => void) => {
+        events.push(`write ${name}`);
+        setTimeout(() => {
+          events.push(`flushed ${name}`);
+          callback();
+        }, 5);
+        return true;
+      },
+    });
+
+    exitAfterFlush(3, code => events.push(`exit ${code}`), [stream('stdout'), stream('stderr')] as never);
+    expect(events).toEqual(['write stdout']);
+    await new Promise(resolve => setTimeout(resolve, 40));
+
+    expect(events).toEqual(['write stdout', 'flushed stdout', 'write stderr', 'flushed stderr', 'exit 3']);
   });
 });
 

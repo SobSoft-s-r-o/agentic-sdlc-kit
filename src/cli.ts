@@ -11,6 +11,7 @@ import type { CommandContext, ContextFactory } from './commands/context.js';
 import { registerDeployCommand } from './commands/deploy.js';
 import { registerEvidenceCommand } from './commands/evidence.js';
 import {
+  exitAfterFlush,
   readAllStdin,
   registerGitHookCommand,
   spawnDetachedLogged,
@@ -144,6 +145,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
         },
         out,
         err,
+        exit: code => exitAfterFlush(code),
       };
     });
 

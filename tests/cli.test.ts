@@ -2,8 +2,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { formatCliError, runCli } from '../src/cli.js';
 import type { CommandContext } from '../src/commands/context.js';
 import { loadConfig, typeRegistry } from '../src/config/schema.js';
@@ -176,12 +176,37 @@ describe('cli (built)', () => {
 });
 
 describe('sdlc githook (built)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /**
+   * The environment of every git (and sdlc) run in these tests, with `path` as the PATH: none of the
+   * developer's own git settings (a global `commit.gpgsign` or `core.hooksPath`, a `GIT_DIR` inherited
+   * from a hook this test run is itself inside of) can reach it.
+   */
+  function isolatedEnv(path: string): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {};
+    for (const [key, value] of Object.entries(process.env)) if (!key.startsWith('GIT_')) env[key] = value;
+    const home = join(dir, 'home');
+    mkdirSync(home, { recursive: true });
+    return {
+      ...env,
+      PATH: path,
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, '.config'),
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+    };
+  }
+
   /** A fresh repository on `main` with the valid test config in the given mode. */
   function repo(mode: 'observe' | 'enforce'): string {
     const root = join(dir, 'repo');
+    const env = isolatedEnv(process.env.PATH ?? '');
     mkdirSync(root);
-    execFileSync('git', ['init', '-q'], { cwd: root });
-    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: root });
+    execFileSync('git', ['init', '-q'], { cwd: root, env });
+    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: root, env });
     writeFileSync(join(root, 'sdlc.config.yaml'), readFileSync(validConfig, 'utf8').replace('mode: observe', `mode: ${mode}`));
     return root;
   }
@@ -193,7 +218,7 @@ describe('sdlc githook (built)', () => {
       mkdirSync(bin);
       symlinkSync(execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim(), join(bin, 'git'));
     }
-    return { ...process.env, PATH: bin };
+    return isolatedEnv(bin);
   }
 
   it('pre-commit on the default branch warns in observe mode and blocks in enforce mode', () => {
@@ -246,6 +271,12 @@ describe('sdlc githook (built)', () => {
   });
 
   it('the rendered scripts work under real git: a commit on main warns or blocks, one on a task branch passes', () => {
+    // The developer's own settings must not matter: a signing requirement, a foreign hooks path, an inherited GIT_DIR.
+    const hostile = join(dir, 'hostile-gitconfig');
+    writeFileSync(hostile, '[commit]\n\tgpgsign = true\n[core]\n\thooksPath = /nonexistent\n');
+    vi.stubEnv('GIT_CONFIG_GLOBAL', hostile);
+    vi.stubEnv('GIT_DIR', join(dir, 'not-a-repository'));
+    vi.stubEnv('GIT_INDEX_FILE', join(dir, 'not-an-index'));
     const root = repo('enforce');
     const hooks = join(root, '.sdlc', 'githooks');
     mkdirSync(hooks, { recursive: true });
@@ -253,7 +284,7 @@ describe('sdlc githook (built)', () => {
       if (change.kind !== 'file') throw new Error('hooks are files');
       writeFileSync(join(root, change.path), change.content, { mode: change.mode });
     }
-    execFileSync('git', ['config', 'core.hooksPath', '.sdlc/githooks'], { cwd: root });
+    execFileSync('git', ['config', 'core.hooksPath', '.sdlc/githooks'], { cwd: root, env: isolatedEnv(process.env.PATH ?? '') });
     const env = onlyGit();
     // The scripts find `sdlc` on the PATH, as they do for an installed package.
     writeFileSync(join(dir, 'only-git', 'sdlc'), `#!/bin/sh\nexec "${process.execPath}" "${cliPath}" "$@"\n`, { mode: 0o755 });
@@ -272,6 +303,52 @@ describe('sdlc githook (built)', () => {
     expect(onMain.stderr).toContain('sdlc: error: committing directly to main');
     expect(onTask.status).toBe(0);
     expect(onTask.stderr).toBe('');
+  });
+
+  it('a hook gives up a hanging tracker call at its deadline and really exits, though the call is still running', () => {
+    // The tracker call is a real child process that outlives the 100 ms deadline by seconds.
+    const script = `
+      import { execFile } from 'node:child_process';
+      const { runGitHook, exitAfterFlush } = await import(process.argv[1]);
+      const ctx = {
+        repoRoot: '/repo',
+        git: async () => ({ stdout: 'main\\n', stderr: '', code: 0 }),
+        loadConfig: () => ({ mode: 'enforce', github: { defaultBranch: 'main' } }),
+        makeTracker: () => ({
+          getTask: () => new Promise(() => {
+            const child = execFile(process.execPath, ['-e', 'setTimeout(() => {}, 4000)']);
+            process.stdout.write('child ' + child.pid + '\\n');
+          }),
+        }),
+        readStdin: async () => 'refs/heads/w ' + 'a'.repeat(40) + ' refs/heads/task/12-x ' + '0'.repeat(40) + '\\n',
+        spawnReconcile() {},
+        out: text => console.log(text),
+        err: text => console.error(text),
+        timeouts: { prePushMs: 100 },
+        exit: code => exitAfterFlush(code),
+      };
+      process.exitCode = await runGitHook('pre-push', [], ctx);
+    `;
+    const started = Date.now();
+
+    const result = spawnSync(
+      process.execPath,
+      ['--input-type=module', '-e', script, pathToFileURL(join(root, 'dist', 'commands', 'githook.js')).href],
+      { encoding: 'utf8', timeout: 20_000 },
+    );
+    const elapsed = Date.now() - started;
+    const pid = /child (\d+)/.exec(result.stdout)?.[1];
+    if (pid !== undefined) {
+      try {
+        process.kill(Number(pid));
+      } catch {
+        // Already gone.
+      }
+    }
+
+    expect(result.stderr).toContain('sdlc: warning: could not verify task #12 (timed out after 0.1s); push allowed');
+    expect(result.status).toBe(0);
+    expect(elapsed).toBeLessThan(3_000);
   });
 
   it('post-merge on the default branch starts a detached reconcile that logs to .sdlc/cache/reconcile.log', async () => {

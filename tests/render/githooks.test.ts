@@ -151,6 +151,21 @@ describe('the rendered scripts, run under /bin/sh', () => {
     expect(result.stderr).toContain('sdlc not found; agentic-sdlc-kit git hook pre-push skipped');
   });
 
+  it('the npx probe never reads stdin: pre-push hands all of it to the real command', () => {
+    const probe = join(dir, 'probe.txt');
+    const bin = fakeBin(
+      'npx',
+      `if [ "$3" = "--version" ]; then read -r seen; echo "probe saw:[$seen]" >> "${probe}"; exit 0; fi; ` +
+        'while read -r line; do echo "stdin:[$line]"; done',
+    );
+
+    const result = runHook('pre-push', ['origin'], [bin], 'first\nsecond\n');
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('stdin:[first]\nstdin:[second]\n');
+    expect(readFileSync(probe, 'utf8')).toBe('probe saw:[]\n');
+  });
+
   it('prefers sdlc on the PATH over npx', () => {
     const bin = fakeBin('sdlc', 'echo "sdlc ran"');
     fakeBin('npx', 'echo "npx ran"', bin);
