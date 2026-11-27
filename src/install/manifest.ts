@@ -5,11 +5,14 @@ import { packageVersion } from '../version.js';
 import type { RepoFs } from './repoFs.js';
 import {
   blockBody,
+  canonicalJson,
   jsonValueAt,
   parseJsonObject,
   tomlTableText,
   type BlockKind,
 } from './merge.js';
+
+export { canonicalJson };
 
 /** The install manifest: what the kit wrote, so upgrades and uninstalls know what is theirs. */
 export const MANIFEST_PATH = '.sdlc/manifest.json';
@@ -24,6 +27,12 @@ export interface ManifestEntry {
   key?: string;
   /** `sha256:<hex>`, see `entryDiskHash` for what is hashed. */
   hash: string;
+  /**
+   * `json-keys` only: the file did not exist when the kit first wrote these keys. Uninstall may then
+   * prune the objects it leaves empty and delete the file once it holds nothing else; a file the user
+   * created is never deleted, and their empty objects stay.
+   */
+  createdFile?: true;
 }
 
 export interface Manifest {
@@ -42,28 +51,6 @@ export function hashText(text: string): string {
   return `sha256:${createHash('sha256').update(text.replace(/\r\n/g, '\n')).digest('hex')}`;
 }
 
-/** `JSON.stringify` with the keys of every object sorted, so equal values give equal text. */
-export function canonicalJson(value: unknown): string {
-  return JSON.stringify(sortKeys(value)) ?? 'null';
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (typeof value === 'object' && value !== null) {
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort()) {
-      Object.defineProperty(sorted, key, {
-        value: sortKeys((value as Record<string, unknown>)[key]),
-        writable: true,
-        enumerable: true,
-        configurable: true,
-      });
-    }
-    return sorted;
-  }
-  return value;
-}
-
 const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 export const sortEntries = (entries: ManifestEntry[]): ManifestEntry[] =>
@@ -80,6 +67,7 @@ export function serializeManifest(manifest: Manifest): string {
     kind: e.kind,
     ...(e.key === undefined ? {} : { key: e.key }),
     hash: e.hash,
+    ...(e.createdFile === true ? { createdFile: true } : {}),
   }));
   return `${JSON.stringify({ version: 1, kit: manifest.kit, entries }, null, 2)}\n`;
 }
@@ -95,6 +83,7 @@ const ManifestSchema = z.object({
       kind: z.enum(ENTRY_KINDS),
       key: z.string().optional(),
       hash: z.string().regex(/^sha256:/),
+      createdFile: z.literal(true).optional(),
     }),
   ),
 });
@@ -123,6 +112,7 @@ export function parseManifest(text: string): Manifest {
       kind: e.kind,
       ...(e.key === undefined ? {} : { key: e.key }),
       hash: e.hash,
+      ...(e.createdFile === true ? { createdFile: true as const } : {}),
     })),
   };
 }

@@ -195,12 +195,64 @@ export function jsonValueAt(root: JsonObject, pointer: string[]): { found: boole
   return { found: true, value: node };
 }
 
-const serialize = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+/** `JSON.stringify` with the keys of every object sorted, so equal values give equal text. */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(sortKeys(value)) ?? 'null';
+}
+
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (isObject(value)) {
+    const sorted: JsonObject = {};
+    for (const key of Object.keys(value).sort()) setOwn(sorted, key, sortKeys(value[key]));
+    return sorted;
+  }
+  return value;
+}
+
+/** How the user's JSON file is laid out, so a rewrite does not reformat it. */
+interface JsonFormat {
+  indent: string;
+  finalNewline: boolean;
+  eol: string;
+}
+
+const DEFAULT_JSON_FORMAT: JsonFormat = { indent: '  ', finalNewline: true, eol: '\n' };
+
+/**
+ * Indentation from the first indented line (a tab, or that line's spaces; two spaces when nothing is
+ * indented), the line ending, and whether the text ends with a newline. A new or empty file gets the
+ * default: two spaces and a final newline.
+ */
+function detectJsonFormat(existing: string | undefined): JsonFormat {
+  if (existing === undefined || existing.trim() === '') return DEFAULT_JSON_FORMAT;
+  const indented = /^([ \t]+)\S/m.exec(existing);
+  const lead = indented?.[1];
+  return {
+    indent: lead === undefined ? DEFAULT_JSON_FORMAT.indent : lead.startsWith('\t') ? '\t' : lead.slice(0, 10),
+    finalNewline: existing.endsWith('\n'),
+    eol: eolOf(existing),
+  };
+}
+
+function serialize(value: unknown, format: JsonFormat): string {
+  const text = JSON.stringify(value, null, format.indent).split('\n').join(format.eol);
+  return format.finalNewline ? text + format.eol : text;
+}
+
+/** A pointer segment becomes part of the manifest key, which joins segments with `/`. */
+export function assertJsonPointer(pointer: string[], path = 'file'): void {
+  for (const segment of pointer) {
+    if (segment.includes('/')) throw new MergeError(`${path}: key segment "${segment}" must not contain "/"`);
+  }
+}
 
 /**
  * Sets each entry whose key is absent or in `owned` (manifest keys, see `jsonKey`). A present key
- * that is not owned belongs to the user: it is left alone and reported in `skipped`. The text is
- * `JSON.stringify(…, null, 2)` plus a newline, with the file's key order and new keys last.
+ * that is not owned belongs to the user: it is left alone and reported in `skipped`. The file keeps
+ * its key order (new keys go last), its indentation (a tab or N spaces; two spaces for a new file or
+ * one with no indentation), its line endings and whether it ends with a newline. When no key is
+ * actually set or changed, `existing` is returned as it is.
  */
 export function mergeJsonKeys(
   existing: string | undefined,
@@ -210,7 +262,9 @@ export function mergeJsonKeys(
 ): { text: string; skipped: string[] } {
   const root = parseJsonObject(existing, path);
   const skipped: string[] = [];
+  let changed = false;
   for (const { pointer, value } of entries) {
+    assertJsonPointer(pointer, path);
     const leaf = pointer[pointer.length - 1];
     if (leaf === undefined) throw new Error('a JSON pointer needs at least one segment');
     let node = root;
@@ -221,6 +275,7 @@ export function mergeJsonKeys(
         const created: JsonObject = {};
         setOwn(node, segment, created);
         node = created;
+        changed = true;
       } else if (isObject(next)) {
         node = next;
       } else {
@@ -228,18 +283,33 @@ export function mergeJsonKeys(
       }
     }
     const key = jsonKey(pointer);
-    if (hasOwn(node, leaf) && !owned.has(key)) skipped.push(key);
-    else setOwn(node, leaf, value);
+    if (!hasOwn(node, leaf)) {
+      setOwn(node, leaf, value);
+      changed = true;
+    } else if (!owned.has(key)) {
+      skipped.push(key);
+    } else if (canonicalJson(node[leaf]) !== canonicalJson(value)) {
+      setOwn(node, leaf, value);
+      changed = true;
+    }
   }
-  return { text: serialize(root), skipped };
+  if (!changed && existing !== undefined) return { text: existing, skipped };
+  return { text: serialize(root, detectJsonFormat(existing)), skipped };
 }
 
 /**
- * Deletes the keys, then every object on their path that is left empty (for us that is
- * `mcpServers`). Text without those keys is returned unchanged. A document left as `{}` is the
- * caller's to delete.
+ * Deletes the keys. With `pruneEmpty` (the default) every object on their path that is left empty
+ * goes too, which for us is `mcpServers`; a caller passes `false` for a file the user created, whose
+ * empty objects are theirs. Text without those keys is returned unchanged; otherwise the file keeps
+ * its indentation, line endings and final newline. A document left as `{}` is the caller's to delete.
  */
-export function removeJsonKeys(existing: string, pointers: string[][], path = 'file'): string {
+export function removeJsonKeys(
+  existing: string,
+  pointers: string[][],
+  path = 'file',
+  opts: { pruneEmpty?: boolean } = {},
+): string {
+  const pruneEmpty = opts.pruneEmpty ?? true;
   const root = parseJsonObject(existing, path);
   let changed = false;
   for (const pointer of pointers) {
@@ -255,13 +325,13 @@ export function removeJsonKeys(existing: string, pointers: string[][], path = 'f
     if (leaf === undefined || parent === undefined || !hasOwn(parent, leaf)) continue;
     delete parent[leaf];
     changed = true;
-    for (let depth = pointer.length - 1; depth > 0; depth--) {
+    for (let depth = pointer.length - 1; pruneEmpty && depth > 0; depth--) {
       const holder = chain[depth];
       if (holder === undefined || Object.keys(holder).length > 0) break;
       delete (chain[depth - 1] as JsonObject)[pointer[depth - 1] as string];
     }
   }
-  return changed ? serialize(root) : existing;
+  return changed ? serialize(root, detectJsonFormat(existing)) : existing;
 }
 
 // --- TOML -----------------------------------------------------------------------------------------

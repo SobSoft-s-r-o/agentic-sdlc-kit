@@ -161,8 +161,15 @@ describe('planApply and applyPlan', () => {
     expect(find(manifest, '.gitignore')).toEqual([
       { path: '.gitignore', kind: 'line-block', hash: hashText('.sdlc/cache/\n.env') },
     ]);
+    // .mcp.json did not exist, so the kit created it and says so (uninstall may then tidy up after itself)
     expect(find(manifest, '.mcp.json', 'mcpServers/github')).toEqual([
-      { path: '.mcp.json', kind: 'json-keys', key: 'mcpServers/github', hash: hashText(canonicalJson(GITHUB_SERVER)) },
+      {
+        path: '.mcp.json',
+        kind: 'json-keys',
+        key: 'mcpServers/github',
+        hash: hashText(canonicalJson(GITHUB_SERVER)),
+        createdFile: true,
+      },
     ]);
     expect(find(manifest, '.codex/config.toml')).toEqual([
       { path: '.codex/config.toml', kind: 'toml-block', hash: hashText(TOML_BODY) },
@@ -682,6 +689,335 @@ describe('planUninstall', () => {
     const result = applyPlan(planUninstall(fs, manifestOf(fs)), fs, { removeObsolete: false });
     expect(result.errors).toEqual([{ path: AGENT, message: 'locked' }]);
     expect(manifestOf(fs).entries.map(e => e.path)).toEqual([AGENT]);
+  });
+});
+
+describe('JSON files keep the layout the user gave them', () => {
+  const mcp = (servers: Array<'github' | 'context7'> = ['github', 'context7']): Change => ({
+    kind: 'json-keys',
+    path: '.mcp.json',
+    entries: servers.map(id => ({ pointer: ['mcpServers', id], value: id === 'github' ? GITHUB_SERVER : CONTEXT7_SERVER })),
+  });
+  const uninstall = (fs: RepoFs) => applyPlan(planUninstall(fs, readManifest(fs)!), fs, { removeObsolete: false });
+
+  describe.each([
+    ['4 spaces', '    '],
+    ['a tab', '\t'],
+    ['2 spaces', '  '],
+  ])('a user .mcp.json indented with %s', (_name, indent) => {
+    for (const [tailName, tail] of [['a final newline', '\n'], ['no final newline', '']] as const) {
+      it(`init writes in that layout and uninstall gives the original bytes back (${tailName})`, () => {
+        const user = JSON.stringify({ editor: 'vim', mcpServers: { db: { command: 'db-server' } } }, null, indent) + tail;
+        const fs = memoryFs({ '.mcp.json': user });
+
+        const first = install([mcp()], fs);
+        expect(first.result.errors).toEqual([]);
+        expect(fs.read('.mcp.json')).toBe(
+          JSON.stringify(
+            { editor: 'vim', mcpServers: { db: { command: 'db-server' }, github: GITHUB_SERVER, context7: CONTEXT7_SERVER } },
+            null,
+            indent,
+          ) + tail,
+        );
+
+        fs.log.length = 0;
+        expect(install([mcp()], fs).plan.writes).toEqual([]);
+        expect(fs.log).toEqual([]);
+
+        expect(uninstall(fs).errors).toEqual([]);
+        expect(fs.read('.mcp.json')).toBe(user);
+        expect(fs.snapshot()).toEqual({ '.mcp.json': user });
+      });
+    }
+  });
+
+  it('a new .mcp.json gets two spaces and a final newline', () => {
+    const fs = memoryFs();
+    install([mcp(['context7'])], fs);
+    expect(fs.read('.mcp.json')).toBe(`${JSON.stringify({ mcpServers: { context7: CONTEXT7_SERVER } }, null, 2)}\n`);
+  });
+
+  it('plans no write for .mcp.json when no key would be set, and leaves its bytes alone', () => {
+    const user = '{ "mcpServers":\n      {"github":{"command":"mine"},   "context7":{"command":"mine too"}}  }\n\n';
+    const fs = memoryFs({ '.mcp.json': user });
+    const { plan: p, result } = install([mcp()], fs);
+    expect(p.writes).toEqual([]);
+    expect(p.notices).toEqual([
+      { path: '.mcp.json', message: 'mcpServers/github already defined by you; kept' },
+      { path: '.mcp.json', message: 'mcpServers/context7 already defined by you; kept' },
+    ]);
+    expect(result.errors).toEqual([]);
+    expect(fs.read('.mcp.json')).toBe(user);
+    expect(fs.log).not.toContain('write .mcp.json');
+  });
+});
+
+describe('identical content is adopted without a word', () => {
+  const agent = (content: string): Change => ({ kind: 'file', path: AGENT, content });
+  const mcp: Change = {
+    kind: 'json-keys',
+    path: '.mcp.json',
+    entries: [
+      { pointer: ['mcpServers', 'github'], value: GITHUB_SERVER },
+      { pointer: ['mcpServers', 'context7'], value: CONTEXT7_SERVER },
+    ],
+  };
+
+  it('a file that already equals the desired content gets a manifest entry: no notice, no write', () => {
+    const fs = memoryFs({ [AGENT]: 'agent v1\r\n' });
+    const first = install([agent('agent v1\n')], fs);
+    expect(first.plan.notices).toEqual([]);
+    expect(first.plan.writes).toEqual([]);
+    expect(first.result.errors).toEqual([]);
+    expect(fs.log).toEqual([`write ${MANIFEST_PATH}`]);
+    expect(fs.read(AGENT)).toBe('agent v1\r\n');
+    expect(manifestOf(fs).entries).toEqual([{ path: AGENT, kind: 'file', hash: hashText('agent v1\n') }]);
+
+    // it is ours from now on: an unmodified file is updated, and uninstall removes it
+    install([agent('agent v2\n')], fs);
+    expect(fs.read(AGENT)).toBe('agent v2\n');
+    applyPlan(planUninstall(fs, manifestOf(fs)), fs, { removeObsolete: false });
+    expect(fs.read(AGENT)).toBeUndefined();
+  });
+
+  it('a different existing file is still the user\'s, even with --overwrite-modified', () => {
+    const fs = memoryFs({ [AGENT]: 'something else\n' });
+    for (const overwriteModified of [false, true]) {
+      const { plan: p } = install([agent('agent v1\n')], fs, { overwriteModified });
+      expect(p.notices).toEqual([{ path: AGENT, message: UNMANAGED }]);
+      expect(fs.read(AGENT)).toBe('something else\n');
+    }
+  });
+
+  it('a user server equal to ours becomes owned with no notice; a different one stays theirs', () => {
+    const sameButReordered = { headers: GITHUB_SERVER.headers, url: GITHUB_SERVER.url, type: GITHUB_SERVER.type };
+    const user = `${JSON.stringify({ mcpServers: { github: sameButReordered } }, null, 2)}\n`;
+    const fs = memoryFs({ '.mcp.json': user });
+
+    const first = install([mcp], fs);
+    expect(first.plan.notices).toEqual([]);
+    expect(find(manifestOf(fs), '.mcp.json', 'mcpServers/github')).toEqual([
+      { path: '.mcp.json', kind: 'json-keys', key: 'mcpServers/github', hash: hashText(canonicalJson(GITHUB_SERVER)) },
+    ]);
+    const parsed = JSON.parse(fs.read('.mcp.json')!);
+    expect(Object.keys(parsed.mcpServers.github)).toEqual(['headers', 'url', 'type']);
+    expect(parsed.mcpServers.context7).toEqual(CONTEXT7_SERVER);
+
+    // owned now: a changed server config updates it
+    const changed = { ...mcp, entries: [{ pointer: ['mcpServers', 'github'], value: { type: 'http', url: 'https://new.example/mcp' } }] };
+    install([changed], fs, { removeObsolete: false });
+    expect(JSON.parse(fs.read('.mcp.json')!).mcpServers.github).toEqual({ type: 'http', url: 'https://new.example/mcp' });
+
+    const other = memoryFs({ '.mcp.json': `${JSON.stringify({ mcpServers: { github: { command: 'mine' } } }, null, 2)}\n` });
+    expect(install([mcp], other).plan.notices).toEqual([
+      { path: '.mcp.json', message: 'mcpServers/github already defined by you; kept' },
+    ]);
+  });
+});
+
+describe('createdFile on json-keys entries', () => {
+  const mcp = (servers: Array<'github' | 'context7'> = ['github', 'context7']): Change => ({
+    kind: 'json-keys',
+    path: '.mcp.json',
+    entries: servers.map(id => ({ pointer: ['mcpServers', id], value: id === 'github' ? GITHUB_SERVER : CONTEXT7_SERVER })),
+  });
+  const uninstall = (fs: RepoFs) => applyPlan(planUninstall(fs, readManifest(fs)!), fs, { removeObsolete: false });
+  const flags = (fs: RepoFs) => manifestOf(fs).entries.map(e => e.createdFile);
+
+  it('is recorded when the file did not exist, kept on later writes, and absent for a file the user had', () => {
+    const fs = memoryFs();
+    install([mcp()], fs);
+    expect(flags(fs)).toEqual([true, true]);
+
+    install([mcp(['github'])], fs, { removeObsolete: true });
+    expect(flags(fs)).toEqual([true]);
+    const edited = { ...mcp(['github']), entries: [{ pointer: ['mcpServers', 'github'], value: { type: 'http', url: 'https://v2.example' } }] };
+    install([edited], fs);
+    expect(flags(fs)).toEqual([true]);
+    expect(manifestOf(fs).entries[0]?.hash).toBe(hashText(canonicalJson({ type: 'http', url: 'https://v2.example' })));
+
+    const users = memoryFs({ '.mcp.json': `${JSON.stringify({ other: 1 }, null, 2)}\n` });
+    install([mcp()], users);
+    expect(flags(users)).toEqual([undefined, undefined]);
+    expect(users.read(MANIFEST_PATH)).not.toContain('createdFile');
+  });
+
+  it('is recorded again when the owner deleted the file and the kit wrote it anew', () => {
+    const fs = memoryFs({ '.mcp.json': `${JSON.stringify({ other: 1 }, null, 2)}\n` });
+    install([mcp()], fs);
+    fs.remove('.mcp.json');
+    install([mcp()], fs);
+    expect(flags(fs)).toEqual([true, true]);
+  });
+
+  it('a user `{"mcpServers": {}}` comes back byte-identical after init and uninstall', () => {
+    for (const user of [
+      `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`,
+      JSON.stringify({ mcpServers: {} }, null, 4),
+      `${JSON.stringify({ mcpServers: {} }, null, '\t')}\n`,
+    ]) {
+      const fs = memoryFs({ '.mcp.json': user });
+      install([mcp()], fs);
+      expect(JSON.parse(fs.read('.mcp.json')!).mcpServers).toEqual({ github: GITHUB_SERVER, context7: CONTEXT7_SERVER });
+      expect(uninstall(fs).errors).toEqual([]);
+      expect(fs.snapshot()).toEqual({ '.mcp.json': user });
+    }
+  });
+
+  it('a file the kit created is tidied: mcpServers is pruned, a `{}` file is deleted, other keys stay', () => {
+    const fs = memoryFs();
+    install([mcp()], fs);
+    uninstall(fs);
+    expect(fs.snapshot()).toEqual({});
+
+    install([mcp()], fs);
+    const withTheme = { ...JSON.parse(fs.read('.mcp.json')!), theme: 'dark' };
+    fs.write('.mcp.json', `${JSON.stringify(withTheme, null, 2)}\n`);
+    uninstall(fs);
+    expect(fs.snapshot()).toEqual({ '.mcp.json': `${JSON.stringify({ theme: 'dark' }, null, 2)}\n` });
+  });
+
+  it('a file the user had is never deleted, even when only `{}` is left of it', () => {
+    const user = `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`;
+    const fs = memoryFs({ '.mcp.json': user });
+    install([mcp()], fs);
+    uninstall(fs);
+    expect(fs.read('.mcp.json')).toBe(user);
+
+    // a file without the key we added: the object we added stays (we cannot tell it from the user's)
+    const bare = memoryFs({ '.mcp.json': '{}\n' });
+    install([mcp()], bare);
+    uninstall(bare);
+    expect(bare.read('.mcp.json')).toBe(`${JSON.stringify({ mcpServers: {} }, null, 2)}\n`);
+  });
+
+  it('survives the manifest round trip: the manifest is byte-identical on a second run', () => {
+    const fs = memoryFs();
+    install([mcp()], fs);
+    const first = fs.read(MANIFEST_PATH);
+    install([mcp()], fs);
+    expect(fs.read(MANIFEST_PATH)).toBe(first);
+    expect(first).toContain('"createdFile": true');
+    expect(() => parseManifest(first ?? '')).not.toThrow();
+  });
+});
+
+describe('a JSON pointer segment with a slash', () => {
+  const bad: Change = { kind: 'json-keys', path: '.mcp.json', entries: [{ pointer: ['mcpServers', 'a/b'], value: { command: 'x' } }] };
+
+  it('is an error for that file at plan time; the other files carry on and nothing is written to it', () => {
+    const fs = memoryFs();
+    const cs = [...changes().filter(c => c.path !== '.mcp.json'), bad];
+    const p = plan(cs, fs);
+    expect(p.errors).toEqual([{ path: '.mcp.json', message: '.mcp.json: key segment "a/b" must not contain "/"' }]);
+    expect(p.writes.some(w => w.path === '.mcp.json')).toBe(false);
+    expect(p.writes.some(w => w.path === AGENT)).toBe(true);
+
+    const result = applyPlan(p, fs, { removeObsolete: false });
+    expect(result.errors).toEqual(p.errors);
+    expect(fs.read('.mcp.json')).toBeUndefined();
+    expect(fs.read(AGENT)).toBe('agent v1\n');
+  });
+
+  it('keeps the entries the file had, so they are not treated as obsolete', () => {
+    const fs = memoryFs();
+    install(changes(), fs);
+    const p = plan([...changes({ agent: 'agent v2\n' }).filter(c => c.path !== '.mcp.json'), bad], fs);
+    expect(p.errors).toHaveLength(1);
+    expect(p.obsolete).toEqual([]);
+    expect(find(p.manifest, '.mcp.json', 'mcpServers/github')).toHaveLength(1);
+    expect(p.writes.map(w => w.path)).toEqual([AGENT]);
+  });
+
+  it('a slash in the file name part of the pointer is rejected the same way, anywhere in the pointer', () => {
+    const fs = memoryFs();
+    const first = { ...bad, entries: [{ pointer: ['a/b', 'c'], value: 1 }] };
+    expect(plan([first], fs).errors).toEqual([{ path: '.mcp.json', message: '.mcp.json: key segment "a/b" must not contain "/"' }]);
+  });
+});
+
+describe('a TOML block whose tables are all the user\'s now', () => {
+  const owned = ['mcp_servers.github'];
+  const toml = (content = GITHUB_TABLE, tables = owned): Change => ({
+    kind: 'toml-block',
+    path: '.codex/config.toml',
+    content,
+    ownedTables: tables,
+  });
+  const count = (text: string, header: string): number => text.split('\n').filter(l => l.trim() === header).length;
+  const userTable = '\n[mcp_servers.github]\ncommand = "my-own-github"\n';
+
+  it('plans the removal of the stale block instead of leaving a duplicate table', () => {
+    const fs = memoryFs({ '.codex/config.toml': 'model = "gpt-5"\n' });
+    install([toml()], fs);
+    expect(count(fs.read('.codex/config.toml')!, '[mcp_servers.github]')).toBe(1);
+
+    fs.write('.codex/config.toml', fs.read('.codex/config.toml')! + userTable);
+    expect(count(fs.read('.codex/config.toml')!, '[mcp_servers.github]')).toBe(2);
+
+    const second = install([toml()], fs);
+    expect(second.plan.errors).toEqual([]);
+    expect(second.plan.writes).toEqual([
+      expect.objectContaining({ path: '.codex/config.toml', action: 'update' }),
+    ]);
+    expect(second.plan.notices).toEqual([
+      { path: '.codex/config.toml', message: 'mcp_servers.github already defined by you; kept' },
+    ]);
+    const text = fs.read('.codex/config.toml')!;
+    expect(count(text, '[mcp_servers.github]')).toBe(1);
+    expect(text).not.toContain('sdlc:begin');
+    expect(text).toBe(`model = "gpt-5"\n${userTable}`);
+    expect(manifestOf(fs).entries.filter(e => e.path === '.codex/config.toml')).toEqual([]);
+    expect(second.plan.obsolete).toEqual([]);
+  });
+
+  it('is stable afterwards: the next run writes nothing and nothing is obsolete', () => {
+    const fs = memoryFs();
+    install([toml()], fs);
+    fs.write('.codex/config.toml', fs.read('.codex/config.toml')! + userTable);
+    install([toml()], fs);
+    fs.log.length = 0;
+    const third = install([toml()], fs);
+    expect(third.plan.writes).toEqual([]);
+    expect(third.plan.obsolete).toEqual([]);
+    expect(fs.log).toEqual([]);
+  });
+
+  it('keeps a block the owner edited, with a notice, unless --overwrite-modified', () => {
+    const fs = memoryFs();
+    install([toml()], fs);
+    const edited = fs.read('.codex/config.toml')!.replace('url = ', 'url_edited = ') + userTable;
+    fs.write('.codex/config.toml', edited);
+
+    const kept = install([toml()], fs);
+    expect(kept.plan.writes).toEqual([]);
+    expect(kept.plan.notices).toEqual([
+      { path: '.codex/config.toml', message: MODIFIED },
+      { path: '.codex/config.toml', message: 'mcp_servers.github already defined by you; kept' },
+    ]);
+    expect(fs.read('.codex/config.toml')).toBe(edited);
+    expect(manifestOf(fs).entries.some(e => e.path === '.codex/config.toml' && e.key === undefined)).toBe(true);
+
+    install([toml()], fs, { overwriteModified: true });
+    expect(count(fs.read('.codex/config.toml')!, '[mcp_servers.github]')).toBe(1);
+    expect(fs.read('.codex/config.toml')).not.toContain('sdlc:begin');
+  });
+
+  it('deletes a file that held only the block when the block is now empty', () => {
+    const fs = memoryFs();
+    install([toml()], fs);
+    const p = plan([toml('# nothing to manage\n', [])], fs);
+    expect(p.writes).toEqual([expect.objectContaining({ path: '.codex/config.toml', action: 'remove' })]);
+    applyPlan(p, fs, { removeObsolete: false });
+    expect(fs.read('.codex/config.toml')).toBeUndefined();
+  });
+
+  it('writes nothing for a user who defined every table before the first install', () => {
+    const fs = memoryFs({ '.codex/config.toml': `${userTable.trimStart()}` });
+    const { plan: p } = install([toml()], fs);
+    expect(p.writes).toEqual([]);
+    expect(p.notices).toEqual([{ path: '.codex/config.toml', message: 'mcp_servers.github already defined by you; kept' }]);
+    expect(fs.read('.codex/config.toml')).toBe(userTable.trimStart());
   });
 });
 

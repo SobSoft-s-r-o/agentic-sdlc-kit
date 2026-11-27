@@ -21,6 +21,7 @@ import {
   type ManifestEntry,
 } from './manifest.js';
 import {
+  assertJsonPointer,
   blockBody,
   canonicalBody,
   filterTomlBody,
@@ -158,12 +159,15 @@ export function planApply(
   }
 
   const changePaths = new Set(changes.map(c => c.path));
+  const tomlPaths = new Set(changes.filter(c => c.kind === 'toml-block').map(c => c.path));
   const obsolete = sortEntries(
     previous.filter(
       e =>
         !produced.has(identity(e)) &&
         // per-table TOML entries only describe the block; they go when the block's entry does
         !(e.kind === 'toml-block' && e.key !== undefined) &&
+        // the TOML change still targets this path: a block it dropped (every table is now the user's) is not obsolete
+        !(e.kind === 'toml-block' && tomlPaths.has(e.path)) &&
         // the path is now produced as something else; do not delete it from under that change
         !(e.kind === 'file' && changePaths.has(e.path)),
     ),
@@ -234,10 +238,10 @@ function planFile(
   const own = ctx.prior.find(e => e.kind === 'file');
 
   if (disk === undefined) return { write: put(ctx, path, disk, content, mode), notices: [], entries: [fresh] };
-  if (!own) return { notices: [{ path, message: UNMANAGED }], entries: [] };
-
   const onDisk = hashText(disk);
+  // Identical to what we would write: it costs the user nothing to take it over, silently.
   if (onDisk === desired) return { notices: [], entries: [fresh] };
+  if (!own) return { notices: [{ path, message: UNMANAGED }], entries: [] };
   if (onDisk === own.hash || ctx.overwriteModified) {
     return { write: put(ctx, path, disk, content, mode), notices: [], entries: [fresh] };
   }
@@ -291,8 +295,7 @@ function planToml(
 ): Planned {
   const { body, skipped } = filterTomlBody(disk, content, ownedTables);
   const skippedNotices = skipped.map(table => ({ path, message: `${table} already defined by you; kept` }));
-  // Every table is the user's: there is nothing for the kit to manage here.
-  if (body === '') return { notices: skippedNotices, entries: [] };
+  if (body === '') return planStaleToml(path, disk, ctx, skippedNotices);
 
   const planned = planBlock(path, 'toml-block', body, disk, ctx, d => mergeTomlBlock(d, content, ownedTables).text);
   // A kept block keeps the per-table entries it had; a written or unchanged one gets fresh ones.
@@ -311,8 +314,36 @@ function planToml(
   };
 }
 
+/**
+ * Every table of the block is now the user's (they define them outside it). Nothing is left to
+ * manage, but a block we wrote earlier would redefine those tables, so it goes under the usual
+ * rules: removed while it is unmodified (or with `overwriteModified`), kept and reported when the
+ * user edited it. A file left with nothing in it is deleted.
+ */
+function planStaleToml(path: string, disk: string | undefined, ctx: Context, skippedNotices: Notice[]): Planned {
+  const current = disk === undefined ? undefined : blockBody(disk, 'toml-block');
+  if (disk === undefined || current === undefined) return { notices: skippedNotices, entries: [] };
+
+  const own = ctx.prior.find(e => e.kind === 'toml-block' && e.key === undefined);
+  if ((own && hashText(current) === own.hash) || ctx.overwriteModified) {
+    const text = removeTomlBlock(disk);
+    const previous = ctx.prior.length === 0 ? {} : { previous: ctx.prior };
+    const write: PlannedWrite =
+      text === '' ? { path, action: 'remove', ...previous } : { path, action: 'update', content: text, ...previous };
+    return { write, notices: skippedNotices, entries: [] };
+  }
+  return {
+    notices: [{ path, message: MODIFIED }, ...skippedNotices],
+    entries: own ? ctx.prior.filter(e => e.kind === 'toml-block') : [],
+  };
+}
+
 function planJson(path: string, jsonEntries: JsonEntry[], disk: string | undefined, ctx: Context): Planned {
+  for (const item of jsonEntries) assertJsonPointer(item.pointer, path);
   const root = parseJsonObject(disk, path);
+  // The kit created this file (now, or on an earlier run): uninstall may then clean up after itself.
+  const created = disk === undefined || ctx.prior.some(e => e.kind === 'json-keys' && e.createdFile === true);
+  const stamp = (e: ManifestEntry): ManifestEntry => (created ? { ...e, createdFile: true } : e);
   const owned = new Set<string>();
   const toMerge: JsonEntry[] = [];
   const entries: ManifestEntry[] = [];
@@ -338,7 +369,9 @@ function planJson(path: string, jsonEntries: JsonEntry[], disk: string | undefin
         entries.push(fresh);
       }
     } else if (!own) {
-      toMerge.push(item); // not ours: the merge reports it as skipped
+      // A value equal to ours is taken over silently; any other one is the user's (the merge reports it).
+      if (hashText(canonicalJson(current.value)) === fresh.hash) entries.push(fresh);
+      else toMerge.push(item);
     } else {
       const onDisk = hashText(canonicalJson(current.value));
       if (onDisk === fresh.hash) entries.push(fresh);
@@ -351,11 +384,12 @@ function planJson(path: string, jsonEntries: JsonEntry[], disk: string | undefin
     }
   }
 
-  if (toMerge.length === 0) return { notices, entries };
+  const stamped = entries.map(stamp);
+  if (toMerge.length === 0) return { notices, entries: stamped };
   const merged = mergeJsonKeys(disk, toMerge, owned, path);
   for (const key of merged.skipped) notices.push({ path, message: `${key} already defined by you; kept` });
   const write = changesSomething && merged.text !== disk ? put(ctx, path, disk, merged.text) : undefined;
-  return { ...(write ? { write } : {}), notices, entries };
+  return { ...(write ? { write } : {}), notices, entries: stamped };
 }
 
 // --- removals (obsolete entries and uninstall) ----------------------------------------------------
@@ -371,7 +405,8 @@ interface RemovalPlan {
 /**
  * Plans the removal of the given entries from what is on disk now. A region whose content still
  * hashes to its entry is removed; a modified one is kept with `modifiedMessage`; one that is already
- * gone is ignored. A file that ends up empty (or `{}` for JSON) is deleted.
+ * gone is ignored. A file that ends up empty is deleted, and so is a JSON file the kit created that
+ * ends up as `{}`.
  */
 function planRemovals(entries: ManifestEntry[], fs: RepoFs, modifiedMessage: string): RemovalPlan {
   const plan: RemovalPlan = { writes: [], notices: [], errors: [], carried: [] };
@@ -398,6 +433,8 @@ function planRemovals(entries: ManifestEntry[], fs: RepoFs, modifiedMessage: str
       }
 
       let text = disk;
+      // Only a file the kit created is its to tidy: empty objects and an empty document are the user's otherwise.
+      const created = group.some(e => e.kind === 'json-keys' && e.createdFile === true);
       const pointers: string[][] = [];
       for (const entry of removable) {
         if (entry.kind === 'md-block') text = removeMdBlock(text);
@@ -405,10 +442,11 @@ function planRemovals(entries: ManifestEntry[], fs: RepoFs, modifiedMessage: str
         else if (entry.kind === 'toml-block') text = removeTomlBlock(text);
         else if (entry.kind === 'json-keys') pointers.push((entry.key ?? '').split('/'));
       }
-      if (pointers.length > 0) text = removeJsonKeys(text, pointers, path);
+      if (pointers.length > 0) text = removeJsonKeys(text, pointers, path, { pruneEmpty: created });
       if (text === disk) continue;
 
-      const empty = text === '' || (pointers.length > 0 && Object.keys(parseJsonObject(text, path)).length === 0);
+      const empty =
+        text === '' || (pointers.length > 0 && created && Object.keys(parseJsonObject(text, path)).length === 0);
       plan.writes.push(
         empty ? { path, action: 'remove', ...previous } : { path, action: 'update', content: text, ...previous },
       );

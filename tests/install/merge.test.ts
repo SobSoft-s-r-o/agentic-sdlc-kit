@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MergeError,
+  assertJsonPointer,
   blockBody,
   filterTomlBody,
   mergeJsonKeys,
@@ -118,7 +119,9 @@ describe('preserves user content in every merge kind', () => {
     expect(parsed.theme).toBe('dark');
     expect(Object.keys(parsed.mcpServers)).toEqual(['db', 'github', 'context7']);
     expect(Object.keys(parsed)).toEqual(['mcpServers', 'theme']);
-    expect(result.text.endsWith('}\n')).toBe(true);
+    // the user's file had no final newline, and the rewrite does not add one
+    expect(result.text.endsWith('}\n')).toBe(false);
+    expect(result.text.endsWith('}')).toBe(true);
   });
 
   it('TOML: root keys and the user table stay, the block is appended and holds no github table', () => {
@@ -271,6 +274,60 @@ describe('mergeJsonKeys', () => {
     );
   });
 
+  it('keeps a tab or N-space indentation and the final newline (or its absence) of the file', () => {
+    const doc = { editor: 'vim', mcpServers: { db: { command: 'x' } } };
+    const expectedDoc = { editor: 'vim', mcpServers: { db: { command: 'x' }, github: { url: 'u' } } };
+    for (const indent of ['    ', '\t', '  ', ' ']) {
+      for (const tail of ['\n', '']) {
+        const result = mergeJsonKeys(JSON.stringify(doc, null, indent) + tail, [entry], new Set());
+        expect(result.text).toBe(JSON.stringify(expectedDoc, null, indent) + tail);
+      }
+    }
+  });
+
+  it('keeps CRLF line endings', () => {
+    const text = `${JSON.stringify({ editor: 'vim' }, null, 4).split('\n').join('\r\n')}\r\n`;
+    const out = mergeJsonKeys(text, [entry], new Set()).text;
+    expect(out).toBe(`${JSON.stringify({ editor: 'vim', mcpServers: { github: { url: 'u' } } }, null, 4).split('\n').join('\r\n')}\r\n`);
+  });
+
+  it('uses two spaces and a final newline for a new file, an empty one, or one with no indentation', () => {
+    const two = `${JSON.stringify({ a: 1, mcpServers: { github: { url: 'u' } } }, null, 2)}\n`;
+    expect(mergeJsonKeys(undefined, [entry], new Set()).text).toBe(`${JSON.stringify({ mcpServers: { github: { url: 'u' } } }, null, 2)}\n`);
+    expect(mergeJsonKeys('', [entry], new Set()).text).toBe(`${JSON.stringify({ mcpServers: { github: { url: 'u' } } }, null, 2)}\n`);
+    expect(mergeJsonKeys('{"a":1}\n', [entry], new Set()).text).toBe(two);
+    // no indentation and no final newline in the original: the newline stays absent
+    expect(mergeJsonKeys('{"a":1}', [entry], new Set()).text).toBe(two.trimEnd());
+  });
+
+  it('returns the input untouched when no key is set: all skipped, or all already in sync', () => {
+    const odd = '{\n      "mcpServers": {"github":    {"url": "mine"}},\n"x":1}';
+    const skippedOnly = mergeJsonKeys(odd, [entry], new Set());
+    expect(skippedOnly.text).toBe(odd);
+    expect(skippedOnly.skipped).toEqual(['mcpServers/github']);
+
+    const inSync = '{"mcpServers":{"github":{"url":"u"}}}  \n\n';
+    const owned = mergeJsonKeys(inSync, [entry], new Set(['mcpServers/github']));
+    expect(owned.text).toBe(inSync);
+    expect(owned.skipped).toEqual([]);
+    // key order inside the value does not make it a change
+    const reordered = mergeJsonKeys('{"mcpServers":{"github":{"b":2,"a":1}}}', [{ pointer: ['mcpServers', 'github'], value: { a: 1, b: 2 } }], new Set(['mcpServers/github']));
+    expect(reordered.text).toBe('{"mcpServers":{"github":{"b":2,"a":1}}}');
+  });
+
+  it('rewrites when an owned value really changed', () => {
+    const out = mergeJsonKeys('{"mcpServers":{"github":{"url":"old"}}}', [entry], new Set(['mcpServers/github']));
+    expect(JSON.parse(out.text).mcpServers.github).toEqual({ url: 'u' });
+  });
+
+  it('refuses a pointer segment that contains "/"', () => {
+    expect(() => mergeJsonKeys(undefined, [{ pointer: ['mcpServers', 'a/b'], value: 1 }], new Set(), '.mcp.json')).toThrow(
+      '.mcp.json: key segment "a/b" must not contain "/"',
+    );
+    expect(() => assertJsonPointer(['ok', 'also/bad'], 'x.json')).toThrow(MergeError);
+    expect(() => assertJsonPointer(['ok', 'fine'], 'x.json')).not.toThrow();
+  });
+
   it('does not let a key named __proto__ reach the prototype', () => {
     const result = mergeJsonKeys(undefined, [{ pointer: ['mcpServers', '__proto__'], value: { polluted: true } }], new Set());
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
@@ -289,9 +346,36 @@ describe('removeJsonKeys', () => {
     expect(JSON.parse(removeJsonKeys(text, [['mcpServers', 'github']]))).toEqual({ mcpServers: { db: { b: 2 } } });
   });
 
-  it('leaves `{}` when nothing else is in the file', () => {
-    const text = JSON.stringify({ mcpServers: { github: {} } });
-    expect(removeJsonKeys(text, [['mcpServers', 'github']])).toBe('{}\n');
+  it('leaves `{}` when nothing else is in the file, with the final newline the file had', () => {
+    expect(removeJsonKeys(JSON.stringify({ mcpServers: { github: {} } }), [['mcpServers', 'github']])).toBe('{}');
+    expect(removeJsonKeys(`${JSON.stringify({ mcpServers: { github: {} } })}\n`, [['mcpServers', 'github']])).toBe('{}\n');
+  });
+
+  it('keeps an object it leaves empty when pruneEmpty is false (the user made it)', () => {
+    const text = `${JSON.stringify({ mcpServers: { github: { a: 1 } }, other: true }, null, 2)}\n`;
+    expect(removeJsonKeys(text, [['mcpServers', 'github']], 'a.json', { pruneEmpty: false })).toBe(
+      `${JSON.stringify({ mcpServers: {}, other: true }, null, 2)}\n`,
+    );
+    const only = `${JSON.stringify({ mcpServers: { github: { a: 1 } } }, null, 2)}\n`;
+    expect(removeJsonKeys(only, [['mcpServers', 'github']], 'a.json', { pruneEmpty: false })).toBe(
+      `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`,
+    );
+  });
+
+  it('keeps the indentation, the line endings and the final newline of the file', () => {
+    const doc = { mcpServers: { github: { a: 1 }, db: { b: 2 } }, other: true };
+    for (const indent of ['    ', '\t', '  ', ' ']) {
+      for (const tail of ['\n', '']) {
+        const text = JSON.stringify(doc, null, indent) + tail;
+        const expected = JSON.stringify({ mcpServers: { db: { b: 2 } }, other: true }, null, indent) + tail;
+        expect(removeJsonKeys(text, [['mcpServers', 'github']])).toBe(expected);
+      }
+    }
+    const crlf = `${JSON.stringify(doc, null, 2).split('\n').join('\r\n')}\r\n`;
+    const out = removeJsonKeys(crlf, [['mcpServers', 'github']]);
+    expect(out.includes('\r\n')).toBe(true);
+    expect(out.replace(/\r\n/g, '')).not.toMatch(/\n/);
+    expect(out.endsWith('}\r\n')).toBe(true);
   });
 
   it('returns the text unchanged when the key is not there', () => {
