@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
@@ -9,6 +9,7 @@ import { registerBoardCommand, type BoardCommandContext } from './commands/board
 import { registerConfigCommand, type ConfigCommandContext } from './commands/config.js';
 import type { CommandContext, ContextFactory } from './commands/context.js';
 import { registerDeployCommand } from './commands/deploy.js';
+import { registerDoctorCommand, type DoctorContext } from './commands/doctor.js';
 import { registerEvidenceCommand } from './commands/evidence.js';
 import {
   exitAfterFlush,
@@ -48,6 +49,8 @@ export interface CliDeps {
   makeGitHookContext?: () => GitHookContext | Promise<GitHookContext>;
   /** Builds the context of `init`, `upgrade` and `uninstall`; defaults to the git root, git and `gh`. */
   makeInstallContext?: InstallContextFactory;
+  /** Builds the context of `doctor`, which needs no loadable config; defaults to the git root, git, `gh` and the real PATH. */
+  makeDoctorContext?: () => DoctorContext | Promise<DoctorContext>;
   /** Where results go; defaults to stdout. */
   out?: (text: string) => void;
   /** Where errors go; defaults to stderr. */
@@ -67,6 +70,17 @@ function gitRoot(cwd: string): string | undefined {
     return root === '' ? undefined : root;
   } catch {
     return undefined;
+  }
+}
+
+/** The text of a file, `undefined` when there is no such file; any other failure (permissions, a directory) throws. */
+function readFileIfPresent(path: string): string | undefined {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return undefined;
+    throw error;
   }
 }
 
@@ -152,6 +166,30 @@ export function buildProgram(deps: CliDeps = {}): Command {
       };
     });
 
+  const makeDoctorContext =
+    deps.makeDoctorContext ??
+    ((): DoctorContext => {
+      // No `loadEnvironment`: `doctor` reports a missing or broken config and a missing repository as checks.
+      const cwd = process.cwd();
+      const repoRoot = gitRoot(cwd) ?? cwd;
+      const configOption = program.opts<{ config?: string }>().config;
+      const configPath = configOption === undefined ? join(repoRoot, CONFIG_FILE) : resolve(cwd, configOption);
+      return {
+        env: {
+          run: defaultGhRunner,
+          git: createGitRunner(repoRoot),
+          fs: nodeRepoFs(repoRoot),
+          which: async command => findOnPath(command, process.env) !== undefined,
+          exec: execProgram(repoRoot),
+          env: process.env,
+          nodeVersion: process.version,
+          config: { path: configOption ?? CONFIG_FILE, read: () => readFileIfPresent(configPath) },
+        },
+        out,
+        err,
+      };
+    });
+
   const makeGitHookContext =
     deps.makeGitHookContext ??
     ((): GitHookContext => {
@@ -199,6 +237,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
   registerInitCommand(program, makeInstallContext);
   registerUpgradeCommand(program, makeInstallContext);
   registerUninstallCommand(program, makeInstallContext);
+  registerDoctorCommand(program, makeDoctorContext, { out, err });
   return program;
 }
 

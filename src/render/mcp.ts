@@ -298,6 +298,25 @@ export function renderMcp(
   }
 }
 
+/** The names (never values) of the variables the servers read, each once, in the order of `mcp.servers`. */
+function envVariables(servers: readonly Resolved[]): string[] {
+  const variables = new Set<string>();
+  for (const t of servers) {
+    if (t.kind === 'remote' && t.auth) variables.add(t.auth.env);
+    if (t.kind === 'local') t.env.forEach(name => variables.add(name));
+  }
+  return [...variables];
+}
+
+/**
+ * The environment variables the configured servers read when a harness starts them (the names only,
+ * as `mcpNotes` tells the owner to export them). None for an AGENTS.md-only setup, which has no MCP wiring.
+ */
+export function mcpEnvVars(cfg: Config, defs: readonly McpServerDef[] = loadMcpCatalog()): string[] {
+  if (cfg.harnesses.every(harness => harness === 'agents-md')) return [];
+  return envVariables(selected(cfg, defs));
+}
+
 /**
  * What the owner has to do before the servers work, as short fragments for the install summary:
  * export each variable the configured servers read (in either scope), and the one-time approval
@@ -309,12 +328,7 @@ export function mcpNotes(cfg: Config, defs: readonly McpServerDef[] = loadMcpCat
   // An AGENTS.md-only setup has no MCP file or command, so there is nothing to prepare.
   if (cfg.harnesses.every(harness => harness === 'agents-md')) return [];
   const servers = selected(cfg, defs);
-  const variables = new Set<string>();
-  for (const t of servers) {
-    if (t.kind === 'remote' && t.auth) variables.add(t.auth.env);
-    if (t.kind === 'local') t.env.forEach(name => variables.add(name));
-  }
-  const notes = [...variables].map(name => `export ${name} before starting your agent`);
+  const notes = envVariables(servers).map(name => `export ${name} before starting your agent`);
   if (cfg.mcp.scope === 'project' && servers.length > 0) {
     if (cfg.harnesses.includes('codex')) notes.push('Codex loads .codex/config.toml only for trusted projects');
     if (cfg.harnesses.includes('claude')) notes.push('approve the project MCP servers when Claude Code asks');

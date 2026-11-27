@@ -56,11 +56,11 @@ export async function runGitleaks(exec: Exec, which: Which): Promise<GitleaksRes
 
 const MAX_BUFFER = 16 * 1024 * 1024;
 
-/** The real thing: runs programs in `cwd`, giving up after `timeoutMs`. */
+/** The real thing: runs programs in `cwd`, giving up after `timeoutMs`. The program's stdin is closed at once, so nothing waits for input. */
 export function execProgram(cwd: string, timeoutMs = 120_000): Exec {
   return (command, args) =>
     new Promise((resolve, reject) => {
-      execFile(command, args, { cwd, maxBuffer: MAX_BUFFER, encoding: 'utf8', timeout: timeoutMs }, (error, stdout, stderr) => {
+      const child = execFile(command, args, { cwd, maxBuffer: MAX_BUFFER, encoding: 'utf8', timeout: timeoutMs }, (error, stdout, stderr) => {
         if (!error) {
           resolve({ code: 0, stdout, stderr });
           return;
@@ -71,6 +71,9 @@ export function execProgram(cwd: string, timeoutMs = 120_000): Exec {
         else if (failure.killed) reject(new Error(`${command} timed out after ${timeoutMs / 1000}s`));
         else reject(new Error(`could not run ${command}: ${failure.message}`));
       });
+      // The program may exit before it reads stdin; that must not surface as an unhandled stream error.
+      child.stdin?.on('error', () => undefined);
+      child.stdin?.end();
     });
 }
 

@@ -18,7 +18,7 @@ const cliPath = join(root, 'dist', 'cli.js');
 const version = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version;
 const validConfig = join(root, 'tests', 'fixtures', 'config', 'valid.yaml');
 
-const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board', 'config', 'githook', 'init', 'upgrade', 'uninstall'];
+const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board', 'config', 'githook', 'init', 'upgrade', 'uninstall', 'doctor'];
 
 let dir: string;
 beforeAll(() => {
@@ -166,6 +166,36 @@ describe('cli (built)', () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('gh CLI not found');
+  });
+
+  it('doctor needs no config, git or gh: it reports what is missing as checks, exits 1 and prints JSON with --json', () => {
+    const result = sdlc(['doctor', '--json'], { env: withoutGh });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    const report = JSON.parse(result.stdout) as { checks: Array<{ id: string; status: string }>; ok: boolean };
+    expect(report.ok).toBe(false);
+    expect(report.checks.map(check => check.id)).toEqual([
+      'git.repo',
+      'node.version',
+      'gh.installed',
+      'gh.auth',
+      'gh.scopes',
+      'repo.remote',
+      'repo.instructionFiles',
+      'config.present',
+    ]);
+    const status = Object.fromEntries(report.checks.map(check => [check.id, check.status]));
+    expect(status).toMatchObject({ 'git.repo': 'fail', 'node.version': 'ok', 'gh.installed': 'fail', 'config.present': 'warn' });
+  });
+
+  it('doctor prints the checks with a mark each, and its fix', () => {
+    const result = sdlc(['doctor', '--preflight'], { env: withoutGh });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/^✗ gh\.installed: gh CLI not found\n {2}fix: install the GitHub CLI: https:\/\/cli\.github\.com$/m);
+    expect(result.stdout).toMatch(/^✓ node\.version: /m);
+    expect(result.stdout).toMatch(/^! config\.present: .*\n {2}fix: run sdlc config suggest$/m);
   });
 
   it('rejects an unknown command', () => {

@@ -127,6 +127,12 @@ describe('execProgram', () => {
     expect((await exec(node, ['-e', '0'])).code).toBe(0);
   });
 
+  it('closes the stdin of the program, so one that reads it to the end does not wait', async () => {
+    const result = await execProgram(process.cwd(), 3000)(node, ['-e', 'process.stdin.resume(); process.stdin.on("end", () => console.log("eof"))']);
+
+    expect(result).toEqual({ code: 0, stdout: 'eof\n', stderr: '' });
+  });
+
   it('rejects when the program cannot start or runs past the deadline', async () => {
     await expect(execProgram(process.cwd())('sdlc-no-such-program', [])).rejects.toThrow(/sdlc-no-such-program/);
     await expect(execProgram(process.cwd(), 100)(node, ['-e', 'setTimeout(() => {}, 5000)'])).rejects.toThrow(

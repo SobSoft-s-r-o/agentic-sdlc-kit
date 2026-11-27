@@ -4,6 +4,7 @@ import { loadConfigFromString, setMcpIdValidator, type Config, type Harness } fr
 import type { Change, JsonKeysChange } from '../../src/render/changes.js';
 import {
   loadMcpCatalog,
+  mcpEnvVars,
   mcpNotes,
   parseMcpCatalog,
   renderMcp,
@@ -462,6 +463,34 @@ describe('mcpNotes', () => {
       `${HEADER.replace('[claude, codex, gemini, agents-md]', '[claude, gemini]')}${USER_SCOPE('github', 'local')}`,
     );
     expect(mcpNotes(noCodex)).toEqual(['export GITHUB_PERSONAL_ACCESS_TOKEN before starting your agent']);
+  });
+});
+
+describe('mcpEnvVars', () => {
+  it('names the variable of every configured server that reads one, once, and no other', () => {
+    expect(mcpEnvVars(cfgWith())).toEqual([TOKEN_NAME]);
+    expect(mcpEnvVars(cfgWith(LOCAL_GITHUB))).toEqual([TOKEN_NAME]);
+    expect(mcpEnvVars(cfgWith('mcp:\n  servers: [context7, playwright]\n'))).toEqual([]);
+    expect(mcpEnvVars(cfgWith('mcp:\n  servers: []\n'))).toEqual([]);
+    const agentsOnly = loadConfigFromString(HEADER.replace('[claude, codex, gemini, agents-md]', '[agents-md]'));
+    expect(mcpEnvVars(agentsOnly)).toEqual([]);
+  });
+
+  it('collects the variables of remote and local servers of a catalog', () => {
+    const catalog = parseMcpCatalog(
+      [
+        '- id: hosted',
+        '  description: A hosted server.',
+        '  default: false',
+        '  remote: { url: "https://hosted.test/mcp", auth: { header: Authorization, scheme: Bearer, env: HOSTED_TOKEN } }',
+        '- id: stdio',
+        '  description: A local server.',
+        '  default: false',
+        '  local: { command: x, args: [], env: [STDIO_KEY, HOSTED_TOKEN] }',
+      ].join('\n'),
+    );
+    const cfg = cfgWithCustom('mcp:\n  servers: [hosted, stdio]\n');
+    expect(mcpEnvVars(cfg, catalog)).toEqual(['HOSTED_TOKEN', 'STDIO_KEY']);
   });
 });
 

@@ -186,6 +186,32 @@ interface SecurityAndAnalysis {
   secret_scanning_push_protection?: { status?: string };
 }
 
+/** What GitHub says about secret scanning and push protection; read-only. */
+export interface PushProtectionState {
+  /** Both are on. */
+  enabled: boolean;
+  /** False when GitHub shows no security settings to this caller (not an admin, or a plan without them). */
+  visible: boolean;
+  /** `enabled`, `disabled` or `unknown` (not shown). */
+  secretScanning: string;
+  pushProtection: string;
+}
+
+/** Reads `security_and_analysis` of the repository; a failed `gh` call throws `GhError`. */
+export async function readPushProtection(run: GhRunner, cfg: Config): Promise<PushProtectionState> {
+  const current = await ghJson<SecurityAndAnalysis | null | undefined>(run, [
+    'api', `repos/${cfg.github.repo}`, '--jq', '.security_and_analysis',
+  ]);
+  const secretScanning = current?.secret_scanning?.status ?? 'unknown';
+  const pushProtection = current?.secret_scanning_push_protection?.status ?? 'unknown';
+  return {
+    enabled: secretScanning === 'enabled' && pushProtection === 'enabled',
+    visible: current !== null && current !== undefined && Object.keys(current).length > 0,
+    secretScanning,
+    pushProtection,
+  };
+}
+
 /**
  * Turns on GitHub secret scanning and push protection. GitHub shows `security_and_analysis` to
  * repository admins only, so an empty answer is not "off": the PATCH decides. A plan without
@@ -197,13 +223,7 @@ export async function ensurePushProtection(
   opts: ProvisionOptions,
 ): Promise<ProvisionResult<'enabled' | 'already' | 'unavailable'>> {
   const repoUrl = `repos/${cfg.github.repo}`;
-  const current = await ghJson<SecurityAndAnalysis | null | undefined>(run, [
-    'api', repoUrl, '--jq', '.security_and_analysis',
-  ]);
-  if (
-    current?.secret_scanning?.status === 'enabled' &&
-    current.secret_scanning_push_protection?.status === 'enabled'
-  ) {
+  if ((await readPushProtection(run, cfg)).enabled) {
     return { status: 'already', message: 'secret scanning and push protection are already enabled' };
   }
 
@@ -263,6 +283,17 @@ export const defaultGitRunner: GitRunner = createGitRunner();
 /** `./.sdlc/githooks/` and `.sdlc/githooks` name the same directory. */
 export const normalizeHooksPath = (value: string): string => value.trim().replace(/^(?:\.\/)+/, '').replace(/\/+$/, '');
 
+/** The value of `core.hooksPath` (any scope), `undefined` when it is unset; throws when git cannot say. */
+export async function readHooksPath(git: GitRunner): Promise<string | undefined> {
+  const read = await git(['config', '--get', 'core.hooksPath']);
+  // Exit 1 with no output is how `git config --get` says the key is unset.
+  if (read.code !== 0 && !(read.code === 1 && read.stdout.trim() === '')) {
+    throw new Error(`git config --get core.hooksPath failed: ${read.stderr.trim() || `exit code ${read.code}`}`);
+  }
+  const value = read.code === 0 ? read.stdout.trim() : '';
+  return value === '' ? undefined : value;
+}
+
 export interface HooksPathOptions extends ProvisionOptions {
   /** Called with the explanation when another `core.hooksPath` is already set. */
   notice?: (message: string) => void;
@@ -274,12 +305,7 @@ export interface HooksPathOptions extends ProvisionOptions {
  * active, which `notice` explains with both paths.
  */
 export async function setHooksPath(git: GitRunner, opts: HooksPathOptions): Promise<'set' | 'already' | 'conflict'> {
-  const read = await git(['config', '--get', 'core.hooksPath']);
-  // Exit 1 with no output is how `git config --get` says the key is unset.
-  if (read.code !== 0 && !(read.code === 1 && read.stdout.trim() === '')) {
-    throw new Error(`git config --get core.hooksPath failed: ${read.stderr.trim() || `exit code ${read.code}`}`);
-  }
-  const current = read.code === 0 ? read.stdout.trim() : '';
+  const current = (await readHooksPath(git)) ?? '';
   if (current !== '') {
     if (normalizeHooksPath(current) === HOOKS_PATH) return 'already';
     opts.notice?.(

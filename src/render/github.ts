@@ -5,7 +5,7 @@ import { renderTemplate } from './template.js';
 import { loadTemplate } from './templates.js';
 
 const PR_TEMPLATE_PATH = '.github/pull_request_template.md';
-const WORKFLOW_PATH = '.github/workflows/sdlc-reconcile.yml';
+export const WORKFLOW_PATH = '.github/workflows/sdlc-reconcile.yml';
 /** Where the hook scripts go; `core.hooksPath` is set to it (`HOOKS_PATH` in install/provision.ts, which a test keeps equal). */
 const HOOKS_DIR = '.sdlc/githooks';
 
