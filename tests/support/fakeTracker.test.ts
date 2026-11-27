@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { newTask } from '../../src/core/stateMachine.js';
-import { STATE_MARKER, StateCommentError } from '../../src/core/stateComment.js';
+import { renderStateComment, STATE_MARKER, StateCommentError } from '../../src/core/stateComment.js';
 import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
 import type { BoardFields } from '../../src/core/projection.js';
 import type { TaskState } from '../../src/core/types.js';
@@ -164,6 +164,15 @@ describe('FakeTracker state', () => {
     expect(listed.map(t => t.issue)).toEqual([2, 5]);
   });
 
+  it('lists only issues labelled sdlc:task, as the real tracker does', async () => {
+    const tracker = new FakeTracker();
+    tracker.seedTask(task(2));
+    tracker.seedTask(task(3), { labels: ['bug'] }); // has a state comment, but no sdlc:task label
+    expect((await tracker.listTrackedTasks()).map(t => t.issue)).toEqual([2]);
+    // getTask is not label-gated.
+    expect((await tracker.getTask(3)).issue).toBe(3);
+  });
+
   it('skips a corrupt state comment when listing, but getTask reports it', async () => {
     const tracker = new FakeTracker();
     tracker.seedTask(task(2));
@@ -190,6 +199,85 @@ describe('FakeTracker state', () => {
     tracker.seedTask(task(20), { labels: ['sdlc:task'] });
     tracker.comments.find(c => c.issue === 20)!.author = 'github-actions[bot]';
     expect((await tracker.getTask(20)).issue).toBe(20);
+  });
+
+  describe('trusted state-comment authors', () => {
+    const forgedBody = `${STATE_MARKER}\n\`\`\`json\n{}\n\`\`\``;
+
+    it('trusts a configured owner like the tracker login and the Actions bot', async () => {
+      const tracker = new FakeTracker();
+      tracker.owners = ['shop-owner'];
+      tracker.seedTask(task(30), { labels: ['sdlc:task'] });
+      tracker.comments.find(c => c.issue === 30)!.author = 'shop-owner';
+      expect((await tracker.getTask(30)).issue).toBe(30);
+      expect((await tracker.listTrackedTasks()).map(t => t.issue)).toEqual([30]);
+    });
+
+    it('does not trust an owner nobody configured', async () => {
+      const tracker = new FakeTracker();
+      tracker.seedTask(task(30), { labels: ['sdlc:task'] });
+      tracker.comments.find(c => c.issue === 30)!.author = 'shop-owner';
+      await expect(tracker.getTask(30)).rejects.toThrow(/no state comment/);
+    });
+
+    it('compares authors case-insensitively', async () => {
+      const tracker = new FakeTracker();
+      tracker.owners = ['Shop-Owner'];
+      tracker.seedTask(task(30), { labels: ['sdlc:task'] });
+      tracker.seedTask(task(31), { labels: ['sdlc:task'] });
+      tracker.seedTask(task(32), { labels: ['sdlc:task'] });
+      tracker.comments.find(c => c.issue === 30)!.author = 'SHOP-OWNER';
+      tracker.comments.find(c => c.issue === 31)!.author = tracker.login.toUpperCase();
+      tracker.comments.find(c => c.issue === 32)!.author = 'GitHub-Actions[bot]';
+      expect((await tracker.listTrackedTasks()).map(t => t.issue)).toEqual([30, 31, 32]);
+    });
+
+    it('reads, and writes to, the trusted state comment with the newest update when several exist', async () => {
+      const tracker = new FakeTracker();
+      tracker.owners = ['shop-owner'];
+      tracker.seedTask(task(30), { labels: ['sdlc:task'] });
+      const own = tracker.comments.find(c => c.issue === 30)!;
+      const ownerCopy = tracker.seedComment(30, {
+        body: renderStateComment({ ...task(30), status: 'blocked' }),
+        author: 'shop-owner',
+      });
+      expect((await tracker.getTask(30)).stateCommentId).toBe(ownerCopy);
+      expect((await tracker.getTask(30)).state.status).toBe('blocked');
+
+      const before = own.body;
+      await tracker.writeState(30, { ...task(30), summary: 'Edited last' });
+      expect((await tracker.getTask(30)).stateCommentId).toBe(ownerCopy);
+      expect((await tracker.getTask(30)).state.summary).toBe('Edited last');
+      expect(own.body).toBe(before);
+      expect(tracker.comments.filter(c => c.issue === 30)).toHaveLength(2);
+      // Like GitHub, an edit moves updatedAt past createdAt.
+      const patched = tracker.comments.find(c => c.id === ownerCopy)!;
+      expect(Date.parse(patched.updatedAt)).toBeGreaterThan(Date.parse(patched.createdAt));
+      expect(own.updatedAt).toBe(own.createdAt);
+    });
+
+    it('prefers the later update over the later creation', async () => {
+      const tracker = new FakeTracker();
+      tracker.seedTask(task(30), { labels: ['sdlc:task'] });
+      const older = tracker.comments.find(c => c.issue === 30)!;
+      const newer = tracker.seedComment(30, { body: older.body, author: tracker.login });
+      // `older` is created first but updated last.
+      older.updatedAt = '2030-01-01T00:00:00.000Z';
+      expect((await tracker.getTask(30)).stateCommentId).toBe(older.id);
+      expect(newer).not.toBe(older.id);
+    });
+
+    it('never reads or updates an intruder comment, however recent', async () => {
+      const tracker = new FakeTracker();
+      tracker.seedTask(task(30), { labels: ['sdlc:task'] });
+      const real = tracker.comments.find(c => c.issue === 30)!;
+      const intruder = tracker.seedComment(30, { body: forgedBody, author: 'intruder' });
+      tracker.comments.find(c => c.id === intruder)!.updatedAt = '2099-01-01T00:00:00.000Z';
+      expect((await tracker.getTask(30)).stateCommentId).toBe(real.id);
+      await tracker.writeState(30, { ...task(30), summary: 'Mine' });
+      expect(tracker.comments.find(c => c.id === intruder)!.body).toBe(forgedBody);
+      expect((await tracker.getTask(30)).state.summary).toBe('Mine');
+    });
   });
 
   it('seedTask refuses a duplicate issue number', () => {

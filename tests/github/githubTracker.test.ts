@@ -127,6 +127,55 @@ describe('GitHubTracker tracked tasks', () => {
     await expect(tracker.listTrackedTasks()).resolves.toHaveLength(2);
   });
 
+  describe('trusted state-comment authors', () => {
+    const view = (issue: number): FakeGhStep =>
+      fromFixture(['issue', 'view', String(issue), '--repo', 'acme/shop', '--json', 'number,title,state'], `issue-view-${issue}.json`);
+
+    it('trusts a state comment written by a configured owner, not only by the authenticated login', async () => {
+      // Issue 17: octo-agent (the login) only chatted; the state comment is by shop-owner.
+      const { tracker } = trackerFor([view(17), LOGIN, comments(17)]);
+      expect(await tracker.getTask(17)).toMatchObject({
+        issue: 17,
+        stateCommentId: '5502',
+        state: { summary: 'Owner-written state', status: 'in_progress' },
+      });
+    });
+
+    it('lists an owner-tracked issue as tracked, not untracked', async () => {
+      const list = [{ number: 17, title: 'Owner-tracked task', state: 'OPEN' }];
+      const { tracker } = trackerFor([ok(ISSUE_LIST, JSON.stringify(list)), LOGIN, comments(17)]);
+      expect((await tracker.listTrackedTasks()).map(t => t.issue)).toEqual([17]);
+    });
+
+    it('compares authors case-insensitively', async () => {
+      const shouting = ok(['api', 'user', '-q', '.login'], 'Octo-Agent\n');
+      const { tracker } = trackerFor([view(12), shouting, comments(12)]);
+      // Issue 12's real state comment is by "octo-agent".
+      expect(await tracker.getTask(12)).toMatchObject({ stateCommentId: '5003' });
+    });
+
+    it('reads the trusted state comment with the newest updated_at when several exist', async () => {
+      // Issue 18: octo-agent (older), shop-owner (edited last), the Actions bot (in between).
+      const { tracker } = trackerFor([view(18), LOGIN, comments(18)]);
+      expect(await tracker.getTask(18)).toMatchObject({ stateCommentId: '5602', state: { status: 'blocked' } });
+    });
+
+    it('lists the newest trusted state comment too', async () => {
+      const list = [{ number: 18, title: 'Diverged copies', state: 'OPEN' }];
+      const { tracker } = trackerFor([ok(ISSUE_LIST, JSON.stringify(list)), LOGIN, comments(18)]);
+      const [only] = await tracker.listTrackedTasks();
+      expect(only).toMatchObject({ stateCommentId: '5602', state: { status: 'blocked' } });
+    });
+
+    it('still ignores an intruder state comment, even when it was edited more recently', async () => {
+      const { tracker } = trackerFor([view(19), LOGIN, comments(19)]);
+      expect(await tracker.getTask(19)).toMatchObject({
+        stateCommentId: '5701',
+        state: { summary: 'Real state', status: 'in_progress' },
+      });
+    });
+  });
+
   it('listUntracked reports sdlc:task issues with a missing or unreadable state comment', async () => {
     const { tracker } = trackerFor(listScript());
     expect(await tracker.listUntracked()).toEqual([
@@ -206,7 +255,7 @@ describe('GitHubTracker login', () => {
     expect(run.calls.filter(args => args.includes('user'))).toHaveLength(2);
   });
 
-  it('trusts only the Actions bot when the token may not read /user', async () => {
+  it('trusts only the Actions bot and the owners when the token may not read /user', async () => {
     const forbidden = failing(['api', 'user'], 'gh: Resource not accessible by integration (HTTP 403)');
     const { tracker } = trackerFor([
       ok(['issue', 'view', '13'], fixture('issue-view-13.json')),
@@ -214,10 +263,14 @@ describe('GitHubTracker login', () => {
       comments(13),
       view12,
       comments(12),
+      ok(['issue', 'view', '17'], fixture('issue-view-17.json')),
+      comments(17),
     ]);
     await expect(tracker.getTask(13)).resolves.toMatchObject({ issue: 13, issueOpen: false });
     // Issue 12's real state comment is by octo-agent, which is now not trusted.
     await expect(tracker.getTask(12)).rejects.toThrow(/no state comment/);
+    // Issue 17's is by an owner, who is always trusted.
+    await expect(tracker.getTask(17)).resolves.toMatchObject({ stateCommentId: '5502' });
   });
 });
 
@@ -253,6 +306,63 @@ describe('GitHubTracker.writeState', () => {
     ]);
     await tracker.writeState(16, task(16));
     expect(run.calls[2]).not.toContain('PATCH');
+  });
+
+  it('patches the newest of several trusted state comments, and an owner-written one', async () => {
+    const { run, tracker } = trackerFor([
+      LOGIN,
+      comments(18),
+      ok(['api', '-X', 'PATCH', 'repos/acme/shop/issues/comments/5602', '--input', '-'], '{}'),
+      comments(17),
+      ok(['api', '-X', 'PATCH', 'repos/acme/shop/issues/comments/5502', '--input', '-'], '{}'),
+    ]);
+    await tracker.writeState(18, task(18));
+    await tracker.writeState(17, task(17));
+    expect(run.calls).toHaveLength(5);
+  });
+
+  it('never patches an intruder comment, however recently it was edited', async () => {
+    const { run, tracker } = trackerFor([
+      LOGIN,
+      comments(19),
+      ok(['api', '-X', 'PATCH', 'repos/acme/shop/issues/comments/5701', '--input', '-'], '{}'),
+    ]);
+    await tracker.writeState(19, task(19));
+    expect(run.calls[2]).toContain('repos/acme/shop/issues/comments/5701');
+  });
+
+  describe('when the PATCH is refused', () => {
+    const patch = (stderr: string): FakeGhStep => failing(['PATCH'], stderr);
+    const post = ok(['api', '-X', 'POST', 'repos/acme/shop/issues/12/comments', '--input', '-'], fixture('comment-created.json'));
+
+    it.each([
+      ['403', 'gh: Resource not accessible by integration (HTTP 403)'],
+      ['404', 'gh: Not Found (HTTP 404)'],
+    ])('posts a new state comment after HTTP %s', async (_code, stderr) => {
+      const state = task(12);
+      const { run, tracker } = trackerFor([LOGIN, comments(12), patch(stderr), post]);
+      await tracker.writeState(12, state);
+      expect(run.calls).toHaveLength(4);
+      expect(run.calls[2]).toContain('repos/acme/shop/issues/comments/5003');
+      expect(run.calls[3]).toContain('repos/acme/shop/issues/12/comments');
+      expect(body(run, 3)).toEqual({ body: renderStateComment(state) });
+    });
+
+    it('rejects, and posts nothing, on any other failure such as HTTP 500', async () => {
+      const { run, tracker } = trackerFor([LOGIN, comments(12), patch('gh: Server error (HTTP 500)'), post]);
+      await expect(tracker.writeState(12, task(12))).rejects.toThrow(/500/);
+      expect(run.calls).toHaveLength(3);
+    });
+
+    it('rejects when the fallback POST fails too', async () => {
+      const { tracker } = trackerFor([
+        LOGIN,
+        comments(12),
+        patch('gh: Resource not accessible by integration (HTTP 403)'),
+        failing(['POST'], 'gh: Forbidden (HTTP 403)'),
+      ]);
+      await expect(tracker.writeState(12, task(12))).rejects.toBeInstanceOf(GhError);
+    });
   });
 });
 
@@ -423,16 +533,86 @@ describe('GitHubTracker board', () => {
 
   it('syncFields adds an issue that is not on the board first', async () => {
     await seedFieldCache();
-    const writes = Array.from({ length: 9 }, () => updated);
+    // Nine non-empty fields are written; the empty Next step is cleared, as the item's values are unknown.
+    const writes = [...Array.from({ length: 6 }, () => updated), cleared, ...Array.from({ length: 3 }, () => updated)];
     const { run, tracker } = trackerFor([boardQuery('board-item-absent.json'), graphqlOk('board-item-add.json'), ...writes]);
     await tracker.syncFields(12, boardFields);
 
     expect(sent(run, 1).query).toContain('addProjectV2ItemById');
     expect(sent(run, 1).variables.input).toEqual({ projectId: 'PVT_kwDOBx7', contentId: 'I_kwDOBx12' });
-    // A fresh item has no values: every non-empty field is written, to the new item.
-    expect(run.calls).toHaveLength(2 + 9);
+    expect(run.calls).toHaveLength(2 + 10);
     expect(mutation(run, 2).variables.input).toMatchObject({ itemId: 'PVTI_lADOBx7_new' });
-    expect(mutation(run, 10).variables.input).toMatchObject({ fieldId: fieldId('Last update') });
+    expect(mutation(run, 11).variables.input).toMatchObject({ fieldId: fieldId('Last update') });
+  });
+
+  it('syncFields clears an empty field of an item whose values it did not read', async () => {
+    await seedFieldCache();
+    // GitHub hands back an item that may already carry values (a concurrent add); only the new
+    // item's id is known, so a stale value could be hiding behind each empty desired value.
+    const { run, tracker } = trackerFor([
+      boardQuery('board-item-absent.json'),
+      graphqlOk('board-item-add.json'),
+      ...Array.from({ length: 6 }, () => updated),
+      cleared,
+      ...Array.from({ length: 3 }, () => updated),
+    ]);
+    await tracker.syncFields(12, boardFields);
+    const clears = run.calls.map((_, i) => i).filter(i => i >= 2 && sent(run, i).query.includes('clearProjectV2ItemFieldValue'));
+    expect(clears).toHaveLength(1);
+    expect(mutation(run, clears[0]!).variables.input).toEqual({
+      projectId: 'PVT_kwDOBx7', itemId: 'PVTI_lADOBx7_new', fieldId: fieldId('Next step'),
+    });
+  });
+
+  it('syncFields does not clear an empty field of an item it read when the board has no value for it', async () => {
+    await seedFieldCache();
+    // board-item-12 has no Next step value and boardFields.nextStep is ''.
+    const { run, tracker } = trackerFor([boardQuery('board-item-12.json')]);
+    await tracker.syncFields(12, boardFields);
+    expect(run.calls).toHaveLength(1);
+  });
+
+  it('syncFields asks for pageInfo on the project items and on the field values', async () => {
+    await seedFieldCache();
+    const { run, tracker } = trackerFor([boardQuery('board-item-12.json')]);
+    await tracker.syncFields(12, boardFields);
+    expect(sent(run, 0).query.match(/pageInfo \{ hasNextPage \}/g)).toHaveLength(2);
+  });
+
+  it.each([
+    ['project items', (issue: any) => { issue.projectItems.pageInfo.hasNextPage = true; }, /more than 50 project/],
+    [
+      'field values',
+      (issue: any) => {
+        issue.projectItems.nodes.find((n: any) => n.project.id === 'PVT_kwDOBx7').fieldValues.pageInfo.hasNextPage = true;
+      },
+      /more than 50 field values/,
+    ],
+  ])('syncFields refuses to write when the %s were cut off', async (_what, cut, message) => {
+    await seedFieldCache();
+    const response = json<any>('board-item-12.json');
+    cut(response.data.repository.issue);
+    const { run, tracker } = trackerFor([ok(GRAPHQL, JSON.stringify(response))]);
+    await expect(tracker.syncFields(12, { ...boardFields, nextStep: 'x' })).rejects.toThrow(message);
+    expect(run.calls).toHaveLength(1);
+  });
+
+  it('syncFields ignores a cut-off list of field values on another project\'s item', async () => {
+    await seedFieldCache();
+    const response = json<any>('board-item-12.json');
+    response.data.repository.issue.projectItems.nodes.find((n: any) => n.project.id !== 'PVT_kwDOBx7')
+      .fieldValues.pageInfo.hasNextPage = true;
+    const { run, tracker } = trackerFor([ok(GRAPHQL, JSON.stringify(response))]);
+    await tracker.syncFields(12, boardFields);
+    expect(run.calls).toHaveLength(1);
+  });
+
+  it('addToBoard refuses to guess when the project items were cut off', async () => {
+    const response = json<any>('board-item-absent.json');
+    response.data.repository.issue.projectItems.pageInfo.hasNextPage = true;
+    const { run, tracker } = trackerFor([ok(GRAPHQL, JSON.stringify(response))]);
+    await expect(tracker.addToBoard(12)).rejects.toThrow(/more than 50 project/);
+    expect(run.calls).toHaveLength(1);
   });
 
   it('syncFields picks the item of the configured project, not another project with the same number', async () => {
@@ -675,14 +855,24 @@ describe('GitHubTracker deployments', () => {
 });
 
 describe('GitHubTracker repository', () => {
-  const compare = (name: string): FakeGhStep => fromFixture(['api', 'repos/acme/shop/compare/aaa...bbb'], name);
+  /** The compare call asks for one commit of the diff and prints only its status. */
+  const compareArgs = (base: string, head: string): string[] => [
+    'api', `repos/acme/shop/compare/${base}...${head}?per_page=1`, '--jq', '.status',
+  ];
+  const compare = (name: string): FakeGhStep => fromFixture(compareArgs('aaa', 'bbb'), name);
+
+  it('isAncestor asks for a single commit and only the status, not the whole diff', async () => {
+    const { run, tracker } = trackerFor([compare('compare-ahead.txt')]);
+    await tracker.isAncestor('aaa', 'bbb');
+    expect(run.calls[0]).toEqual(compareArgs('aaa', 'bbb'));
+  });
 
   it('isAncestor maps compare status', async () => {
     const { tracker } = trackerFor([
-      compare('compare-ahead.json'),
-      compare('compare-identical.json'),
-      compare('compare-behind.json'),
-      compare('compare-diverged.json'),
+      compare('compare-ahead.txt'),
+      compare('compare-identical.txt'),
+      compare('compare-behind.txt'),
+      compare('compare-diverged.txt'),
     ]);
     expect(await tracker.isAncestor('aaa', 'bbb')).toBe(true); // ahead
     expect(await tracker.isAncestor('aaa', 'bbb')).toBe(true); // identical
@@ -703,9 +893,9 @@ describe('GitHubTracker repository', () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01';
     const { run, tracker } = trackerFor([
       fromFixture(['api', 'repos/acme/shop/branches/main'], 'branch-main.json'),
-      fromFixture(['api', `repos/acme/shop/compare/${'1'.repeat(40)}...${head}`], 'compare-ahead.json'),
+      fromFixture(compareArgs('1'.repeat(40), head), 'compare-ahead.txt'),
       fromFixture(['api', 'repos/acme/shop/branches/main'], 'branch-main.json'),
-      fromFixture(['api', `repos/acme/shop/compare/${'2'.repeat(40)}...${head}`], 'compare-diverged.json'),
+      fromFixture(compareArgs('2'.repeat(40), head), 'compare-diverged.txt'),
     ]);
     expect(await tracker.isOnDefaultBranch('1'.repeat(40))).toBe(true);
     expect(await tracker.isOnDefaultBranch('2'.repeat(40))).toBe(false);

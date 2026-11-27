@@ -25,8 +25,11 @@ export interface FakeIssue {
   onBoard: boolean;
 }
 
-/** A comment on an issue or pull request, keyed by its number. */
-export type FakeComment = IssueComment & { issue: number };
+/**
+ * A comment on an issue or pull request, keyed by its number. `updatedAt` is GitHub's `updated_at`:
+ * the creation time until the comment is edited.
+ */
+export type FakeComment = IssueComment & { issue: number; updatedAt: string };
 /** A pull request linked to the task issue `issue` (the real tracker finds these by PR body). */
 export type FakePr = PrInfo & { issue: number };
 /** `target` and `description` record what `createDeployment` was given. */
@@ -45,7 +48,8 @@ const maxOf = (numbers: number[]): number => numbers.reduce((max, n) => Math.max
  * it directly. Task state is stored as the real hidden state comment, so the fake exercises the
  * same render/parse format as production. All timestamps come from one fake clock that advances
  * one minute per use, starting at 2026-01-01T00:01:00.000Z. As in production, only a state-marker
- * comment written by `login` or the Actions bot holds state; anyone else's is an ordinary comment.
+ * comment written by `login`, one of `owners` or the Actions bot (compared case-insensitively) holds
+ * state, and when several do, the one updated last is the state; anyone else's is an ordinary comment.
  */
 export class FakeTracker implements Tracker {
   issues: FakeIssue[] = [];
@@ -62,6 +66,8 @@ export class FakeTracker implements Tracker {
   writes = 0;
   /** Author of the comments the tracker itself posts. */
   login = 'sdlc-bot';
+  /** The configured owners; their state comments are trusted as well. */
+  owners: string[] = [];
 
   private pendingFailures = new Map<keyof Tracker, number>();
   private clock = 0;
@@ -96,9 +102,10 @@ export class FakeTracker implements Tracker {
   /** Adds a comment on an issue or PR, bypassing the `Tracker` interface; returns its id. */
   seedComment(
     thread: number,
-    comment: { body: string; author: string; createdAt?: string },
+    comment: { body: string; author: string; createdAt?: string; updatedAt?: string },
   ): string {
     const created = this.newComment(thread, comment.body, comment.author, comment.createdAt);
+    if (comment.updatedAt !== undefined) created.updatedAt = comment.updatedAt;
     this.comments.push(created);
     return created.id;
   }
@@ -119,19 +126,21 @@ export class FakeTracker implements Tracker {
     this.issue(issue).onBoard = true;
   }
 
-  /** Oldest issue first; an issue whose state comment is missing or corrupt is skipped. */
+  /** `sdlc:task` issues, oldest first; one whose state comment is missing or corrupt is skipped. */
   async listTrackedTasks(): Promise<TrackedTask[]> {
     this.begin('listTrackedTasks');
-    return this.sortedIssues().flatMap(issue => {
-      const stateComment = this.findStateComment(issue.number);
-      if (!stateComment) return [];
-      try {
-        return [this.toTrackedTask(issue, stateComment)];
-      } catch (error) {
-        if (error instanceof StateCommentError) return [];
-        throw error;
-      }
-    });
+    return this.sortedIssues()
+      .filter(issue => issue.labels.includes('sdlc:task'))
+      .flatMap(issue => {
+        const stateComment = this.findStateComment(issue.number);
+        if (!stateComment) return [];
+        try {
+          return [this.toTrackedTask(issue, stateComment)];
+        } catch (error) {
+          if (error instanceof StateCommentError) return [];
+          throw error;
+        }
+      });
   }
 
   /** `sdlc:task` issues without a parseable state comment, oldest issue first. */
@@ -165,8 +174,10 @@ export class FakeTracker implements Tracker {
     this.issue(issue);
     const body = renderStateComment(state);
     const existing = this.findStateComment(issue);
-    if (existing) existing.body = body;
-    else this.comments.push(this.newComment(issue, body, this.login));
+    if (existing) {
+      existing.body = body;
+      existing.updatedAt = this.tick();
+    } else this.comments.push(this.newComment(issue, body, this.login));
   }
 
   async postComment(issue: number, body: string): Promise<string> {
@@ -309,23 +320,39 @@ export class FakeTracker implements Tracker {
 
   private newComment(thread: number, body: string, author: string, createdAt?: string): FakeComment {
     const id = String(maxOf(this.comments.map(c => Number(c.id) || 0)) + 1);
+    const created = createdAt ?? this.tick();
     return {
       issue: thread,
       id,
       url: `https://github.test/issues/${thread}#issuecomment-${id}`,
       author,
       body,
-      createdAt: createdAt ?? this.tick(),
+      createdAt: created,
+      updatedAt: created,
     };
   }
 
+  /**
+   * The state comment: among the state-marker comments by a trusted author (`login`, an owner or
+   * the Actions bot, in any letter case), the one updated last; the newer id wins a tie.
+   */
   private findStateComment(issue: number): FakeComment | undefined {
-    return this.comments.find(
-      c =>
-        c.issue === issue &&
-        c.body.trimStart().startsWith(STATE_MARKER) &&
-        (c.author === this.login || c.author === ACTIONS_BOT),
-    );
+    const trusted = new Set([this.login, ...this.owners, ACTIONS_BOT].map(name => name.toLowerCase()));
+    return this.comments
+      .filter(
+        c =>
+          c.issue === issue &&
+          c.body.trimStart().startsWith(STATE_MARKER) &&
+          trusted.has(c.author.toLowerCase()),
+      )
+      .reduce<FakeComment | undefined>(
+        (newest, c) =>
+          !newest || Date.parse(c.updatedAt) > Date.parse(newest.updatedAt) ||
+          (Date.parse(c.updatedAt) === Date.parse(newest.updatedAt) && Number(c.id) > Number(newest.id))
+            ? c
+            : newest,
+        undefined,
+      );
   }
 
   private toTrackedTask(issue: FakeIssue, stateComment: FakeComment): TrackedTask {

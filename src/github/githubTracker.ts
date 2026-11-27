@@ -21,6 +21,8 @@ import { GhError, ghJson, graphql, type GhRunner } from './gh.js';
 
 /** The login GitHub Actions comments as; its state comments are trusted like the user's own. */
 const ACTIONS_BOT = 'github-actions[bot]';
+/** What `gh api` prints when GitHub refuses to edit a comment: not the author's, or no longer there. */
+const EDIT_REFUSED = /\bHTTP (?:403|404)\b/;
 /** `gh issue list` and `gh pr list` cap their output; reaching the cap means results may be missing. */
 const ISSUE_LIST_LIMIT = 500;
 const PR_LIST_LIMIT = 100;
@@ -64,6 +66,8 @@ interface RestComment {
   user: { login: string } | null;
   body: string | null;
   created_at: string;
+  /** Equals `created_at` until the comment is edited. */
+  updated_at?: string;
 }
 
 interface PrRow {
@@ -95,10 +99,12 @@ interface BoardQueryData {
     issue: {
       id: string;
       projectItems: {
+        pageInfo?: { hasNextPage: boolean };
         nodes: {
           id: string;
           project: { id: string };
           fieldValues: {
+            pageInfo?: { hasNextPage: boolean };
             nodes: { text?: string; optionId?: string; field?: { id?: string } }[];
           };
         }[];
@@ -193,13 +199,21 @@ function assertNotCut(count: number, limit: number, what: string): void {
 const isStateMarker = (comment: RestComment): boolean =>
   (comment.body ?? '').trimStart().startsWith(STATE_MARKER);
 
-/** The first state comment written by `login` or the Actions bot; anyone else's is ignored. */
-function stateCommentOf(comments: RestComment[], login: string | undefined): RestComment | undefined {
-  const trusted = (author: string): boolean => {
-    const name = author.toLowerCase();
-    return name === ACTIONS_BOT || (login !== undefined && name === login.toLowerCase());
-  };
-  return comments.find(c => isStateMarker(c) && trusted(c.user?.login ?? ''));
+const updatedAt = (comment: RestComment): number => Date.parse(comment.updated_at ?? comment.created_at);
+
+/**
+ * The state comment: of the state-marker comments written by a trusted author (lowercase logins in
+ * `trusted`), the one updated last, the newer id winning a tie. Anyone else's are ignored.
+ */
+function stateCommentOf(comments: RestComment[], trusted: ReadonlySet<string>): RestComment | undefined {
+  let newest: RestComment | undefined;
+  for (const c of comments) {
+    if (!isStateMarker(c) || !trusted.has((c.user?.login ?? '').toLowerCase())) continue;
+    if (!newest || updatedAt(c) > updatedAt(newest) || (updatedAt(c) === updatedAt(newest) && c.id > newest.id)) {
+      newest = c;
+    }
+  }
+  return newest;
 }
 
 function readState(comment: RestComment): TaskState {
@@ -283,12 +297,23 @@ export class GitHubTracker implements Tracker {
     return this.toTrackedTask(row, comment, readState(comment));
   }
 
-  /** Patches the state comment, or posts one when the issue has none (or only an untrusted one). */
+  /**
+   * Patches the state comment. Posts a new one when the issue has none (or only an untrusted one),
+   * or when GitHub refuses the edit with 403 or 404 (an owner's comment the token may not edit): the
+   * new comment is then the newest, so it is the one read from now on. Any other failure rejects.
+   */
   async writeState(issue: number, state: TaskState): Promise<void> {
     const body = renderStateComment(state);
     const existing = await this.findStateComment(issue);
-    if (existing) await this.send('PATCH', `repos/${this.repo}/issues/comments/${existing.id}`, { body });
-    else await this.send('POST', `repos/${this.repo}/issues/${issue}/comments`, { body });
+    if (existing) {
+      try {
+        await this.send('PATCH', `repos/${this.repo}/issues/comments/${existing.id}`, { body });
+        return;
+      } catch (error) {
+        if (!(error instanceof GhError && EDIT_REFUSED.test(error.stderr))) throw error;
+      }
+    }
+    await this.send('POST', `repos/${this.repo}/issues/${issue}/comments`, { body });
   }
 
   async postComment(issue: number, body: string): Promise<string> {
@@ -344,7 +369,8 @@ export class GitHubTracker implements Tracker {
     let map = await resolveFieldIds(this.run, this.cfg, idOptions);
     const board = await this.loadIssueBoard(issue);
     const itemId = board.item?.id ?? (await this.addItem(board.projectId, board.issueId));
-    const current = board.item?.values ?? new Map<string, string>();
+    // Values are only known for an item that was read; one just added may be an existing item.
+    const current = board.item?.values;
     const plan = (keys: (keyof BoardFields)[]): PlannedWrite[] =>
       this.planWrites(keys, map, fields, current, board.projectId, itemId);
 
@@ -418,14 +444,19 @@ export class GitHubTracker implements Tracker {
     return found.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id - a.id);
   }
 
-  /** `a` is an ancestor of `b` when comparing `a...b` shows `b` ahead of `a` or identical. */
+  /**
+   * `a` is an ancestor of `b` when comparing `a...b` shows `b` ahead of `a` or identical. Only the
+   * status is wanted, so the diff is cut to one commit and `--jq` keeps just that field.
+   */
   async isAncestor(ancestorSha: string, descendantSha: string): Promise<boolean> {
     try {
-      const result = await ghJson<{ status?: string } | undefined>(this.run, [
+      const status = await ghText(this.run, [
         'api',
-        `repos/${this.repo}/compare/${ancestorSha}...${descendantSha}`,
+        `repos/${this.repo}/compare/${ancestorSha}...${descendantSha}?per_page=1`,
+        '--jq',
+        '.status',
       ]);
-      return result?.status === 'ahead' || result?.status === 'identical';
+      return status.trim() === 'ahead' || status.trim() === 'identical';
     } catch (error) {
       // Unrelated histories are not an error, just not ancestry; any other failure is.
       if (error instanceof GhError && /no common ancestor/i.test(error.stderr)) return false;
@@ -486,9 +517,19 @@ export class GitHubTracker implements Tracker {
   }
 
   /**
+   * The logins whose state comments are trusted, lowercase: the authenticated user, the configured
+   * owners and the Actions bot. Owners and agents may run `sdlc` under different logins, and each
+   * must see the state the other wrote.
+   */
+  private async trustedAuthors(): Promise<ReadonlySet<string>> {
+    const login = await this.authenticatedLogin();
+    return new Set([...(login === undefined ? [] : [login]), ...this.cfg.owners, ACTIONS_BOT].map(n => n.toLowerCase()));
+  }
+
+  /**
    * The login the tool comments as, looked up once per instance. A token that may not read
-   * `/user` (the Actions `GITHUB_TOKEN`) yields `undefined`: only the Actions bot is then trusted.
-   * Any other failure is not remembered, so the next call looks again.
+   * `/user` (the Actions `GITHUB_TOKEN`) yields `undefined`: only the owners and the Actions bot
+   * are then trusted. Any other failure is not remembered, so the next call looks again.
    */
   private authenticatedLogin(): Promise<string | undefined> {
     if (!this.login) {
@@ -514,8 +555,8 @@ export class GitHubTracker implements Tracker {
   }
 
   private async findStateComment(issue: number): Promise<RestComment | undefined> {
-    const login = await this.authenticatedLogin();
-    return stateCommentOf(await this.fetchComments(issue), login);
+    const trusted = await this.trustedAuthors();
+    return stateCommentOf(await this.fetchComments(issue), trusted);
   }
 
   private toTrackedTask(row: IssueRow, comment: RestComment, state: TaskState): TrackedTask {
@@ -541,9 +582,9 @@ export class GitHubTracker implements Tracker {
     const untracked: UntrackedIssue[] = [];
     if (issues.length === 0) return { tracked, untracked };
 
-    const login = await this.authenticatedLogin();
+    const trusted = await this.trustedAuthors();
     const stateComments = await mapInChunks(issues, FETCH_CONCURRENCY, async row =>
-      stateCommentOf(await this.fetchComments(row.number), login),
+      stateCommentOf(await this.fetchComments(row.number), trusted),
     );
     issues.forEach((row, i) => {
       const comment = stateComments[i];
@@ -586,10 +627,12 @@ export class GitHubTracker implements Tracker {
           issue(number: $issue) {
             id
             projectItems(first: 50) {
+              pageInfo { hasNextPage }
               nodes {
                 id
                 project { id }
                 fieldValues(first: 50) {
+                  pageInfo { hasNextPage }
                   nodes {
                     ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { id } } }
                     ... on ProjectV2ItemFieldSingleSelectValue { optionId field { ... on ProjectV2FieldCommon { id } } }
@@ -608,8 +651,16 @@ export class GitHubTracker implements Tracker {
     const projectId = data.boardOwner?.projectV2?.id;
     if (!projectId) throw new BoardError(`Project #${number} not found for ${ownerType} "${owner}"`);
 
+    if (found.projectItems.pageInfo?.hasNextPage) {
+      throw new Error(
+        `Issue #${issue} is on more than 50 project boards; cannot tell whether it is on project #${number}`,
+      );
+    }
     const node = found.projectItems.nodes.find(n => n.project.id === projectId);
     if (!node) return { issueId: found.id, projectId };
+    if (node.fieldValues.pageInfo?.hasNextPage) {
+      throw new Error(`Issue #${issue} has more than 50 field values on project #${number}; some are not visible`);
+    }
     const values = new Map<string, string>();
     for (const value of node.fieldValues.nodes) {
       const fieldId = value.field?.id;
@@ -636,13 +687,16 @@ export class GitHubTracker implements Tracker {
 
   /**
    * The writes that bring `keys` in line with `fields`, given the item's `current` values. Throws
-   * before anything is written when a single-select value has no option on the board.
+   * before anything is written when a single-select value has no option on the board. A read item
+   * has no value where the board shows none, so an empty field needs no clear; when the item's
+   * values were not read (`current` is undefined) a stale one may be there, so every empty field
+   * is cleared.
    */
   private planWrites(
     keys: (keyof BoardFields)[],
     map: FieldMap,
     fields: BoardFields,
-    current: Map<string, string>,
+    current: Map<string, string> | undefined,
     projectId: string,
     itemId: string,
   ): PlannedWrite[] {
@@ -650,10 +704,12 @@ export class GitHubTracker implements Tracker {
     for (const key of keys) {
       const entry = map[key];
       const value = fields[key];
-      const have = current.get(entry.id);
+      const have = current?.get(entry.id);
       const target = { projectId, itemId, fieldId: entry.id };
       if (value === '') {
-        if (have !== undefined && have !== '') writes.push({ key, clear: true, input: target });
+        if (current === undefined || (have !== undefined && have !== '')) {
+          writes.push({ key, clear: true, input: target });
+        }
       } else if (entry.options) {
         const optionId = findOption(entry.options, value);
         if (optionId === undefined) {
