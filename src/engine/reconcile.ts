@@ -9,6 +9,7 @@ import {
   finalMergeTime,
   normalizeCommentUrl,
   parseApprovalCommands,
+  recordedRefs,
   validateCommentApproval,
   type ApprovalCommand,
 } from '../core/approvals.js';
@@ -299,14 +300,6 @@ function applyMerges(t: TaskRun, prs: readonly PrInfo[]): void {
       t.push('pr_merged', `PR #${pr.number} merged (${body.scope}) as ${pr.mergeSha}`);
     }
   }
-}
-
-/** Comment URLs already recorded as approvals in `state`. */
-function recordedRefs(state: TaskState): Set<string> {
-  const approvals = [state.outcomeApproval, ...Object.values(state.stages).map(stage => stage?.approval)];
-  return new Set(
-    approvals.filter((a): a is Approval => a !== undefined && a.ref !== '').map(a => normalizeCommentUrl(a.ref)),
-  );
 }
 
 function describeApproval(command: ApprovalCommand, approval: Approval, state: TaskState): string {

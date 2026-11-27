@@ -5,6 +5,7 @@ import {
   assertApprovalFits,
   finalMergeTime,
   normalizeCommentUrl,
+  recordedRefs,
   validateCommentApproval,
   type ApprovalAction,
 } from '../core/approvals.js';
@@ -137,6 +138,10 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
     const login = await trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin());
     approval = { source: 'unverified', ref: 'unverified', by: login ?? 'unknown', at: ctx.now() };
   } else {
+    // One comment is one decision: reconcile skips a recorded comment, and so must this.
+    if (recordedRefs(state).has(normalizeCommentUrl(commentUrl))) {
+      throw new Error(`comment ${commentUrl} is already recorded as an approval of #${issue}`);
+    }
     const comment = await findComment(ctx, issue, commentUrl, listPrs);
     const checked = await validateCommentApproval({
       comment,

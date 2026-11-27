@@ -969,6 +969,24 @@ describe('approve sources', () => {
     expect((await stateOf(h.tracker, issue)).status).toBe('paused');
   });
 
+  it('refuses a comment already recorded as another approval', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    const url = ownerComment(h.tracker, issue, AFTER);
+    const state = await stateOf(h.tracker, issue);
+    const intake = state.stages.intake ?? { revisions: [] };
+    await h.tracker.writeState(issue, {
+      ...state,
+      stages: { ...state.stages, intake: { ...intake, approval: { source: 'comment', ref: url, by: 'shop-owner', at: AFTER } } },
+    } as TaskState);
+    const writes = h.tracker.writes;
+
+    await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
+      `comment ${url} is already recorded as an approval of #${issue}`,
+    );
+    expect(h.tracker.writes).toBe(writes);
+  });
+
   it('refuses a comment that is not on the issue or its PRs', async () => {
     const h = setup();
     const issue = await pausedFeature(h);

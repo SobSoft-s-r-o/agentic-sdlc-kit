@@ -68,6 +68,14 @@ export const isOwner = includesLogin;
 export const normalizeCommentUrl = (url: string): string =>
   url.trim().replace(/\/pull\/(\d+)/, '/issues/$1').toLowerCase();
 
+/** Comment URLs already recorded as approvals in `state` (any stage, or the outcome), normalized. */
+export function recordedRefs(state: TaskState): Set<string> {
+  const approvals = [state.outcomeApproval, ...Object.values(state.stages).map(stage => stage?.approval)];
+  return new Set(
+    approvals.filter((a): a is Approval => a !== undefined && a.ref !== '').map(a => normalizeCommentUrl(a.ref)),
+  );
+}
+
 const isApprovalAction = (action: OwnerCommand['action']): action is ApprovalAction =>
   (APPROVAL_ACTIONS as readonly string[]).includes(action);
 
