@@ -1,7 +1,7 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../../src/commands/context.js';
 import { describeStatus, registerStatusCommand } from '../../src/commands/status.js';
 import { loadConfig, typeRegistry } from '../../src/config/schema.js';
@@ -53,6 +53,34 @@ async function run(h: Harness, ...args: string[]): Promise<void> {
   const program = new Command().exitOverride();
   registerStatusCommand(program, () => h.ctx);
   await program.parseAsync(['node', 'sdlc', 'status', ...args]);
+}
+
+/**
+ * Runs `sdlc status` with a context factory that fails as a broken config would, capturing what is
+ * printed to stdout and stderr (with no context, errors go straight to the process streams).
+ */
+async function runWithoutContext(...args: string[]): Promise<{ out: string[]; err: string[]; contexts: number }> {
+  const out: string[] = [];
+  const err: string[] = [];
+  let contexts = 0;
+  const capture = (into: string[]) => (chunk: string | Uint8Array): boolean => {
+    into.push(String(chunk).replace(/\n$/, ''));
+    return true;
+  };
+  const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(capture(out));
+  const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(capture(err));
+  try {
+    const program = new Command().exitOverride();
+    registerStatusCommand(program, () => {
+      contexts += 1;
+      throw new Error('config is broken');
+    });
+    await program.parseAsync(['node', 'sdlc', 'status', ...args]);
+  } finally {
+    stdout.mockRestore();
+    stderr.mockRestore();
+  }
+  return { out, err, contexts };
 }
 
 describe('sdlc status', () => {
@@ -131,9 +159,7 @@ describe('sdlc status', () => {
   it.each(['0', '-3', '1.5', '7days', 'abc', '', '1e3', '0x10', ' '])(
     'rejects --stale-days %j with an error and exit code 1',
     async value => {
-      const h = setup();
-
-      await run(h, '--stale-days', value);
+      const h = await runWithoutContext('--stale-days', value);
 
       expect(h.out).toEqual([]);
       expect(h.err).toHaveLength(1);
@@ -143,12 +169,27 @@ describe('sdlc status', () => {
     },
   );
 
+  it('checks --stale-days before building the context, so a bad value is named even with a broken config', async () => {
+    const result = await runWithoutContext('--stale-days', 'abc');
+
+    expect(result.contexts).toBe(0);
+    expect(result.out).toEqual([]);
+    expect(result.err).toEqual([expect.stringMatching(/--stale-days "abc".*positive integer/)]);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('still reports a broken config when --stale-days is valid', async () => {
+    const result = await runWithoutContext('--stale-days', '3');
+
+    expect(result.contexts).toBe(1);
+    expect(result.err).toEqual(['config is broken']);
+  });
+
   it('reports an invalid --stale-days as JSON with --json', async () => {
-    const h = setup();
+    const h = await runWithoutContext('--stale-days', '0', '--json');
 
-    await run(h, '--stale-days', '0', '--json');
-
-    expect(JSON.parse(h.out[0] as string)).toEqual({ error: expect.stringContaining('positive integer') });
+    expect(h.contexts).toBe(0);
+    expect(JSON.parse(h.out[0]!)).toEqual({ error: expect.stringContaining('positive integer') });
     expect(process.exitCode).toBe(1);
   });
 

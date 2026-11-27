@@ -72,12 +72,13 @@ export function registerStatusCommand(program: Command, makeContext: ContextFact
     .action(async (options: { staleDays: string; json?: boolean }) => {
       let staleDays = 0;
       await runCommand(
-        makeContext,
-        options,
-        ctx => {
+        // A bad --stale-days is reported before the config is read or anything is asked of GitHub.
+        () => {
           staleDays = parseStaleDays(options.staleDays);
-          return statusReport(ctx, { staleDays });
+          return makeContext();
         },
+        options,
+        ctx => statusReport(ctx, { staleDays }),
         report => describeStatus(report, staleDays),
       );
     });
