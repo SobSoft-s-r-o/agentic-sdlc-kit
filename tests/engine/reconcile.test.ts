@@ -748,6 +748,24 @@ describe('robustness', () => {
     expect(await stateOf(h, 1)).toMatchObject({ status: 'done', targets: [] });
   });
 
+  it('reports a state comment changed during the run as an error, and the next run converges', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(1, 'feature', { phase: 'implementation' }));
+    mergedPr(h, 1, 51, { body: 'Related to #1\nScope: final\nTargets: web' });
+    h.tracker.concurrentWriteBeforeNextWriteState(1);
+
+    const first = await reconcile(h.ctx, {});
+    expect(first.actions).toContainEqual({
+      issue: 1,
+      kind: 'error',
+      detail: 'writeState failed for #1: state of #1 changed since it was read; re-run (the state was not changed)',
+    });
+    expect((await stateOf(h, 1)).status).toBe('in_progress');
+
+    expect((await reconcile(h.ctx, {})).errors).toBe(0);
+    expect((await stateOf(h, 1)).status).toBe('awaiting_deployment');
+  });
+
   describe('final merge before handoff', () => {
     it('takes the targets from the PR body: awaiting deployment pending [web]', async () => {
       const h = setup();

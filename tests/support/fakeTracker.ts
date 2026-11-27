@@ -6,14 +6,16 @@ import {
 } from '../../src/core/stateComment.js';
 import type { BoardFields } from '../../src/core/projection.js';
 import type { TaskState } from '../../src/core/types.js';
-import type {
-  DeploymentInfo,
-  IssueComment,
-  PrInfo,
-  ReleaseInfo,
-  TrackedTask,
-  Tracker,
-  UntrackedIssue,
+import {
+  StateChangedError,
+  type DeploymentInfo,
+  type ExpectedStateComment,
+  type IssueComment,
+  type PrInfo,
+  type ReleaseInfo,
+  type TrackedTask,
+  type Tracker,
+  type UntrackedIssue,
 } from '../../src/tracker/types.js';
 
 export interface FakeIssue {
@@ -85,7 +87,16 @@ export class FakeTracker implements Tracker {
   agents: string[] = [];
 
   private pendingFailures = new Map<keyof Tracker, number>();
+  private concurrentWrites = new Set<number>();
   private clock = 0;
+
+  /**
+   * Makes the next `writeState` on `issue` find its state comment edited by someone else since it
+   * was read (its `updatedAt` moves on), as a concurrent writer would leave it.
+   */
+  concurrentWriteBeforeNextWriteState(issue: number): void {
+    this.concurrentWrites.add(issue);
+  }
 
   /** Makes the next call of `method` (once per `failNext` call) reject, without applying it. */
   failNext(method: keyof Tracker): void {
@@ -190,11 +201,15 @@ export class FakeTracker implements Tracker {
     return this.toTrackedTask(found, stateComment);
   }
 
-  async writeState(issue: number, state: TaskState): Promise<void> {
+  async writeState(issue: number, state: TaskState, expected?: ExpectedStateComment): Promise<void> {
     this.begin('writeState', true);
     this.issue(issue);
     const body = renderStateComment(state);
     const existing = this.findStateComment(issue);
+    if (existing && this.concurrentWrites.delete(issue)) existing.updatedAt = this.tick();
+    if (expected && (!existing || existing.id !== expected.id || existing.updatedAt !== expected.updatedAt)) {
+      throw new StateChangedError(issue);
+    }
     if (existing) {
       existing.body = body;
       existing.updatedAt = this.tick();
@@ -391,6 +406,7 @@ export class FakeTracker implements Tracker {
       issueOpen: issue.open,
       state,
       stateCommentId: stateComment.id,
+      stateCommentUpdatedAt: stateComment.updatedAt,
     };
   }
 }

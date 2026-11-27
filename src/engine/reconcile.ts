@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import type { CommandContext } from '../commands/context.js';
-import { fetchTask, trackerStep } from '../commands/context.js';
+import { expectedOf, fetchTask, trackerStep } from '../commands/context.js';
 import { targetByName, typeRegistry } from '../config/schema.js';
 import {
   approvalEvent,
@@ -109,7 +109,7 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
     isOnDefaultBranch: sha => inner.isOnDefaultBranch(sha),
     createIssue: write('createIssue', (title, body, labels) => inner.createIssue(title, body, labels)),
     addToBoard: write('addToBoard', issue => inner.addToBoard(issue)),
-    writeState: write('writeState', (issue, state) => inner.writeState(issue, state)),
+    writeState: write('writeState', (issue, state, expected) => inner.writeState(issue, state, expected)),
     postComment: write('postComment', (issue, body) => inner.postComment(issue, body)),
     setIssueOpen: write('setIssueOpen', (issue, open, reason) => inner.setIssueOpen(issue, open, reason)),
     setLabels: write('setLabels', (issue, add, remove) => inner.setLabels(issue, add, remove)),
@@ -468,7 +468,7 @@ async function project(t: TaskRun, reportPosted: boolean): Promise<void> {
   const { issue } = task;
   if (!isDeepStrictEqual(task.state, state) && !dryRun) {
     const hint = reportPosted ? 'the report was posted; the state was not changed' : 'the state was not changed';
-    await trackerStep('writeState', issue, () => ctx.tracker.writeState(issue, state), hint);
+    await trackerStep('writeState', issue, () => ctx.tracker.writeState(issue, state, expectedOf(task)), hint);
   }
 
   const previous = projectTask(task.state, t.type);

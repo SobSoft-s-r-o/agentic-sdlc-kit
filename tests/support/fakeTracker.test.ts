@@ -149,6 +149,7 @@ describe('FakeTracker state', () => {
       issueOpen: true,
       state,
       stateCommentId: tracker.comments[0]!.id,
+      stateCommentUpdatedAt: tracker.comments[0]!.updatedAt,
     });
     // Reads return copies, not live references.
     got.state.summary = 'mutated';
@@ -164,6 +165,27 @@ describe('FakeTracker state', () => {
     expect(tracker.comments).toHaveLength(1);
     expect(tracker.comments[0]!.id).toBe(id);
     expect((await tracker.getTask(number)).state.status).toBe('in_progress');
+  });
+
+  it('refuses a write when the state comment changed since it was read, and writes nothing', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('T', '', ['sdlc:task']);
+    await tracker.writeState(number, task(number));
+    const read = await tracker.getTask(number);
+    const expected = { id: read.stateCommentId, updatedAt: read.stateCommentUpdatedAt };
+
+    tracker.concurrentWriteBeforeNextWriteState(number);
+    await expect(tracker.writeState(number, { ...task(number), summary: 'Lost?' }, expected)).rejects.toThrow(
+      `state of #${number} changed since it was read; re-run`,
+    );
+    expect((await tracker.getTask(number)).state.summary).toBe('Do the thing');
+
+    const fresh = await tracker.getTask(number);
+    await tracker.writeState(number, { ...task(number), summary: 'Now' }, {
+      id: fresh.stateCommentId,
+      updatedAt: fresh.stateCommentUpdatedAt,
+    });
+    expect((await tracker.getTask(number)).state.summary).toBe('Now');
   });
 
   it('lists only issues that carry a state comment, in issue order', async () => {

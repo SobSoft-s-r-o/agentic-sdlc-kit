@@ -8,6 +8,22 @@ export interface TrackedTask {
   issueOpen: boolean;
   state: TaskState;
   stateCommentId: string;
+  /** The state comment's `updated_at` when read: `writeState` refuses to write over a newer one. */
+  stateCommentUpdatedAt: string;
+}
+
+/** The state comment a write expects to replace, as it was read. */
+export interface ExpectedStateComment {
+  id: string;
+  updatedAt: string;
+}
+
+/** The state comment changed between reading and writing it: re-running reads the new state. */
+export class StateChangedError extends Error {
+  constructor(issue: number) {
+    super(`state of #${issue} changed since it was read; re-run`);
+    this.name = 'StateChangedError';
+  }
 }
 
 /** A `sdlc:task` issue the tool cannot read state from; `reason` says why, for the user. */
@@ -81,8 +97,12 @@ export interface Tracker {
   listUntracked(): Promise<UntrackedIssue[]>;
   /** Throws when the issue has no state comment, and `StateCommentError` when it is corrupt. */
   getTask(issue: number): Promise<TrackedTask>;
-  /** Updates the state comment in place, or posts one when there is none (or an edit is refused). */
-  writeState(issue: number, state: TaskState): Promise<void>;
+  /**
+   * Updates the state comment in place, or posts one when there is none (or an edit is refused).
+   * With `expected`, the state comment is read again first and `StateChangedError` is thrown,
+   * writing nothing, unless it is still that comment with that `updated_at`.
+   */
+  writeState(issue: number, state: TaskState, expected?: ExpectedStateComment): Promise<void>;
   /** Posts a comment and returns its id. */
   postComment(issue: number, body: string): Promise<string>;
   /**

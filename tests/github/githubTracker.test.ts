@@ -208,6 +208,7 @@ describe('GitHubTracker tracked tasks', () => {
       issue: 12,
       issueOpen: true,
       stateCommentId: '5003',
+      stateCommentUpdatedAt: '2026-11-19T09:00:00Z',
       state: { issue: 12, status: 'in_progress' },
     });
     expect(run.calls).toHaveLength(3);
@@ -346,6 +347,37 @@ describe('GitHubTracker.writeState', () => {
     ]);
     await tracker.writeState(19, task(19));
     expect(run.calls[2]).toContain('repos/acme/shop/issues/comments/5701');
+  });
+
+  it('patches when the state comment is still the one that was read', async () => {
+    const { run, tracker } = trackerFor([
+      LOGIN,
+      comments(12),
+      ok(['api', '-X', 'PATCH', 'repos/acme/shop/issues/comments/5003', '--input', '-'], '{}'),
+    ]);
+    await tracker.writeState(12, task(12), { id: '5003', updatedAt: '2026-11-19T09:00:00Z' });
+    expect(run.calls).toHaveLength(3);
+  });
+
+  it('refuses, and writes nothing, when the state comment changed since it was read', async () => {
+    for (const expected of [
+      { id: '5003', updatedAt: '2026-11-19T08:59:00Z' },
+      { id: '4999', updatedAt: '2026-11-19T09:00:00Z' },
+    ]) {
+      const { run, tracker } = trackerFor([LOGIN, comments(12)]);
+      await expect(tracker.writeState(12, task(12), expected)).rejects.toThrow(
+        'state of #12 changed since it was read; re-run',
+      );
+      expect(run.calls).toHaveLength(2);
+    }
+  });
+
+  it('refuses when a state comment was expected and none is left', async () => {
+    const { run, tracker } = trackerFor([LOGIN, comments(14)]);
+    await expect(tracker.writeState(14, task(14), { id: '1', updatedAt: '2026-11-19T09:00:00Z' })).rejects.toThrow(
+      'state of #14 changed since it was read; re-run',
+    );
+    expect(run.calls).toHaveLength(2);
   });
 
   describe('when the PATCH is refused', () => {

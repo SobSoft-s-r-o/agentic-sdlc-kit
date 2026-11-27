@@ -508,6 +508,21 @@ describe('taskSetType', () => {
   });
 });
 
+describe('concurrent writes', () => {
+  it('refuses to overwrite a state comment that changed since the command read it', async () => {
+    const h = setup();
+    const issue = await newTask(h);
+    h.tracker.concurrentWriteBeforeNextWriteState(issue);
+    await expect(taskCheckpoint(h.ctx, issue, { current: 'Mine' })).rejects.toThrow(
+      `writeState failed for #${issue}: state of #${issue} changed since it was read; re-run`,
+    );
+    expect((await stateOf(h.tracker, issue)).currentStep).toBe('');
+
+    await taskCheckpoint(h.ctx, issue, { current: 'Mine' });
+    expect((await stateOf(h.tracker, issue)).currentStep).toBe('Mine');
+  });
+});
+
 describe('taskCheckpoint and taskReopen', () => {
   it('records the step, agent, who is waited on and a blocked status on the board', async () => {
     const h = setup();

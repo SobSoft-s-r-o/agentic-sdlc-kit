@@ -8,14 +8,16 @@ import {
   StateCommentError,
 } from '../core/stateComment.js';
 import type { TaskState } from '../core/types.js';
-import type {
-  DeploymentInfo,
-  IssueComment,
-  PrInfo,
-  ReleaseInfo,
-  TrackedTask,
-  Tracker,
-  UntrackedIssue,
+import {
+  StateChangedError,
+  type DeploymentInfo,
+  type ExpectedStateComment,
+  type IssueComment,
+  type PrInfo,
+  type ReleaseInfo,
+  type TrackedTask,
+  type Tracker,
+  type UntrackedIssue,
 } from '../tracker/types.js';
 import { trustedLogins } from '../core/trust.js';
 import { BoardError, FIELD_NAMES, resolveFieldIds, type FieldMap } from './board.js';
@@ -322,10 +324,18 @@ export class GitHubTracker implements Tracker {
    * Patches the state comment. Posts a new one when the issue has none (or only an untrusted one),
    * or when GitHub refuses the edit with 403 or 404 (an owner's comment the token may not edit): the
    * new comment is then the newest, so it is the one read from now on. Any other failure rejects.
+   * With `expected`, a state comment that is not the one read (another id, or edited since) is a
+   * `StateChangedError` and nothing is written.
    */
-  async writeState(issue: number, state: TaskState): Promise<void> {
+  async writeState(issue: number, state: TaskState, expected?: ExpectedStateComment): Promise<void> {
     const body = renderStateComment(state);
     const existing = await this.findStateComment(issue);
+    if (
+      expected &&
+      (!existing || String(existing.id) !== expected.id || updatedAt(existing) !== Date.parse(expected.updatedAt))
+    ) {
+      throw new StateChangedError(issue);
+    }
     if (existing) {
       try {
         await this.send('PATCH', `repos/${this.repo}/issues/comments/${existing.id}`, { body });
@@ -630,6 +640,7 @@ export class GitHubTracker implements Tracker {
       issueOpen: row.state.toUpperCase() === 'OPEN',
       state,
       stateCommentId: String(comment.id),
+      stateCommentUpdatedAt: comment.updated_at ?? comment.created_at,
     };
   }
 

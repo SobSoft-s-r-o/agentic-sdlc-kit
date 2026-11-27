@@ -3,7 +3,7 @@ import { displayPhase, projectTask, STATUS_LABELS, WAITING_ON_LABELS } from '../
 import { applyEvent } from '../core/stateMachine.js';
 import { ConfigError } from '../core/taskTypes.js';
 import type { EvidenceKind, Phase, TaskEvent, TaskState, TaskTypeDef, WaitingOn } from '../core/types.js';
-import type { TrackedTask, Tracker } from '../tracker/types.js';
+import type { ExpectedStateComment, TrackedTask, Tracker } from '../tracker/types.js';
 
 export interface CommandContext {
   tracker: Tracker;
@@ -86,7 +86,8 @@ export async function loadTask(ctx: CommandContext, issue: number): Promise<Load
 }
 
 /**
- * Writes `state`, then projects it: board fields, then the issue's open/closed state. The issue is
+ * Writes `state` (over the state comment `options.expected` when given, refusing if it changed since
+ * it was read), then projects it: board fields, then the issue's open/closed state. The issue is
  * only touched when it is not already in the projected state. The first failing step is rethrown
  * by name; once the state comment is written, the message says reconcile can finish the rest.
  */
@@ -96,11 +97,16 @@ export async function saveAndSync(
   state: TaskState,
   type: TaskTypeDef,
   issueOpen: boolean,
-  options: { writeHint?: string } = {},
+  options: { writeHint?: string; expected?: ExpectedStateComment } = {},
 ): Promise<void> {
   const projection = projectTask(state, type);
   const saved = `the state of #${issue} is saved; run "sdlc reconcile" to finish syncing`;
-  await trackerStep('writeState', issue, () => ctx.tracker.writeState(issue, state), options.writeHint);
+  await trackerStep(
+    'writeState',
+    issue,
+    () => ctx.tracker.writeState(issue, state, options.expected),
+    options.writeHint,
+  );
   await trackerStep('syncFields', issue, () => ctx.tracker.syncFields(issue, projection.fields), saved);
   if (projection.issueOpen !== issueOpen) {
     await trackerStep(
@@ -122,6 +128,12 @@ export interface CommitOptions {
   writeHint?: string;
 }
 
+/** The state comment of `task` as it was read, for `writeState` to check it is still the one. */
+export const expectedOf = (task: TrackedTask): ExpectedStateComment => ({
+  id: task.stateCommentId,
+  updatedAt: task.stateCommentUpdatedAt,
+});
+
 /** Saves `next` for an already loaded task: `beforeWrite`, then `writeState` -> `syncFields` -> issue open/close. */
 export async function persist(
   ctx: CommandContext,
@@ -132,6 +144,7 @@ export async function persist(
   await options.beforeWrite?.(next, loaded.task.state);
   await saveAndSync(ctx, loaded.task.issue, next, loaded.type, loaded.task.issueOpen, {
     writeHint: options.writeHint,
+    expected: expectedOf(loaded.task),
   });
   return next;
 }
