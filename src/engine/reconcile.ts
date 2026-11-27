@@ -122,8 +122,9 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
  * line with the tasks. Per task, in order:
  * 1. a task whose type is not enabled is reported `skipped_unknown_type` and left alone;
  * 2. each PR merged into the default branch and not yet recorded with its merge commit becomes
- *    `pr_merged`, with the scope from its body (an unrecognised `Scope:` value is an `error` and
- *    the merge is not recorded, so it is picked up once the body is fixed);
+ *    `pr_merged`, with the scope and (for a type that deploys) the targets from its body. An
+ *    unrecognised `Scope:` value, an unknown target, or a final merge of a deploy task that still
+ *    has no targets is an `error` and the merge is not recorded, so it is picked up once fixed;
  * 3. owner commands in comments on the issue and its PRs, oldest first, become `stage_approved`
  *    (for the phase the task is paused in, waiting on the owner), `accepted`, `confirmed_ran` or
  *    `cancelled`, checked by `validateCommentApproval` like `sdlc approve`. A comment already
@@ -253,7 +254,13 @@ function applyOrReport(t: TaskRun, event: TaskEvent, at: string): boolean {
   }
 }
 
-/** Step 2: merged PRs, in merge order. */
+/** Whether the task type deploys to targets: its PRs' `Targets:` lines count. */
+const usesTargets = (type: TaskTypeDef): boolean => type.endsOn === 'deploy' || type.targetsRequired;
+
+/**
+ * Step 2: merged PRs, in merge order. For a type that deploys to targets, the PR's `Targets:` are
+ * added to the task's targets; an unknown target is an `error` and the merge is not recorded.
+ */
 function applyMerges(t: TaskRun, prs: readonly PrInfo[]): void {
   const merged = prs
     .filter(pr => pr.merged && pr.mergeSha && pr.baseRef === t.ctx.cfg.github.defaultBranch)
@@ -266,7 +273,22 @@ function applyMerges(t: TaskRun, prs: readonly PrInfo[]): void {
       t.push('error', `unrecognised Scope value on PR #${pr.number}`);
       continue;
     }
-    const event: TaskEvent = { kind: 'pr_merged', pr: pr.number, scope: body.scope, mergeSha: pr.mergeSha as string };
+    let targets: string[] = [];
+    if (usesTargets(t.type)) {
+      try {
+        targets = body.targets.map(name => targetByName(t.ctx.cfg, name).name);
+      } catch (error) {
+        t.push('error', `PR #${pr.number}: ${reasonOf(error)}`);
+        continue;
+      }
+    }
+    const event: TaskEvent = {
+      kind: 'pr_merged',
+      pr: pr.number,
+      scope: body.scope,
+      mergeSha: pr.mergeSha as string,
+      targets,
+    };
     if (applyOrReport(t, event, pr.mergedAt ?? t.ctx.now())) {
       t.push('pr_merged', `PR #${pr.number} merged (${body.scope}) as ${pr.mergeSha}`);
     }

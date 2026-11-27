@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../../src/commands/context.js';
 import { deployRecord } from '../../src/commands/deploy.js';
 import { registerReconcileCommand } from '../../src/commands/reconcile.js';
+import { reviewHandoff } from '../../src/commands/review.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
 import { STATE_MARKER } from '../../src/core/stateComment.js';
 import { newTask } from '../../src/core/stateMachine.js';
@@ -719,16 +720,84 @@ describe('robustness', () => {
     expect((await stateOf(h, 2)).status).toBe('done');
   });
 
-  it('records the merge of a deploy task without targets, then reports it as an error every run', async () => {
+  it('ignores a Targets: line on the PR of a type that does not deploy', async () => {
     const h = setup();
-    h.tracker.seedTask(inReview(1, 'feature', { targets: [] }));
-    mergedPr(h, 1, 51);
-
+    h.tracker.seedTask(inReview(1, 'tooling'));
+    mergedPr(h, 1, 51, { body: 'Related to #1\nTargets: mobile' });
     const result = await reconcile(h.ctx, {});
-    expect(kinds(result.actions)).toEqual(['pr_merged', 'error', 'fields_synced']);
-    expect(result.actions[1]).toEqual({ issue: 1, kind: 'error', detail: 'no targets declared' });
-    expect(await stateOf(h, 1)).toMatchObject({ status: 'awaiting_deployment', pendingTargets: [] });
-    expect((await reconcile(h.ctx, {})).errors).toBe(1);
+    expect(result.errors).toBe(0);
+    expect(await stateOf(h, 1)).toMatchObject({ status: 'done', targets: [] });
+  });
+
+  describe('final merge before handoff', () => {
+    it('takes the targets from the PR body: awaiting deployment pending [web]', async () => {
+      const h = setup();
+      h.tracker.seedTask(task(1, 'feature', { phase: 'implementation' }));
+      mergedPr(h, 1, 51, { body: 'Related to #1\nScope: final\nTargets: web' });
+
+      const result = await reconcile(h.ctx, {});
+
+      expect(result.errors).toBe(0);
+      expect(kinds(result.actions)).toContain('pr_merged');
+      expect(await stateOf(h, 1)).toMatchObject({
+        status: 'awaiting_deployment',
+        targets: ['web'],
+        pendingTargets: ['web'],
+        prs: [{ number: 51, scope: 'final', mergeSha: A }],
+      });
+    });
+
+    it('without targets: an error every run, the merge not recorded, until review handoff --targets', async () => {
+      const h = setup();
+      h.tracker.seedTask(task(1, 'feature', { phase: 'implementation' }));
+      mergedPr(h, 1, 51);
+
+      const first = await reconcile(h.ctx, {});
+      expect(first.actions).toEqual([
+        {
+          issue: 1,
+          kind: 'error',
+          detail: 'pr_merged: no targets declared on PR #51; add a Targets: line or run review handoff --targets',
+        },
+      ]);
+      expect(await stateOf(h, 1)).toMatchObject({ status: 'in_progress', prs: [] });
+      expect((await reconcile(h.ctx, {})).errors).toBe(1);
+
+      const handedOff = await reviewHandoff(h.ctx, 1, { pr: 51, targets: ['web'] });
+      expect(handedOff).toMatchObject({ status: 'in_review', targets: ['web'] });
+
+      const after = await reconcile(h.ctx, {});
+      expect(after.errors).toBe(0);
+      expect(await stateOf(h, 1)).toMatchObject({
+        status: 'awaiting_deployment',
+        pendingTargets: ['web'],
+        prs: [{ number: 51, scope: 'final', mergeSha: A }],
+      });
+    });
+
+    it('lets a task already in review declare its targets with review handoff --targets', async () => {
+      const h = setup();
+      h.tracker.seedTask(inReview(1, 'feature', { targets: [] }));
+      mergedPr(h, 1, 51);
+      expect((await reconcile(h.ctx, {})).errors).toBe(1);
+
+      await reviewHandoff(h.ctx, 1, { pr: 51, targets: ['web'] });
+      await reconcile(h.ctx, {});
+      expect(await stateOf(h, 1)).toMatchObject({ status: 'awaiting_deployment', pendingTargets: ['web'] });
+    });
+
+    it('refuses an unknown target on the PR and does not record the merge', async () => {
+      const h = setup();
+      h.tracker.seedTask(task(1, 'feature', { phase: 'implementation' }));
+      mergedPr(h, 1, 51, { body: 'Related to #1\nTargets: mobile' });
+
+      const result = await reconcile(h.ctx, {});
+
+      expect(result.actions).toEqual([
+        { issue: 1, kind: 'error', detail: 'PR #51: Unknown target "mobile" (configured targets: web, api)' },
+      ]);
+      expect((await stateOf(h, 1)).prs).toEqual([]);
+    });
   });
 
   it('reports untracked sdlc:task issues in a full run only', async () => {

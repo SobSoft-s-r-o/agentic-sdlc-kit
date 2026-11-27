@@ -94,7 +94,14 @@ export type TaskEvent =
   | { kind: 'stage_approved'; phase: Phase; approval: Approval }
   | { kind: 'evidence_added'; evidenceKind: EvidenceKind; ref: string }
   | { kind: 'review_handoff'; pr: number; scope: 'partial' | 'final'; targets: string[] }
-  | { kind: 'pr_merged'; pr: number; scope: 'partial' | 'final'; mergeSha: string }
+  | {
+      kind: 'pr_merged';
+      pr: number;
+      scope: 'partial' | 'final';
+      mergeSha: string;
+      /** Targets declared on the PR (its `Targets:` line); added to the task's targets. */
+      targets?: string[];
+    }
   | { kind: 'targets_deployed'; targets: string[]; deploymentUrls: string[] }
   | { kind: 'accepted'; approval: Approval }
   | { kind: 'confirmed_ran'; approval: Approval }

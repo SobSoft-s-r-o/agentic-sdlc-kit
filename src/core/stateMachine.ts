@@ -215,6 +215,7 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
 
     case 'pr_merged': {
       upsertPr(next, event.pr, { scope: event.scope, mergeSha: event.mergeSha });
+      next.targets = union(next.targets, event.targets ?? []);
       if (event.scope === 'final') next.finalMergedAt = now;
       // While awaiting deployment a merge is only recorded: it must not reset pending targets.
       if (event.scope === 'partial' || state.status === 'awaiting_deployment') break;
@@ -226,6 +227,12 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
           complete(next);
           break;
         case 'deploy':
+          // Nothing could ever complete the task: refuse, so the merge is picked up once targets exist.
+          if (next.targets.length === 0) {
+            throw new TransitionError(
+              `no targets declared on PR #${event.pr}; add a Targets: line or run review handoff --targets`,
+            );
+          }
           next.status = 'awaiting_deployment';
           next.pendingTargets = [...next.targets];
           next.waitingOn = 'external';

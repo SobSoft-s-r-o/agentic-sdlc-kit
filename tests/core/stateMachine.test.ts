@@ -449,7 +449,12 @@ describe('pr_merged', () => {
     const feature = typeDef('feature');
     const partial = applyEvent(fresh('feature'), { kind: 'pr_merged', pr: 1, scope: 'partial', mergeSha: 'a' }, feature, ts(1));
     expect(partial.finalMergedAt).toBeUndefined();
-    const final = applyEvent(partial, { kind: 'pr_merged', pr: 2, scope: 'final', mergeSha: 'b' }, feature, ts(2));
+    const final = applyEvent(
+      partial,
+      { kind: 'pr_merged', pr: 2, scope: 'final', mergeSha: 'b', targets: ['web'] },
+      feature,
+      ts(2),
+    );
     expect(final.finalMergedAt).toBe(ts(2));
   });
 
@@ -478,8 +483,31 @@ describe('pr_merged', () => {
     const next = applyEvent(fresh('production-data'), { kind: 'pr_merged', pr: 6, scope: 'final', mergeSha: 's' }, prodData, ts(2));
     expect(next.resultPublishedAt).toBeUndefined();
     const feature = typeDef('feature');
-    const merged = applyEvent(fresh('feature'), { kind: 'pr_merged', pr: 6, scope: 'final', mergeSha: 's' }, feature, ts(2));
+    const merged = applyEvent(
+      fresh('feature'),
+      { kind: 'pr_merged', pr: 6, scope: 'final', mergeSha: 's', targets: ['web'] },
+      feature,
+      ts(2),
+    );
     expect(merged.resultPublishedAt).toBeUndefined();
+  });
+
+  it('unions the targets declared on the merged PR into the task targets', () => {
+    const feature = typeDef('feature');
+    const next = applyEvent(
+      featureInReview(['web']),
+      { kind: 'pr_merged', pr: 11, scope: 'final', mergeSha: 's', targets: ['api', 'web'] },
+      feature,
+      ts(20),
+    );
+    expect(next).toMatchObject({ status: 'awaiting_deployment', targets: ['web', 'api'], pendingTargets: ['web', 'api'] });
+  });
+
+  it('refuses a final merge that would await deployment with no targets', () => {
+    const feature = typeDef('feature');
+    expect(() =>
+      applyEvent(fresh('feature'), { kind: 'pr_merged', pr: 6, scope: 'final', mergeSha: 's' }, feature, ts(2)),
+    ).toThrow(new TransitionError('no targets declared on PR #6; add a Targets: line or run review handoff --targets'));
   });
 
   it('records a merge for a PR that was never handed off', () => {
