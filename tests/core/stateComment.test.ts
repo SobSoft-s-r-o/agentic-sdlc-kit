@@ -136,6 +136,43 @@ describe('parseStateComment', () => {
     expect(() => parseStateComment(body)).toThrow(StateCommentError);
   });
 
+  it('throws StateCommentError naming each mistyped or missing field', () => {
+    const cases: Array<[string, unknown]> = [
+      ['status', 5],
+      ['status', undefined],
+      ['phase', null],
+      ['phase', undefined],
+      ['type', 7],
+      ['type', undefined],
+      ['updatedAt', 1_700_000_000],
+      ['updatedAt', undefined],
+      ['targets', 'api'],
+      ['targets', undefined],
+      ['pendingTargets', { api: true }],
+      ['pendingTargets', undefined],
+      ['prs', 'none'],
+      ['prs', undefined],
+      ['evidence', null],
+      ['evidence', undefined],
+      ['stages', []],
+      ['stages', 'planning'],
+      ['stages', null],
+      ['stages', undefined],
+    ];
+    for (const [field, value] of cases) {
+      const label = `${field}=${String(value)}`;
+      const body = renderStateComment({ ...base(), [field]: value } as unknown as TaskState);
+      expect(() => parseStateComment(body), label).toThrow(StateCommentError);
+      expect(() => parseStateComment(body), label).toThrow(`"${field}"`);
+    }
+  });
+
+  it('accepts a state whose optional fields are absent', () => {
+    const state = base();
+    expect(state.outcome).toBeUndefined();
+    expect(parseStateComment(renderStateComment(state))).toStrictEqual(state);
+  });
+
   it('names the error class', () => {
     expect.assertions(2);
     try {

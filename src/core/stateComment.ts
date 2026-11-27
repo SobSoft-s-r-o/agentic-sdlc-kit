@@ -8,6 +8,10 @@ const FOOTER = '_Managed by agentic-sdlc-kit. Do not edit._';
 /** Matches the first ```json fence; GitHub may store edited comments with CRLF line endings. */
 const JSON_FENCE = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/m;
 
+/** Fields the rest of the tool reads without checking; a hand-edited comment must not break it later. */
+const STRING_FIELDS = ['status', 'phase', 'type', 'updatedAt'] as const;
+const ARRAY_FIELDS = ['targets', 'pendingTargets', 'prs', 'evidence'] as const;
+
 export class StateCommentError extends Error {
   constructor(message: string) {
     super(message);
@@ -26,7 +30,9 @@ export function renderStateComment(state: TaskState): string {
 /**
  * Reads the task state back from a comment body. Returns `null` when the body does not start with
  * the marker (an ordinary comment); throws `StateCommentError` when it does but the state is
- * unusable: no JSON fence, malformed JSON, or an unsupported schema or issue.
+ * unusable: no JSON fence, malformed JSON, an unsupported schema, or a missing or mistyped
+ * `issue`, `status`, `phase`, `type`, `updatedAt`, `targets`, `pendingTargets`, `prs`,
+ * `evidence` or `stages` (the error names the field).
  */
 export function parseStateComment(body: string): TaskState | null {
   const start = body.trimStart();
@@ -45,12 +51,26 @@ export function parseStateComment(body: string): TaskState | null {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new StateCommentError('state comment JSON is not an object');
   }
-  const candidate = parsed as { schema?: unknown; issue?: unknown };
+  const candidate = parsed as Record<string, unknown>;
   if (candidate.schema !== 1) {
     throw new StateCommentError(`unsupported state schema: ${JSON.stringify(candidate.schema)}`);
   }
   if (typeof candidate.issue !== 'number') {
     throw new StateCommentError('state comment has no numeric "issue"');
+  }
+  for (const field of STRING_FIELDS) {
+    if (typeof candidate[field] !== 'string') {
+      throw new StateCommentError(`state comment has invalid "${field}": expected a string`);
+    }
+  }
+  for (const field of ARRAY_FIELDS) {
+    if (!Array.isArray(candidate[field])) {
+      throw new StateCommentError(`state comment has invalid "${field}": expected an array`);
+    }
+  }
+  const stages = candidate.stages;
+  if (typeof stages !== 'object' || stages === null || Array.isArray(stages)) {
+    throw new StateCommentError('state comment has invalid "stages": expected an object');
   }
   return parsed as TaskState;
 }
