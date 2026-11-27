@@ -4,6 +4,7 @@ import { applyEvent } from '../core/stateMachine.js';
 import { ConfigError } from '../core/taskTypes.js';
 import type { EvidenceKind, Phase, TaskEvent, TaskState, TaskTypeDef, WaitingOn } from '../core/types.js';
 import type { ExpectedStateComment, TrackedTask, Tracker } from '../tracker/types.js';
+import { errorAsJson, formatCliError } from './errors.js';
 
 export interface CommandContext {
   tracker: Tracker;
@@ -212,7 +213,8 @@ const printLine = (stream: NodeJS.WriteStream) => (text: string) => void stream.
 /**
  * Runs one CLI action: builds the context, runs `run` and prints its result (`describe` for human
  * output, the result as JSON with `--json`). Any failure is printed (to `err`, or as `{"error": ...}`
- * through `out` with `--json`) and sets the exit code to 1; it never rejects.
+ * through `out` with `--json`), with the arguments and stderr of a failed `gh` call behind it, and
+ * sets the exit code to 1; it never rejects.
  */
 export async function runCommand<T>(
   makeContext: ContextFactory,
@@ -227,8 +229,7 @@ export async function runCommand<T>(
     ctx.out(options.json ? JSON.stringify(result, null, 2) : describe(result));
   } catch (error) {
     process.exitCode = 1;
-    const message = reasonOf(error);
-    if (options.json) (ctx?.out ?? printLine(process.stdout))(JSON.stringify({ error: message }, null, 2));
-    else (ctx?.err ?? printLine(process.stderr))(message);
+    if (options.json) (ctx?.out ?? printLine(process.stdout))(JSON.stringify(errorAsJson(error), null, 2));
+    else (ctx?.err ?? printLine(process.stderr))(formatCliError(error));
   }
 }

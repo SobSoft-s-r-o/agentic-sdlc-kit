@@ -14,8 +14,9 @@ import { registerReviewCommand } from './commands/review.js';
 import { registerStageCommand } from './commands/stage.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerTaskCommand } from './commands/task.js';
+import { errorAsJson, formatCliError } from './commands/errors.js';
 import { loadConfig, type Config } from './config/schema.js';
-import { defaultGhRunner, GhError } from './github/gh.js';
+import { defaultGhRunner } from './github/gh.js';
 import { GitHubTracker } from './github/githubTracker.js';
 
 const CONFIG_FILE = 'sdlc.config.yaml';
@@ -69,22 +70,7 @@ function loadEnvironment(configOption: string | undefined, cwd: string): { cfg: 
   return { cfg: loadConfig(configPath), repoRoot: root ?? cwd };
 }
 
-/** The text a failed run prints: the message, and for a failed `gh` call also its arguments and stderr. */
-export function formatCliError(error: unknown): string {
-  if (error instanceof GhError) {
-    return [
-      error.message,
-      `  command: gh ${error.args.join(' ')}`,
-      `  stderr: ${error.stderr.trim() || '(no error output)'}`,
-    ].join('\n');
-  }
-  return error instanceof Error ? error.message : String(error);
-}
-
-function errorAsJson(error: unknown): Record<string, unknown> {
-  const message = error instanceof Error ? error.message : String(error);
-  return error instanceof GhError ? { error: message, args: error.args, stderr: error.stderr } : { error: message };
-}
+export { formatCliError };
 
 /** The `sdlc` command tree. Nothing is read or contacted until a command runs. */
 export function buildProgram(deps: CliDeps = {}): Command {
