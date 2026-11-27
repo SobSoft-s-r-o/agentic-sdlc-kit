@@ -1,6 +1,6 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../../src/commands/context.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
 import { newTask } from '../../src/core/stateMachine.js';
@@ -161,6 +161,20 @@ describe('statusReport', () => {
     });
   });
 
+  it('scans the task issues once, the dry-run reconcile included', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(1, 'feature', { status: 'in_progress' }));
+    const scan = vi.spyOn(h.tracker, 'scanTasks');
+    const tracked = vi.spyOn(h.tracker, 'listTrackedTasks');
+    const untracked = vi.spyOn(h.tracker, 'listUntracked');
+
+    await statusReport(h.ctx, { staleDays: 7 });
+
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(tracked).not.toHaveBeenCalled();
+    expect(untracked).not.toHaveBeenCalled();
+  });
+
   describe('pendingReconcile', () => {
     it('shows what a dry-run reconcile would change and writes nothing', async () => {
       const h = setup();
@@ -222,8 +236,8 @@ describe('statusReport', () => {
 
   it('fails when the tasks cannot be read', async () => {
     const h = setup();
-    h.tracker.failNext('listTrackedTasks');
+    h.tracker.failNext('scanTasks');
 
-    await expect(statusReport(h.ctx, { staleDays: 7 })).rejects.toThrow(/listTrackedTasks/);
+    await expect(statusReport(h.ctx, { staleDays: 7 })).rejects.toThrow(/scanTasks/);
   });
 });

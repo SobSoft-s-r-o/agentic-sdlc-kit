@@ -16,6 +16,7 @@ import {
   type PrInfo,
   type ReleaseInfo,
   type TrackedTask,
+  type TaskScan,
   type Tracker,
   type UntrackedIssue,
 } from '../tracker/types.js';
@@ -62,7 +63,13 @@ interface IssueRow {
   number: number;
   title: string;
   state: string;
+  /** `COMPLETED`, `NOT_PLANNED`, `REOPENED`, or empty. */
+  stateReason?: string | null;
 }
+
+const ISSUE_FIELDS = 'number,title,state,stateReason';
+
+const CLOSE_REASONS: Record<string, 'completed' | 'not_planned'> = { COMPLETED: 'completed', NOT_PLANNED: 'not_planned' };
 
 interface RestComment {
   id: number;
@@ -304,16 +311,16 @@ export class GitHubTracker implements Tracker {
   }
 
   async listTrackedTasks(): Promise<TrackedTask[]> {
-    return (await this.scanTaskIssues()).tracked;
+    return (await this.scanTasks()).tracked;
   }
 
   async listUntracked(): Promise<UntrackedIssue[]> {
-    return (await this.scanTaskIssues()).untracked;
+    return (await this.scanTasks()).untracked;
   }
 
   async getTask(issue: number): Promise<TrackedTask> {
     const row = await ghJson<IssueRow>(this.run, [
-      'issue', 'view', String(issue), '--repo', this.repo, '--json', 'number,title,state',
+      'issue', 'view', String(issue), '--repo', this.repo, '--json', ISSUE_FIELDS,
     ]);
     const comment = await this.findStateComment(issue);
     if (!comment) throw new Error(`Issue #${issue} has no state comment`);
@@ -634,10 +641,13 @@ export class GitHubTracker implements Tracker {
   }
 
   private toTrackedTask(row: IssueRow, comment: RestComment, state: TaskState): TrackedTask {
+    const issueOpen = row.state.toUpperCase() === 'OPEN';
+    const closeReason = issueOpen ? undefined : CLOSE_REASONS[(row.stateReason ?? '').toUpperCase()];
     return {
       issue: row.number,
       title: row.title,
-      issueOpen: row.state.toUpperCase() === 'OPEN',
+      issueOpen,
+      ...(closeReason && { closeReason }),
       state,
       stateCommentId: String(comment.id),
       stateCommentUpdatedAt: comment.updated_at ?? comment.created_at,
@@ -645,11 +655,11 @@ export class GitHubTracker implements Tracker {
   }
 
   /** Reads every `sdlc:task` issue's comments and sorts the issues into tracked and untracked. */
-  private async scanTaskIssues(): Promise<{ tracked: TrackedTask[]; untracked: UntrackedIssue[] }> {
+  async scanTasks(): Promise<TaskScan> {
     const rows =
       (await ghJson<IssueRow[] | undefined>(this.run, [
         'issue', 'list', '--repo', this.repo, '--label', 'sdlc:task', '--state', 'all',
-        '--json', 'number,title,state', '--limit', String(ISSUE_LIST_LIMIT),
+        '--json', ISSUE_FIELDS, '--limit', String(ISSUE_LIST_LIMIT),
       ])) ?? [];
     assertNotCut(rows.length, ISSUE_LIST_LIMIT, 'gh issue list');
     const issues = [...rows].sort((a, b) => a.number - b.number);

@@ -1,6 +1,6 @@
 import type { CommandContext } from '../commands/context.js';
 import type { Phase, Status, TaskState } from '../core/types.js';
-import type { TrackedTask } from '../tracker/types.js';
+import type { TaskScan, TrackedTask } from '../tracker/types.js';
 import { reconcile, type ReconcileAction } from './reconcile.js';
 
 export interface TaskSummary {
@@ -83,8 +83,8 @@ const pausedOn = (state: TaskState, who: TaskState['waitingOn']): boolean =>
  */
 export async function statusReport(ctx: CommandContext, options: { staleDays: number }): Promise<StatusReport> {
   const nowMs = Date.parse(ctx.now());
-  const tasks = await ctx.tracker.listTrackedTasks();
-  const untracked = await ctx.tracker.listUntracked();
+  const scan = await ctx.tracker.scanTasks();
+  const { tracked: tasks, untracked } = scan;
 
   const byStatus = Object.fromEntries(STATUS_ORDER.map(status => [status, [] as TaskSummary[]])) as Record<
     Status,
@@ -110,13 +110,14 @@ export async function statusReport(ctx: CommandContext, options: { staleDays: nu
     staleAwaitingDeployment,
     stalePausedOnAgent,
     untracked: untracked.map(({ issue, title }) => ({ issue, title })),
-    pendingReconcile: await pendingReconcile(ctx),
+    pendingReconcile: await pendingReconcile(ctx, scan),
   };
 }
 
-async function pendingReconcile(ctx: CommandContext): Promise<ReconcileAction[]> {
+async function pendingReconcile(ctx: CommandContext, scan: TaskScan): Promise<ReconcileAction[]> {
   try {
-    const { actions } = await reconcile(ctx, { dryRun: true });
+    // The scan just made is reused: one scan of the task issues per status run.
+    const { actions } = await reconcile(ctx, { dryRun: true, scan });
     return actions.filter(action => !QUIET_KINDS.has(action.kind));
   } catch (error) {
     return [{ issue: 0, kind: 'error', detail: reasonOf(error) }];

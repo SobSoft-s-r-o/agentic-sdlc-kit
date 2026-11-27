@@ -382,6 +382,62 @@ describe('issue open state', () => {
   });
 });
 
+describe('API cost per run', () => {
+  it('scans the task issues once per full run', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(1, 'feature', { phase: 'implementation' }));
+    h.tracker.issues.push({ number: 9, title: 'Labelled by hand', body: '', labels: ['sdlc:task'], open: true, onBoard: false });
+    const scan = vi.spyOn(h.tracker, 'scanTasks');
+    const tracked = vi.spyOn(h.tracker, 'listTrackedTasks');
+    const untracked = vi.spyOn(h.tracker, 'listUntracked');
+
+    await reconcile(h.ctx, {});
+
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(tracked).not.toHaveBeenCalled();
+    expect(untracked).not.toHaveBeenCalled();
+  });
+
+  it('leaves a done task alone when its issue is closed with the right reason', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(1, 'tooling', { status: 'done', outcome: 'completed', waitingOn: 'none' }), { open: false });
+    h.tracker.seedTask(
+      task(2, 'tooling', { status: 'done', outcome: 'cancelled', cancelReason: 'x', waitingOn: 'none' }),
+      { open: false },
+    );
+    const sync = vi.spyOn(h.tracker, 'syncFields');
+    const comments = vi.spyOn(h.tracker, 'listComments');
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(result.actions).toEqual([]);
+    expect(sync).not.toHaveBeenCalled();
+    expect(comments).not.toHaveBeenCalled();
+  });
+
+  it('corrects the close reason of a done task closed with the wrong one', async () => {
+    const h = setup();
+    h.tracker.seedTask(
+      task(1, 'tooling', { status: 'done', outcome: 'cancelled', cancelReason: 'x', waitingOn: 'none' }),
+      { open: false, closeReason: 'completed' },
+    );
+    h.tracker.seedTask(task(2, 'tooling', { status: 'done', outcome: 'completed', waitingOn: 'none' }), {
+      open: false,
+      closeReason: 'not_planned',
+    });
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(mutating(result.actions)).toEqual([
+      { issue: 1, kind: 'issue_closed', detail: 'close reason corrected to not_planned' },
+      { issue: 2, kind: 'issue_closed', detail: 'close reason corrected to completed' },
+    ]);
+    expect(issueOf(h, 1)).toMatchObject({ open: false, closeReason: 'not_planned' });
+    expect(issueOf(h, 2)).toMatchObject({ open: false, closeReason: 'completed' });
+    expect((await reconcile(h.ctx, {})).actions).toEqual([]);
+  });
+});
+
 describe('approvals', () => {
   it('approves the paused stage from an owner comment on the issue', async () => {
     const h = setup();

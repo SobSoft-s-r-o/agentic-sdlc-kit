@@ -6,6 +6,8 @@ export interface TrackedTask {
   issue: number;
   title: string;
   issueOpen: boolean;
+  /** Why a closed issue was closed, when GitHub says; `undefined` for an open issue. */
+  closeReason?: 'completed' | 'not_planned';
   state: TaskState;
   stateCommentId: string;
   /** The state comment's `updated_at` when read: `writeState` refuses to write over a newer one. */
@@ -32,6 +34,12 @@ export interface UntrackedIssue {
   title: string;
   /** `missing state comment`, or the message of the error from reading a corrupt state comment. */
   reason: string;
+}
+
+/** Every `sdlc:task` issue, sorted into those with readable state and those without. */
+export interface TaskScan {
+  tracked: TrackedTask[];
+  untracked: UntrackedIssue[];
 }
 
 export interface IssueComment {
@@ -95,6 +103,8 @@ export interface Tracker {
   listTrackedTasks(): Promise<TrackedTask[]>;
   /** `sdlc:task` issues with no state comment, or one that cannot be parsed, oldest issue first. */
   listUntracked(): Promise<UntrackedIssue[]>;
+  /** `listTrackedTasks` and `listUntracked` from one scan of the `sdlc:task` issues. */
+  scanTasks(): Promise<TaskScan>;
   /** Throws when the issue has no state comment, and `StateCommentError` when it is corrupt. */
   getTask(issue: number): Promise<TrackedTask>;
   /**

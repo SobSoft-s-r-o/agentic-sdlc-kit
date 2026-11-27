@@ -1,5 +1,6 @@
 {
   "number": 13,
   "title": "Fix rounding in invoice totals",
-  "state": "CLOSED"
+  "state": "CLOSED",
+  "stateReason": "COMPLETED"
 }

@@ -14,6 +14,7 @@ import {
   type PrInfo,
   type ReleaseInfo,
   type TrackedTask,
+  type TaskScan,
   type Tracker,
   type UntrackedIssue,
 } from '../../src/tracker/types.js';
@@ -109,17 +110,27 @@ export class FakeTracker implements Tracker {
    */
   seedTask(
     state: TaskState,
-    options: { title?: string; labels?: string[]; open?: boolean; onBoard?: boolean } = {},
+    options: {
+      title?: string;
+      labels?: string[];
+      open?: boolean;
+      /** For a closed issue; defaults to the reason the state's outcome closes it with. */
+      closeReason?: 'completed' | 'not_planned';
+      onBoard?: boolean;
+    } = {},
   ): void {
     if (this.issues.some(i => i.number === state.issue)) {
       throw new Error(`FakeTracker: issue #${state.issue} already exists`);
     }
+    const open = options.open ?? true;
+    const closeReason = options.closeReason ?? (state.outcome === 'cancelled' ? 'not_planned' : 'completed');
     this.issues.push({
       number: state.issue,
       title: options.title ?? state.summary,
       body: '',
       labels: options.labels ?? ['sdlc:task', `type:${state.type}`],
-      open: options.open ?? true,
+      open,
+      ...(!open && { closeReason }),
       onBoard: options.onBoard ?? true,
     });
     this.comments.push(this.newComment(state.issue, renderStateComment(state), this.login));
@@ -161,36 +172,20 @@ export class FakeTracker implements Tracker {
   /** `sdlc:task` issues, oldest first; one whose state comment is missing or corrupt is skipped. */
   async listTrackedTasks(): Promise<TrackedTask[]> {
     this.begin('listTrackedTasks');
-    return this.sortedIssues()
-      .filter(issue => issue.labels.includes('sdlc:task'))
-      .flatMap(issue => {
-        const stateComment = this.findStateComment(issue.number);
-        if (!stateComment) return [];
-        try {
-          return [this.toTrackedTask(issue, stateComment)];
-        } catch (error) {
-          if (error instanceof StateCommentError) return [];
-          throw error;
-        }
-      });
+    return this.trackedOf();
+  }
+
+  /** Both lists from one call, as the real tracker reads them from one scan. */
+  async scanTasks(): Promise<TaskScan> {
+    this.begin('scanTasks');
+    const [tracked, untracked] = [this.trackedOf(), this.untrackedOf()];
+    return { tracked, untracked };
   }
 
   /** `sdlc:task` issues without a parseable state comment, oldest issue first. */
   async listUntracked(): Promise<UntrackedIssue[]> {
     this.begin('listUntracked');
-    return this.sortedIssues()
-      .filter(issue => issue.labels.includes('sdlc:task'))
-      .flatMap(issue => {
-        const stateComment = this.findStateComment(issue.number);
-        if (!stateComment) return [{ issue: issue.number, title: issue.title, reason: 'missing state comment' }];
-        try {
-          this.toTrackedTask(issue, stateComment);
-          return [];
-        } catch (error) {
-          if (!(error instanceof StateCommentError)) throw error;
-          return [{ issue: issue.number, title: issue.title, reason: error.message }];
-        }
-      });
+    return this.untrackedOf();
   }
 
   async getTask(issue: number): Promise<TrackedTask> {
@@ -397,6 +392,37 @@ export class FakeTracker implements Tracker {
       );
   }
 
+  private trackedOf(): TrackedTask[] {
+    return this.sortedIssues()
+      .filter(issue => issue.labels.includes('sdlc:task'))
+      .flatMap(issue => {
+        const stateComment = this.findStateComment(issue.number);
+        if (!stateComment) return [];
+        try {
+          return [this.toTrackedTask(issue, stateComment)];
+        } catch (error) {
+          if (error instanceof StateCommentError) return [];
+          throw error;
+        }
+      });
+  }
+
+  private untrackedOf(): UntrackedIssue[] {
+    return this.sortedIssues()
+      .filter(issue => issue.labels.includes('sdlc:task'))
+      .flatMap(issue => {
+        const stateComment = this.findStateComment(issue.number);
+        if (!stateComment) return [{ issue: issue.number, title: issue.title, reason: 'missing state comment' }];
+        try {
+          this.toTrackedTask(issue, stateComment);
+          return [];
+        } catch (error) {
+          if (!(error instanceof StateCommentError)) throw error;
+          return [{ issue: issue.number, title: issue.title, reason: error.message }];
+        }
+      });
+  }
+
   private toTrackedTask(issue: FakeIssue, stateComment: FakeComment): TrackedTask {
     const state = parseStateComment(stateComment.body);
     if (!state) throw new Error(`FakeTracker: comment ${stateComment.id} is not a state comment`);
@@ -404,6 +430,7 @@ export class FakeTracker implements Tracker {
       issue: issue.number,
       title: issue.title,
       issueOpen: issue.open,
+      ...(!issue.open && issue.closeReason && { closeReason: issue.closeReason }),
       state,
       stateCommentId: stateComment.id,
       stateCommentUpdatedAt: stateComment.updatedAt,

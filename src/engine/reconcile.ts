@@ -23,7 +23,7 @@ import {
 } from '../core/summary.js';
 import { trustedLogins } from '../core/trust.js';
 import type { Approval, TaskEvent, TaskState, TaskTypeDef } from '../core/types.js';
-import type { IssueComment, PrInfo, TrackedTask, Tracker } from '../tracker/types.js';
+import type { IssueComment, PrInfo, TaskScan, TrackedTask, Tracker } from '../tracker/types.js';
 import { DEPLOYMENT_LOOKBACK, satisfiedTargets } from './deployments.js';
 
 export interface ReconcileAction {
@@ -51,6 +51,8 @@ export interface ReconcileOptions {
   only?: 'deployments' | 'all';
   /** Only this task; an error when it is not tracked. */
   issue?: number;
+  /** A scan of the task issues already made by the caller, used instead of scanning again. */
+  scan?: TaskScan;
 }
 
 export interface ReconcileResult {
@@ -74,7 +76,7 @@ const byTime = (a: string | undefined, b: string | undefined): number => {
 const laterOf = (stored: string, at: string): string => (byTime(stored, at) > 0 ? stored : at);
 
 /**
- * Wraps `inner` for one run: deployments, releases, ancestry and the login are read at most once
+ * Wraps `inner` for one run: the task scan, deployments, releases, ancestry and the login are read at most once
  * per argument set (a failed read is retried by the next caller). In a dry run every write rejects,
  * so a write that slipped through cannot reach the tracker.
  */
@@ -100,8 +102,9 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
     listReleases: limit => once(`releases:${limit}`, () => inner.listReleases(limit)),
     isAncestor: (ancestor, descendant) =>
       once(`ancestor:${ancestor}>${descendant}`, () => inner.isAncestor(ancestor, descendant)),
-    listTrackedTasks: () => inner.listTrackedTasks(),
-    listUntracked: () => inner.listUntracked(),
+    scanTasks: () => once('scan', () => inner.scanTasks()),
+    listTrackedTasks: () => once('scan', () => inner.scanTasks()).then(scan => scan.tracked),
+    listUntracked: () => once('scan', () => inner.scanTasks()).then(scan => scan.untracked),
     getTask: issue => inner.getTask(issue),
     listComments: (issue, sinceIso) => inner.listComments(issue, sinceIso),
     listTaskPrs: issue => inner.listTaskPrs(issue),
@@ -182,23 +185,19 @@ async function loadTasks(
     }
   }
 
-  let tasks: TrackedTask[] = [];
+  let scan: TaskScan;
   try {
-    tasks = await trackerStep('listTrackedTasks', undefined, () => ctx.tracker.listTrackedTasks());
+    scan = opts.scan ?? (await trackerStep('scanTasks', undefined, () => ctx.tracker.scanTasks()));
   } catch (error) {
     actions.push({ issue: 0, kind: 'error', detail: reasonOf(error) });
+    return [];
   }
   if (only === 'all') {
-    try {
-      const untracked = await trackerStep('listUntracked', undefined, () => ctx.tracker.listUntracked());
-      for (const issue of untracked) {
-        actions.push({ issue: issue.issue, kind: 'error', detail: `untracked sdlc:task issue: ${issue.reason}` });
-      }
-    } catch (error) {
-      actions.push({ issue: 0, kind: 'error', detail: reasonOf(error) });
+    for (const issue of scan.untracked) {
+      actions.push({ issue: issue.issue, kind: 'error', detail: `untracked sdlc:task issue: ${issue.reason}` });
     }
   }
-  return tasks;
+  return scan.tracked;
 }
 
 /** One task's run: `state` is the working copy that events are applied to. */
@@ -462,17 +461,25 @@ async function postOutcomeReport(t: TaskRun, deliveredNow: boolean): Promise<boo
 const changedFields = (before: BoardFields, after: BoardFields): string[] =>
   (Object.keys(after) as (keyof BoardFields)[]).filter(key => before[key] !== after[key]);
 
-/** Step 5: write the state if it changed, sync the board fields, open or close the issue. */
+/**
+ * Step 5: write the state if it changed, sync the board fields, open or close the issue (or correct
+ * the reason it was closed with). A done task that did not change, whose issue is closed with the
+ * right reason, has nothing to converge and is left alone.
+ */
 async function project(t: TaskRun, reportPosted: boolean): Promise<void> {
   const { ctx, task, state, dryRun } = t;
   const { issue } = task;
-  if (!isDeepStrictEqual(task.state, state) && !dryRun) {
+  const unchanged = isDeepStrictEqual(task.state, state);
+  const projection = projectTask(state, t.type);
+  const closedRight = !task.issueOpen && task.closeReason === projection.closeReason;
+  if (unchanged && state.status === 'done' && !projection.issueOpen && closedRight) return;
+
+  if (!unchanged && !dryRun) {
     const hint = reportPosted ? 'the report was posted; the state was not changed' : 'the state was not changed';
     await trackerStep('writeState', issue, () => ctx.tracker.writeState(issue, state, expectedOf(task)), hint);
   }
 
   const previous = projectTask(task.state, t.type);
-  const projection = projectTask(state, t.type);
   try {
     if (!dryRun) await trackerStep('syncFields', issue, () => ctx.tracker.syncFields(issue, projection.fields));
     const changed = changedFields(previous.fields, projection.fields);
@@ -481,7 +488,8 @@ async function project(t: TaskRun, reportPosted: boolean): Promise<void> {
     t.push('error', reasonOf(error));
   }
 
-  if (projection.issueOpen === task.issueOpen) return;
+  const reasonOnly = !projection.issueOpen && !task.issueOpen;
+  if (projection.issueOpen ? task.issueOpen : closedRight) return;
   try {
     if (!dryRun) {
       await trackerStep('setIssueOpen', issue, () =>
@@ -489,6 +497,7 @@ async function project(t: TaskRun, reportPosted: boolean): Promise<void> {
       );
     }
     if (projection.issueOpen) t.push('issue_reopened', 'issue reopened: the task is not done');
+    else if (reasonOnly) t.push('issue_closed', `close reason corrected to ${projection.closeReason}`);
     else t.push('issue_closed', `issue closed as ${projection.closeReason}`);
   } catch (error) {
     t.push('error', reasonOf(error));

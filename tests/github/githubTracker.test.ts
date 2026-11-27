@@ -27,7 +27,7 @@ const failing = (match: string[], stderr: string): FakeGhStep => ({ match, code:
 
 const ISSUE_LIST = [
   'issue', 'list', '--repo', 'acme/shop', '--label', 'sdlc:task', '--state', 'all',
-  '--json', 'number,title,state', '--limit', '500',
+  '--json', 'number,title,state,stateReason', '--limit', '500',
 ];
 const LOGIN = ok(['api', 'user', '-q', '.login'], 'octo-agent\n');
 const comments = (issue: number, name?: string): FakeGhStep =>
@@ -114,6 +114,17 @@ describe('GitHubTracker tracked tasks', () => {
     expect(run.calls).toHaveLength(7);
   });
 
+  it('scanTasks sorts tracked and untracked issues from one scan, with the close reason', async () => {
+    const { run, tracker } = trackerFor(listScript());
+    const { tracked, untracked } = await tracker.scanTasks();
+    expect(tracked.map(t => [t.issue, t.closeReason])).toEqual([
+      [12, undefined],
+      [13, 'completed'],
+    ]);
+    expect(untracked.map(u => u.issue)).toEqual([14, 15, 16]);
+    expect(run.calls).toHaveLength(7);
+  });
+
   it('ignores a state-marker comment written by anyone but the user or the Actions bot', async () => {
     const { tracker } = trackerFor(listScript());
     const [first] = await tracker.listTrackedTasks();
@@ -129,7 +140,7 @@ describe('GitHubTracker tracked tasks', () => {
 
   describe('trusted state-comment authors', () => {
     const view = (issue: number): FakeGhStep =>
-      fromFixture(['issue', 'view', String(issue), '--repo', 'acme/shop', '--json', 'number,title,state'], `issue-view-${issue}.json`);
+      fromFixture(['issue', 'view', String(issue), '--repo', 'acme/shop', '--json', 'number,title,state,stateReason'], `issue-view-${issue}.json`);
 
     it('trusts a state comment written by a configured owner, not only by the authenticated login', async () => {
       // Issue 17: octo-agent (the login) only chatted; the state comment is by shop-owner.
@@ -200,7 +211,7 @@ describe('GitHubTracker tracked tasks', () => {
 
   it('getTask reads one issue and its state comment', async () => {
     const { run, tracker } = trackerFor([
-      fromFixture(['issue', 'view', '12', '--repo', 'acme/shop', '--json', 'number,title,state'], 'issue-view-12.json'),
+      fromFixture(['issue', 'view', '12', '--repo', 'acme/shop', '--json', 'number,title,state,stateReason'], 'issue-view-12.json'),
       LOGIN,
       comments(12),
     ]);

@@ -151,11 +151,11 @@ describe('sdlc status', () => {
 
   it('exits 1 when the tasks cannot be read', async () => {
     const h = setup();
-    h.tracker.failNext('listTrackedTasks');
+    h.tracker.failNext('scanTasks');
 
     await run(h);
 
-    expect(h.err[0]).toContain('listTrackedTasks');
+    expect(h.err[0]).toContain('scanTasks');
     expect(process.exitCode).toBe(1);
   });
 });

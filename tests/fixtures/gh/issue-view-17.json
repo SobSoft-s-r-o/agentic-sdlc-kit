@@ -1,5 +1,6 @@
 {
   "number": 17,
   "title": "Owner-tracked task",
-  "state": "OPEN"
+  "state": "OPEN",
+  "stateReason": ""
 }

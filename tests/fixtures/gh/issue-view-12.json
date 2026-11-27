@@ -1,5 +1,6 @@
 {
   "number": 12,
   "title": "Add CSV export to the orders page",
-  "state": "OPEN"
+  "state": "OPEN",
+  "stateReason": ""
 }
