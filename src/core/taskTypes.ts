@@ -80,7 +80,8 @@ export const BUILTIN_TYPES: readonly TaskTypeDef[] = [
 
 /**
  * Builds the task type registry from the enabled built-in ids plus all custom types.
- * Throws ConfigError if an enabled id is not a built-in or a custom id shadows a built-in.
+ * Throws ConfigError if an enabled id is not a built-in, a custom id shadows a built-in,
+ * or two custom types share an id.
  */
 export function buildTypeRegistry(
   enabled: string[],
@@ -101,10 +102,14 @@ export function buildTypeRegistry(
     }
   }
 
+  const seenCustom = new Set<string>();
   for (const def of custom) {
     if (builtins.has(def.id)) {
       problems.push(`custom task type "${def.id}" collides with a built-in type`);
+    } else if (seenCustom.has(def.id)) {
+      problems.push(`duplicate custom task type id "${def.id}"`);
     } else {
+      seenCustom.add(def.id);
       registry.set(def.id, def);
     }
   }

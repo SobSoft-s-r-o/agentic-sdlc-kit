@@ -1,0 +1,30 @@
+version: 1
+harnesses: [claude, codex, gemini]
+mode: observe
+github:
+  repo: acme/shop
+  default_branch: main
+  project: { owner: acme, owner_type: org, number: 7 }
+owners: [shop-owner]
+content_language: en
+quality_gate: ["npm test"]
+task_types:
+  enabled: [feature, bugfix, tooling, analysis, production-data, artifact, spike]
+  custom:
+    - id: infra-change
+      label: Infra change
+      phases: [intake, brainstorming, planning, implementation, review, delivery]
+      ends_on: deploy
+      requires_before_review: [backup]
+      targets_required: true
+targets:
+  - name: web
+    environment: production-web
+    deploy: { via: actions, workflow: .github/workflows/deploy-web.yml }
+    paths: ["apps/web/**"]
+  - name: api
+    deploy: { via: script, command: "./scripts/deploy-api.sh" }
+    paths: ["apps/api/**"]
+models:
+  claude: { deep: opus, standard: sonnet, fast: haiku }
+stack: { superpowers: true, graphify: true, branch_protection: true, actions: false }
