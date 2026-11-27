@@ -47,6 +47,17 @@ export interface DeploymentInfo {
   createdAt: string;
 }
 
+/** A published GitHub Release: not a draft, not a prerelease. */
+export interface ReleaseInfo {
+  tag: string;
+  /** The commit the tag points to (an annotated tag is resolved to its commit). */
+  sha: string;
+  /** The release page (`html_url`). */
+  url: string;
+  /** When the release was published, ISO 8601. */
+  publishedAt: string;
+}
+
 /**
  * The I/O boundary to the issue tracker, the project board and the repository. The production
  * implementation talks to GitHub through the `gh` CLI; tests use an in-memory fake.
@@ -85,6 +96,11 @@ export interface Tracker {
   listTaskPrs(issue: number): Promise<PrInfo[]>;
   /** Successful deployments to `environment`, newest first, at most `limit`. */
   listSuccessfulDeployments(environment: string, limit: number): Promise<DeploymentInfo[]>;
+  /**
+   * Published releases (no drafts, no prereleases), newest first, at most `limit`, each with its
+   * tag resolved to a commit sha.
+   */
+  listReleases(limit: number): Promise<ReleaseInfo[]>;
   isAncestor(ancestorSha: string, descendantSha: string): Promise<boolean>;
   isOnDefaultBranch(sha: string): Promise<boolean>;
   createDeployment(input: {

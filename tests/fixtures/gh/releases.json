@@ -1,0 +1,50 @@
+[
+  {
+    "url": "https://api.github.com/repos/acme/shop/releases/604",
+    "html_url": "https://github.com/acme/shop/releases/tag/v1.3.0-rc.1",
+    "id": 604,
+    "tag_name": "v1.3.0-rc.1",
+    "target_commitish": "main",
+    "name": "v1.3.0 release candidate",
+    "draft": false,
+    "prerelease": true,
+    "created_at": "2026-11-27T09:00:00Z",
+    "published_at": "2026-11-27T09:05:00Z"
+  },
+  {
+    "url": "https://api.github.com/repos/acme/shop/releases/603",
+    "html_url": "https://github.com/acme/shop/releases/untagged-0a1b2c3d4e5f",
+    "id": 603,
+    "tag_name": "v1.3.0",
+    "target_commitish": "main",
+    "name": "v1.3.0",
+    "draft": true,
+    "prerelease": false,
+    "created_at": "2026-11-26T09:00:00Z",
+    "published_at": null
+  },
+  {
+    "url": "https://api.github.com/repos/acme/shop/releases/602",
+    "html_url": "https://github.com/acme/shop/releases/tag/v1.2.0",
+    "id": 602,
+    "tag_name": "v1.2.0",
+    "target_commitish": "main",
+    "name": "v1.2.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-11-25T09:00:00Z",
+    "published_at": "2026-11-25T09:10:00Z"
+  },
+  {
+    "url": "https://api.github.com/repos/acme/shop/releases/601",
+    "html_url": "https://github.com/acme/shop/releases/tag/cli/v1.1.0",
+    "id": 601,
+    "tag_name": "cli/v1.1.0",
+    "target_commitish": "main",
+    "name": "cli v1.1.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-11-20T09:00:00Z",
+    "published_at": "2026-11-20T09:10:00Z"
+  }
+]

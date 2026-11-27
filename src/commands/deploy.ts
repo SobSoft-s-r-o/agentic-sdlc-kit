@@ -35,9 +35,9 @@ export const runShell: VerifyRunner = command =>
  * Records, as a GitHub Deployment, that `sha` is deployed to the environment of `target`. It
  * records a deploy that already happened and never deploys anything. Checks run in this order and
  * the first failure rejects with nothing recorded: the target is configured, `sha` is a commit id,
- * `sha` is on the default branch, the optional `verify` command exits 0. A successful deployment
- * of exactly `sha` (ignoring letter case) to the environment is returned as it is, flagged
- * `alreadyRecorded`, instead of recording a second one.
+ * `verify`, when given, is not blank, `sha` is on the default branch, the `verify` command exits 0.
+ * A successful deployment of exactly `sha` (ignoring letter case) to the environment is returned
+ * as it is, flagged `alreadyRecorded`, instead of recording a second one.
  */
 export async function deployRecord(
   ctx: CommandContext,
@@ -48,6 +48,7 @@ export async function deployRecord(
   const target = targetByName(ctx.cfg, input.target);
   const { sha } = input;
   if (!SHA_PATTERN.test(sha)) throw new Error(`invalid sha ${sha}`);
+  if (input.verify !== undefined && input.verify.trim() === '') throw new Error('verify command is empty');
 
   const onDefault = await trackerStep('isOnDefaultBranch', undefined, () => ctx.tracker.isOnDefaultBranch(sha));
   if (!onDefault) throw new Error(`sha ${sha} is not on ${ctx.cfg.github.defaultBranch}`);

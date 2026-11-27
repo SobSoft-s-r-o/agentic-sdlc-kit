@@ -10,6 +10,7 @@ import type {
   DeploymentInfo,
   IssueComment,
   PrInfo,
+  ReleaseInfo,
   TrackedTask,
   Tracker,
   UntrackedIssue,
@@ -58,6 +59,8 @@ export class FakeTracker implements Tracker {
   prs: FakePr[] = [];
   /** Every entry counts as a successful deployment. */
   deployments: FakeDeployment[] = [];
+  /** Every entry counts as a published release (no drafts or prereleases). */
+  releases: ReleaseInfo[] = [];
   fields = new Map<number, BoardFields>();
   /** Ancestry facts as `"<ancestorSha>><descendantSha>"` pairs; a commit is its own ancestor. */
   ancestors = new Set<string>();
@@ -253,6 +256,15 @@ export class FakeTracker implements Tracker {
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id - a.id)
       .slice(0, Math.max(0, limit))
       .map(({ id, sha, environment: env, url, createdAt }) => ({ id, sha, environment: env, url, createdAt }));
+  }
+
+  /** Newest first by publication time, ties kept in the order they were added. */
+  async listReleases(limit: number): Promise<ReleaseInfo[]> {
+    this.begin('listReleases');
+    return [...this.releases]
+      .sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt))
+      .slice(0, Math.max(0, limit))
+      .map(({ tag, sha, url, publishedAt }) => ({ tag, sha, url, publishedAt }));
   }
 
   async isAncestor(ancestorSha: string, descendantSha: string): Promise<boolean> {

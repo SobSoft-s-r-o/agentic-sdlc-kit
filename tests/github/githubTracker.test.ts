@@ -892,6 +892,103 @@ describe('GitHubTracker deployments', () => {
   });
 });
 
+describe('GitHubTracker releases', () => {
+  const releases = (perPage: number, page?: number): string[] => [
+    'api',
+    `repos/acme/shop/releases?per_page=${perPage}${page ? `&page=${page}` : ''}`,
+  ];
+  const commit = (ref: string, sha: string): FakeGhStep =>
+    ok(['api', `repos/acme/shop/commits/${ref}`, '--jq', '.sha'], `${sha}\n`);
+  const V12 = '1'.repeat(40);
+  const V11 = '2'.repeat(40);
+
+  it('listReleases skips drafts and prereleases and resolves each tag to its commit', async () => {
+    const { run, tracker } = trackerFor([
+      fromFixture(releases(10), 'releases.json'),
+      commit('v1.2.0', V12),
+      commit('cli/v1.1.0', V11),
+    ]);
+
+    const listed = await tracker.listReleases(10);
+
+    expect(listed).toEqual([
+      { tag: 'v1.2.0', sha: V12, url: 'https://github.com/acme/shop/releases/tag/v1.2.0', publishedAt: '2026-11-25T09:10:00Z' },
+      { tag: 'cli/v1.1.0', sha: V11, url: 'https://github.com/acme/shop/releases/tag/cli/v1.1.0', publishedAt: '2026-11-20T09:10:00Z' },
+    ]);
+    // The draft and the prerelease are never resolved.
+    expect(run.calls).toHaveLength(3);
+    expect(run.calls[2]).toEqual(['api', 'repos/acme/shop/commits/cli/v1.1.0', '--jq', '.sha']);
+  });
+
+  it('encodes each part of a tag name', async () => {
+    const rows = [{ ...json<any[]>('releases.json')[2], tag_name: 'v1 beta/2#x' }];
+    const { run, tracker } = trackerFor([
+      ok(releases(5), JSON.stringify(rows)),
+      commit('v1%20beta/2%23x', V12),
+    ]);
+
+    expect((await tracker.listReleases(5))[0]?.tag).toBe('v1 beta/2#x');
+    expect(run.calls[1]?.[1]).toBe('repos/acme/shop/commits/v1%20beta/2%23x');
+  });
+
+  it('returns at most `limit`, newest first, however GitHub ordered the page', async () => {
+    const rows = json<any[]>('releases.json');
+    const { tracker } = trackerFor([
+      ok(releases(1), JSON.stringify([rows[3], rows[2]])),
+      commit('v1.2.0', V12),
+    ]);
+
+    expect((await tracker.listReleases(1)).map(r => r.tag)).toEqual(['v1.2.0']);
+  });
+
+  it('pages on while drafts and prereleases leave fewer than `limit` published releases', async () => {
+    const rows = json<any[]>('releases.json');
+    const { run, tracker } = trackerFor([
+      ok(releases(2), JSON.stringify([rows[0], rows[1]])),
+      ok(releases(2, 2), JSON.stringify([rows[2], rows[3]])),
+      commit('v1.2.0', V12),
+      commit('cli/v1.1.0', V11),
+    ]);
+
+    expect((await tracker.listReleases(2)).map(r => r.tag)).toEqual(['v1.2.0', 'cli/v1.1.0']);
+    expect(run.calls).toHaveLength(4);
+  });
+
+  it('makes no call for a non-positive limit', async () => {
+    const { run, tracker } = trackerFor([]);
+    expect(await tracker.listReleases(0)).toEqual([]);
+    expect(run.calls).toHaveLength(0);
+  });
+
+  it('returns nothing when the repository has no releases', async () => {
+    const { tracker } = trackerFor([ok(releases(10), '[]')]);
+    expect(await tracker.listReleases(10)).toEqual([]);
+  });
+
+  it('rejects when the release list cannot be read', async () => {
+    const { tracker } = trackerFor([failing(releases(10), 'gh: Server error (HTTP 500)')]);
+    await expect(tracker.listReleases(10)).rejects.toThrow(/500/);
+  });
+
+  it('rejects when a tag cannot be resolved to a commit', async () => {
+    const { tracker } = trackerFor([
+      fromFixture(releases(10), 'releases.json'),
+      failing(['api', 'repos/acme/shop/commits/v1.2.0'], 'gh: No commit found for SHA: v1.2.0 (HTTP 422)'),
+      commit('cli/v1.1.0', V11),
+    ]);
+    await expect(tracker.listReleases(10)).rejects.toThrow(/422/);
+  });
+
+  it('rejects when a tag resolves to nothing', async () => {
+    const { tracker } = trackerFor([
+      fromFixture(releases(10), 'releases.json'),
+      ok(['api', 'repos/acme/shop/commits/v1.2.0'], '\n'),
+      commit('cli/v1.1.0', V11),
+    ]);
+    await expect(tracker.listReleases(10)).rejects.toThrow(/Could not resolve the tag "v1.2.0"/);
+  });
+});
+
 describe('GitHubTracker repository', () => {
   /** The compare call asks for one commit of the diff and prints only its status. */
   const compareArgs = (base: string, head: string): string[] => [

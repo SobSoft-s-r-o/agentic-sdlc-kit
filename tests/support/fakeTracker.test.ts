@@ -379,6 +379,31 @@ describe('FakeTracker comments', () => {
   });
 });
 
+describe('FakeTracker releases', () => {
+  const release = (tag: string, publishedAt: string) => ({ tag, sha: tag.padEnd(40, '0'), url: `https://github.test/releases/${tag}`, publishedAt });
+
+  it('lists releases newest first, at most `limit`', async () => {
+    const tracker = new FakeTracker();
+    tracker.releases.push(
+      release('v1', '2026-01-01T00:00:00Z'),
+      release('v3', '2026-03-01T00:00:00Z'),
+      release('v2', '2026-02-01T00:00:00Z'),
+    );
+
+    expect((await tracker.listReleases(10)).map(r => r.tag)).toEqual(['v3', 'v2', 'v1']);
+    expect((await tracker.listReleases(2)).map(r => r.tag)).toEqual(['v3', 'v2']);
+    expect(await tracker.listReleases(0)).toEqual([]);
+    expect(tracker.writes).toBe(0);
+  });
+
+  it('rejects once when failNext is set', async () => {
+    const tracker = new FakeTracker();
+    tracker.failNext('listReleases');
+    await expect(tracker.listReleases(5)).rejects.toThrow(/listReleases failed/);
+    expect(await tracker.listReleases(5)).toEqual([]);
+  });
+});
+
 describe('FakeTracker PRs and deployments', () => {
   it('returns the PRs of an issue without the bookkeeping field', async () => {
     const tracker = new FakeTracker();

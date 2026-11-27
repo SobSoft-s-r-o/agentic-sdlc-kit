@@ -5,7 +5,7 @@ import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deployRecord, registerDeployCommand } from '../../src/commands/deploy.js';
 import type { CommandContext } from '../../src/commands/context.js';
-import { loadConfig } from '../../src/config/schema.js';
+import { loadConfig, type Config } from '../../src/config/schema.js';
 import { satisfiedTargets } from '../../src/engine/deployments.js';
 import { newTask } from '../../src/core/stateMachine.js';
 import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
@@ -66,6 +66,26 @@ function deployment(
   tracker.deployments.push(found);
   return found;
 }
+
+/** Seeds a published release; `n` orders them by publication time, newest last. */
+function release(tracker: FakeTracker, n: number, releasedSha: string, tag = `v1.${n}.0`) {
+  tracker.releases.push({
+    tag,
+    sha: releasedSha,
+    url: `https://github.test/releases/${tag}`,
+    publishedAt: new Date(Date.UTC(2026, 0, 1, 0, n)).toISOString(),
+  });
+}
+
+/** `cfg` plus the targets `cli` and `desktop`, which are delivered by GitHub Releases. */
+const releaseCfg: Config = {
+  ...cfg,
+  targets: [
+    ...cfg.targets,
+    { name: 'cli', environment: 'production-cli', deploy: { via: 'release' }, paths: [] },
+    { name: 'desktop', environment: 'production-desktop', deploy: { via: 'release' }, paths: [] },
+  ],
+};
 
 const noVerify = async (): Promise<number> => {
   throw new Error('the verify command must not run');
@@ -189,6 +209,20 @@ describe('deployRecord', () => {
     expect(tracker.deployments[0]!.sha).toBe('ABCDEF1');
   });
 
+  it.each(['', '   ', '\n\t'])('refuses the blank verify command %j before creating anything', async blank => {
+    const { tracker, ctx } = setup();
+    tracker.defaultBranchShas.add(A);
+    const onDefault = vi.spyOn(tracker, 'isOnDefaultBranch');
+
+    await expect(deployRecord(ctx, { target: 'web', sha: A, verify: blank }, { runVerify: noVerify })).rejects.toThrow(
+      'verify command is empty',
+    );
+
+    expect(onDefault).not.toHaveBeenCalled();
+    expect(tracker.deployments).toEqual([]);
+    expect(tracker.writes).toBe(0);
+  });
+
   it('does not run the verify command for a sha that is not on the default branch', async () => {
     const { tracker, ctx } = setup();
 
@@ -226,6 +260,33 @@ describe('deployRecord', () => {
 
     expect(recorded.alreadyRecorded).toBe(true);
     expect(tracker.deployments).toHaveLength(1);
+  });
+
+  it('only finds an existing deployment among the newest 50', async () => {
+    const { tracker, ctx } = setup();
+    tracker.defaultBranchShas.add(A);
+    // 51 deployments, oldest first; the oldest of them is the only one of `A`.
+    deployment(tracker, 1, 'production-web', A);
+    for (let n = 2; n <= 51; n += 1) deployment(tracker, n, 'production-web', B);
+
+    const recorded = await deployRecord(ctx, { target: 'web', sha: A });
+
+    expect(recorded.alreadyRecorded).toBeUndefined();
+    expect(tracker.deployments).toHaveLength(52);
+    expect(tracker.deployments[51]).toMatchObject({ sha: A, environment: 'production-web' });
+  });
+
+  it('finds an existing deployment that is the 50th newest', async () => {
+    const { tracker, ctx } = setup();
+    tracker.defaultBranchShas.add(A);
+    deployment(tracker, 1, 'production-web', B);
+    deployment(tracker, 2, 'production-web', A);
+    for (let n = 3; n <= 51; n += 1) deployment(tracker, n, 'production-web', B);
+
+    const recorded = await deployRecord(ctx, { target: 'web', sha: A });
+
+    expect(recorded).toMatchObject({ id: 2, alreadyRecorded: true });
+    expect(tracker.deployments).toHaveLength(51);
   });
 
   it('records a sha deployed to another environment, or an older one deployed here', async () => {
@@ -328,6 +389,43 @@ describe('satisfiedTargets', () => {
     expect(await satisfiedTargets(tracker, cfg, awaiting([A, B]))).toEqual({ targets: [], urls: [] });
   });
 
+  it('with several satisfying deployments in one environment, names the target once with the newest url', async () => {
+    const tracker = new FakeTracker();
+    deployment(tracker, 1, 'production-web', C);
+    deployment(tracker, 2, 'production-web', D);
+    deployment(tracker, 3, 'production-web', B);
+    tracker.ancestors.add(`${A}>${C}`);
+    tracker.ancestors.add(`${A}>${D}`);
+
+    expect(await satisfiedTargets(tracker, cfg, awaiting([A]))).toEqual({
+      targets: ['web'],
+      urls: ['https://deploys.test/production-web/2'],
+    });
+  });
+
+  it('only looks at the newest 50 deployments', async () => {
+    const tracker = new FakeTracker();
+    // 51 deployments, oldest first; only the oldest of them contains `A`.
+    deployment(tracker, 1, 'production-web', C);
+    for (let n = 2; n <= 51; n += 1) deployment(tracker, n, 'production-web', B);
+    tracker.ancestors.add(`${A}>${C}`);
+
+    expect(await satisfiedTargets(tracker, cfg, awaiting([A]))).toEqual({ targets: [], urls: [] });
+  });
+
+  it('counts the 50th newest deployment', async () => {
+    const tracker = new FakeTracker();
+    deployment(tracker, 1, 'production-web', B);
+    deployment(tracker, 2, 'production-web', C);
+    for (let n = 3; n <= 51; n += 1) deployment(tracker, n, 'production-web', B);
+    tracker.ancestors.add(`${A}>${C}`);
+
+    expect(await satisfiedTargets(tracker, cfg, awaiting([A]))).toEqual({
+      targets: ['web'],
+      urls: ['https://deploys.test/production-web/2'],
+    });
+  });
+
   it('satisfies nothing when the task has no merged PR', async () => {
     const tracker = new FakeTracker();
     deployment(tracker, 1, 'production-web', A);
@@ -414,6 +512,128 @@ describe('satisfiedTargets', () => {
   });
 });
 
+describe('satisfiedTargets with releases', () => {
+  it('a release satisfies a release target', async () => {
+    const tracker = new FakeTracker();
+    release(tracker, 1, D, 'v1.0.0');
+    tracker.ancestors.add(`${A}>${D}`);
+
+    expect(await satisfiedTargets(tracker, releaseCfg, awaiting([A], ['cli']))).toEqual({
+      targets: ['cli'],
+      urls: ['https://github.test/releases/v1.0.0'],
+    });
+  });
+
+  it('a release does not satisfy a non-release target', async () => {
+    const tracker = new FakeTracker();
+    release(tracker, 1, D);
+    tracker.ancestors.add(`${A}>${D}`);
+    const releases = vi.spyOn(tracker, 'listReleases');
+
+    expect(await satisfiedTargets(tracker, releaseCfg, awaiting([A], ['web', 'api']))).toEqual({
+      targets: [],
+      urls: [],
+    });
+    expect(releases).not.toHaveBeenCalled();
+  });
+
+  it('needs the release to contain every merge commit', async () => {
+    const tracker = new FakeTracker();
+    release(tracker, 1, C);
+    release(tracker, 2, D);
+    tracker.ancestors.add(`${A}>${C}`);
+    tracker.ancestors.add(`${B}>${D}`);
+
+    expect(await satisfiedTargets(tracker, releaseCfg, awaiting([A, B], ['cli']))).toEqual({ targets: [], urls: [] });
+
+    tracker.ancestors.add(`${A}>${D}`);
+
+    expect(await satisfiedTargets(tracker, releaseCfg, awaiting([A, B], ['cli']))).toEqual({
+      targets: ['cli'],
+      urls: ['https://github.test/releases/v1.2.0'],
+    });
+  });
+
+  it('still lets a deployment satisfy a release target, without reading releases', async () => {
+    const tracker = new FakeTracker();
+    deployment(tracker, 1, 'production-cli', A);
+    const releases = vi.spyOn(tracker, 'listReleases');
+
+    expect(await satisfiedTargets(tracker, releaseCfg, awaiting([A], ['cli']))).toEqual({
+      targets: ['cli'],
+      urls: ['https://deploys.test/production-cli/1'],
+    });
+    expect(releases).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a release when no deployment satisfies the release target', async () => {
+    const tracker = new FakeTracker();
+    deployment(tracker, 1, 'production-cli', B);
+    release(tracker, 1, A, 'v2.0.0');
+
+    expect(await satisfiedTargets(tracker, releaseCfg, awaiting([A], ['cli']))).toEqual({
+      targets: ['cli'],
+      urls: ['https://github.test/releases/v2.0.0'],
+    });
+  });
+
+  it('names the newest of several satisfying releases', async () => {
+    const tracker = new FakeTracker();
+    release(tracker, 1, C, 'v1.0.0');
+    release(tracker, 3, D, 'v3.0.0');
+    release(tracker, 2, C, 'v2.0.0');
+    tracker.ancestors.add(`${A}>${C}`);
+    tracker.ancestors.add(`${A}>${D}`);
+
+    expect(await satisfiedTargets(tracker, releaseCfg, awaiting([A], ['cli']))).toEqual({
+      targets: ['cli'],
+      urls: ['https://github.test/releases/v3.0.0'],
+    });
+  });
+
+  it('only looks at the newest 50 releases', async () => {
+    const tracker = new FakeTracker();
+    // 51 releases, oldest first; only the oldest of them contains `A`.
+    release(tracker, 1, C);
+    for (let n = 2; n <= 51; n += 1) release(tracker, n, B);
+    tracker.ancestors.add(`${A}>${C}`);
+    const releases = vi.spyOn(tracker, 'listReleases');
+
+    expect(await satisfiedTargets(tracker, releaseCfg, awaiting([A], ['cli']))).toEqual({ targets: [], urls: [] });
+    expect(releases).toHaveBeenCalledWith(50);
+  });
+
+  it('reads the releases once for several release targets, next to deployment targets', async () => {
+    const tracker = new FakeTracker();
+    deployment(tracker, 1, 'production-web', A);
+    release(tracker, 1, A, 'v1.0.0');
+    const releases = vi.spyOn(tracker, 'listReleases');
+
+    expect(await satisfiedTargets(tracker, releaseCfg, awaiting([A], ['web', 'api', 'cli', 'desktop']))).toEqual({
+      targets: ['web', 'cli', 'desktop'],
+      urls: ['https://deploys.test/production-web/1', 'https://github.test/releases/v1.0.0'],
+    });
+    expect(releases).toHaveBeenCalledTimes(1);
+  });
+
+  it('satisfies nothing, and reads nothing, for a task with no merged PR', async () => {
+    const tracker = new FakeTracker();
+    release(tracker, 1, A);
+    const releases = vi.spyOn(tracker, 'listReleases');
+
+    expect(await satisfiedTargets(tracker, releaseCfg, awaiting([], ['cli']))).toEqual({ targets: [], urls: [] });
+    expect(releases).not.toHaveBeenCalled();
+  });
+
+  it('rejects when reading the releases fails', async () => {
+    const tracker = new FakeTracker();
+    release(tracker, 1, A);
+    tracker.failNext('listReleases');
+
+    await expect(satisfiedTargets(tracker, releaseCfg, awaiting([A], ['cli']))).rejects.toThrow(/listReleases failed/);
+  });
+});
+
 describe('sdlc deploy record', () => {
   function program(h: ReturnType<typeof setup>): Command {
     const root = new Command().exitOverride().configureOutput({ writeErr: () => {} });
@@ -491,6 +711,17 @@ describe('sdlc deploy record', () => {
     await run(program(h), '--target', 'web', '--sha', A, '--verify', 'exit 3');
 
     expect(h.err).toEqual(['verify command failed (exit 3); no deployment recorded']);
+    expect(process.exitCode).toBe(1);
+    expect(h.tracker.deployments).toEqual([]);
+  });
+
+  it('refuses a blank --verify before recording anything', async () => {
+    const h = setup();
+    h.tracker.defaultBranchShas.add(A);
+
+    await run(program(h), '--target', 'web', '--sha', A, '--verify', '  ');
+
+    expect(h.err).toEqual(['verify command is empty']);
     expect(process.exitCode).toBe(1);
     expect(h.tracker.deployments).toEqual([]);
   });

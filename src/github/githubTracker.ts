@@ -12,6 +12,7 @@ import type {
   DeploymentInfo,
   IssueComment,
   PrInfo,
+  ReleaseInfo,
   TrackedTask,
   Tracker,
   UntrackedIssue,
@@ -85,6 +86,14 @@ interface DeploymentRow {
   environment: string;
   url: string;
   created_at: string;
+}
+
+interface ReleaseRow {
+  tag_name: string;
+  html_url: string;
+  draft: boolean;
+  prerelease: boolean;
+  published_at: string | null;
 }
 
 interface IssueBoard {
@@ -443,6 +452,44 @@ export class GitHubTracker implements Tracker {
       if (rows.length < perPage) break;
     }
     return found.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id - a.id);
+  }
+
+  /**
+   * Looks through the newest releases (paging past GitHub's 100 per page when needed) until `limit`
+   * published ones are found, skipping drafts and prereleases, and resolves each tag to its commit.
+   */
+  async listReleases(limit: number): Promise<ReleaseInfo[]> {
+    if (!(limit > 0)) return [];
+    const perPage = Math.min(limit, MAX_PER_PAGE);
+    const published: (ReleaseRow & { published_at: string })[] = [];
+    for (let page = 1; published.length < limit; page += 1) {
+      const rows =
+        (await ghJson<ReleaseRow[] | undefined>(this.run, [
+          'api',
+          `repos/${this.repo}/releases?per_page=${perPage}` + (page > 1 ? `&page=${page}` : ''),
+        ])) ?? [];
+      for (const row of rows) {
+        if (!row.draft && !row.prerelease && row.published_at) {
+          published.push({ ...row, published_at: row.published_at });
+        }
+      }
+      if (rows.length < perPage) break;
+    }
+    const newest = published
+      .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))
+      .slice(0, limit);
+    const shas = await mapInChunks(newest, FETCH_CONCURRENCY, async row => {
+      const tag = row.tag_name.split('/').map(encodeURIComponent).join('/');
+      const sha = (await ghText(this.run, ['api', `repos/${this.repo}/commits/${tag}`, '--jq', '.sha'])).trim();
+      if (!sha) throw new Error(`Could not resolve the tag "${row.tag_name}" to a commit`);
+      return sha;
+    });
+    return newest.map((row, i) => ({
+      tag: row.tag_name,
+      sha: shas[i] as string,
+      url: row.html_url,
+      publishedAt: row.published_at,
+    }));
   }
 
   /**
