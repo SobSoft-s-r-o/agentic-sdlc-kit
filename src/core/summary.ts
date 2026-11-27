@@ -13,9 +13,12 @@ export function renderStageSummary(input: {
   return input.needsApproval ? `${body}\n\n---\n\nApprove with /approve` : body;
 }
 
+/** The first line of every delivery report; reconcile looks for it to avoid posting a report twice. */
+export const DELIVERY_REPORT_HEADING = '### Delivered';
+
 /** The comment posted when a task completes: what was delivered and the deployments that delivered it. */
 export function renderDeliveryReport(state: TaskState): string {
-  const lines = ['### Delivered', ''];
+  const lines = [DELIVERY_REPORT_HEADING, ''];
   lines.push(state.targets.length > 0 ? `**Targets:** ${state.targets.join(', ')}` : 'No deployment targets.');
   const urls = state.deliveredBy ?? [];
   if (urls.length > 0) {

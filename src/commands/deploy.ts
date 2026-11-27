@@ -3,14 +3,19 @@ import { constants as osConstants } from 'node:os';
 import type { Command } from 'commander';
 import { targetByName } from '../config/schema.js';
 import { DEPLOYMENT_LOOKBACK } from '../engine/deployments.js';
+import { reconcile, type ReconcileResult } from '../engine/reconcile.js';
 import type { DeploymentInfo } from '../tracker/types.js';
 import { runCommand, trackerStep, type CommandContext, type ContextFactory } from './context.js';
+import { describeReconcile } from './reconcile.js';
 
 /** A commit id as `git` prints it: 7 to 40 hex digits. */
 const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
 
-/** A deployment, flagged `alreadyRecorded` when it was found instead of created. */
-export type RecordedDeployment = DeploymentInfo & { alreadyRecorded?: true };
+/**
+ * A deployment, flagged `alreadyRecorded` when it was found instead of created. `reconcile` is the
+ * deployment reconcile run that followed, present when it reported any action.
+ */
+export type RecordedDeployment = DeploymentInfo & { alreadyRecorded?: true; reconcile?: ReconcileResult };
 
 /** Runs a shell command and resolves with its exit code. */
 export type VerifyRunner = (command: string) => Promise<number>;
@@ -37,7 +42,9 @@ export const runShell: VerifyRunner = command =>
  * the first failure rejects with nothing recorded: the target is configured, `sha` is a commit id,
  * `verify`, when given, is not blank, `sha` is on the default branch, the `verify` command exits 0.
  * A successful deployment of exactly `sha` (ignoring letter case) to the environment is returned
- * as it is, flagged `alreadyRecorded`, instead of recording a second one.
+ * as it is, flagged `alreadyRecorded`, instead of recording a second one. Either way, the tasks
+ * awaiting deployment are then reconciled (`reconcile(ctx, { only: 'deployments' })`); its result is
+ * returned as `reconcile` when it has any action. A reconcile error does not reject.
  */
 export async function deployRecord(
   ctx: CommandContext,
@@ -62,22 +69,27 @@ export async function deployRecord(
     ctx.tracker.listSuccessfulDeployments(target.environment, DEPLOYMENT_LOOKBACK),
   );
   const found = existing.find(d => d.sha.toLowerCase() === sha.toLowerCase());
-  if (found) return { ...found, alreadyRecorded: true };
+  const recorded: RecordedDeployment = found
+    ? { ...found, alreadyRecorded: true }
+    : await trackerStep('createDeployment', undefined, () =>
+        ctx.tracker.createDeployment({
+          environment: target.environment,
+          sha,
+          target: target.name,
+          description: `sdlc deploy record (${target.name})`,
+        }),
+      );
 
-  return trackerStep('createDeployment', undefined, () =>
-    ctx.tracker.createDeployment({
-      environment: target.environment,
-      sha,
-      target: target.name,
-      description: `sdlc deploy record (${target.name})`,
-    }),
-  );
+  const reconciled = await reconcile(ctx, { only: 'deployments' });
+  return reconciled.actions.length > 0 ? { ...recorded, reconcile: reconciled } : recorded;
 }
 
-const describeRecorded = (d: RecordedDeployment): string =>
-  d.alreadyRecorded
+const describeRecorded = (d: RecordedDeployment): string => {
+  const line = d.alreadyRecorded
     ? `Deployment ${d.id} of ${d.sha} to ${d.environment} was already recorded: ${d.url}`
     : `Recorded deployment ${d.id} of ${d.sha} to ${d.environment}: ${d.url}`;
+  return d.reconcile ? `${line}\n${describeReconcile(d.reconcile)}` : line;
+};
 
 /** Registers `sdlc deploy record`. */
 export function registerDeployCommand(program: Command, makeContext: ContextFactory): void {
@@ -94,7 +106,11 @@ export function registerDeployCommand(program: Command, makeContext: ContextFact
       await runCommand(
         makeContext,
         options,
-        ctx => deployRecord(ctx, { target: options.target, sha: options.sha, verify: options.verify }),
+        async ctx => {
+          const recorded = await deployRecord(ctx, { target: options.target, sha: options.sha, verify: options.verify });
+          if ((recorded.reconcile?.errors ?? 0) > 0) process.exitCode = 1;
+          return recorded;
+        },
         describeRecorded,
       );
     });

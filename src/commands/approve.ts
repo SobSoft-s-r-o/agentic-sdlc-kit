@@ -1,6 +1,13 @@
 import type { Command } from 'commander';
-import { parseOwnerCommand } from '../core/ownerCommand.js';
-import { applyEvent, TransitionError } from '../core/stateMachine.js';
+import {
+  APPROVAL_ACTIONS,
+  approvalEvent,
+  finalMergeTime,
+  normalizeCommentUrl,
+  validateCommentApproval,
+  type ApprovalAction,
+} from '../core/approvals.js';
+import { applyEvent } from '../core/stateMachine.js';
 import { renderCancelReport } from '../core/summary.js';
 import type { Approval, Phase, TaskEvent, TaskState } from '../core/types.js';
 import type { IssueComment, PrInfo } from '../tracker/types.js';
@@ -17,8 +24,7 @@ import {
   type ContextFactory,
 } from './context.js';
 
-export const APPROVAL_ACTIONS = ['approve', 'accept', 'ran', 'cancel'] as const;
-export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
+export { APPROVAL_ACTIONS, type ApprovalAction };
 
 export interface ApproveInput {
   action: ApprovalAction;
@@ -35,22 +41,6 @@ export interface ApproveInput {
 /** Later than any real timestamp, so only a transition that is impossible whatever the time fails. */
 const FAR_FUTURE = '9999-12-31T23:59:59.999Z';
 
-/** `.../pull/3#issuecomment-9` and `.../issues/3#issuecomment-9` name the same comment. */
-const normalizeUrl = (url: string): string => url.trim().replace(/\/pull\/(\d+)/, '/issues/$1').toLowerCase();
-
-function eventFor(action: ApprovalAction, phase: Phase, reason: string, approval: Approval): TaskEvent {
-  switch (action) {
-    case 'approve':
-      return { kind: 'stage_approved', phase, approval };
-    case 'accept':
-      return { kind: 'accepted', approval };
-    case 'ran':
-      return { kind: 'confirmed_ran', approval };
-    case 'cancel':
-      return { kind: 'cancelled', reason, approval };
-  }
-}
-
 /** The comment `url` on the task issue or one of its PRs; the PRs are only listed when the issue does not hold it. */
 async function findComment(
   ctx: CommandContext,
@@ -58,10 +48,10 @@ async function findComment(
   url: string,
   listPrs: () => Promise<PrInfo[]>,
 ): Promise<IssueComment> {
-  const wanted = normalizeUrl(url);
+  const wanted = normalizeCommentUrl(url);
   const onThread = async (thread: number): Promise<IssueComment | undefined> => {
     const comments = await trackerStep('listComments', issue, () => ctx.tracker.listComments(thread));
-    return comments.find(comment => normalizeUrl(comment.url) === wanted);
+    return comments.find(comment => normalizeCommentUrl(comment.url) === wanted);
   };
 
   const onIssue = await onThread(issue);
@@ -71,16 +61,6 @@ async function findComment(
     if (onPr) return onPr;
   }
   throw new Error(`comment ${url} was not found on #${issue} or its pull requests`);
-}
-
-/**
- * When the task's final PR merged: the latest `mergedAt` the tracker reports for its recorded final
- * PRs, else the time the merge was recorded (later than the real merge, so the stricter bound).
- */
-function finalMergeTime(state: TaskState, prs: PrInfo[]): string | undefined {
-  const finals = new Set(state.prs.filter(pr => pr.scope === 'final').map(pr => pr.number));
-  const times = prs.filter(pr => finals.has(pr.number) && pr.merged && pr.mergedAt).map(pr => pr.mergedAt as string);
-  return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? state.finalMergedAt;
 }
 
 /**
@@ -106,7 +86,7 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
   const { state } = loaded.task;
   const phase = input.phase ?? state.phase;
   let reason = input.reason?.trim() ?? '';
-  const eventWith = (approval: Approval): TaskEvent => eventFor(action, phase, reason, approval);
+  const eventWith = (approval: Approval): TaskEvent => approvalEvent(action, phase, reason, approval);
 
   // Fail on anything but timing (not published, wrong task type, done) before looking up comments.
   applyEvent(state, eventWith({ source: 'unverified', ref: '', by: '', at: FAR_FUTURE }), loaded.type, ctx.now());
@@ -121,37 +101,17 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
     approval = { source: 'unverified', ref: 'unverified', by: login ?? 'unknown', at: ctx.now() };
   } else {
     const comment = await findComment(ctx, issue, commentUrl, listPrs);
-    if (!ctx.cfg.owners.some(owner => owner.toLowerCase() === comment.author.toLowerCase())) {
-      throw new Error(`comment ${comment.url} is by ${comment.author || 'an unknown author'}, who is not a configured owner`);
-    }
-    const command = parseOwnerCommand(comment.body);
-    if (command?.action !== action) throw new Error(`comment ${comment.url} is not a /${action} command`);
-    // Anyone who can write to the repo can edit an owner's comment into a command.
-    if (Date.parse(comment.updatedAt) > Date.parse(comment.createdAt)) {
-      throw new Error(`comment ${comment.url} was edited after posting; post a new /${action} comment`);
-    }
-    if (!reason) reason = command.reason ?? '';
-
-    const login = await trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin());
-    const ownComment = login !== undefined && login.toLowerCase() === comment.author.toLowerCase();
-    if (ownComment && ctx.cfg.mode === 'enforce') {
-      throw new Error(
-        `comment ${comment.url} is authored by the agent's own login (${login}); ` +
-          'approve via prompt or run agents under a separate account',
-      );
-    }
-    approval = { source: ownComment ? 'unverified' : 'comment', ref: comment.url, by: comment.author, at: comment.createdAt };
-
-    // The state machine checks the comment against the publication and the reopen; it does not
-    // know when the final PR really merged (its own record is later), so `ran` is checked here.
-    if (action === 'ran') {
-      const merged = finalMergeTime(state, await listPrs());
-      if (merged !== undefined && !(Date.parse(comment.createdAt) > Date.parse(merged))) {
-        throw new TransitionError(
-          `confirmation at ${comment.createdAt} is not newer than the final PR merged at ${merged}`,
-        );
-      }
-    }
+    const checked = await validateCommentApproval({
+      comment,
+      action,
+      phase,
+      state,
+      cfg: ctx.cfg,
+      login: () => trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin()),
+      finalMergedAt: async () => finalMergeTime(state, await listPrs()),
+    });
+    approval = checked.approval;
+    if (!reason) reason = checked.command.reason ?? '';
   }
 
   if (action === 'cancel' && !reason) throw new Error('cancel needs a reason (--reason <text>)');
