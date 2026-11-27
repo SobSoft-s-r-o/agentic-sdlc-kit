@@ -50,6 +50,11 @@ export interface DeploymentInfo {
  * implementation talks to GitHub through the `gh` CLI; tests use an in-memory fake.
  */
 export interface Tracker {
+  /**
+   * The login the tool writes as, or `undefined` when the token may not read it (the Actions
+   * `GITHUB_TOKEN`). Recorded as `by` on approvals the tool records itself.
+   */
+  authenticatedLogin(): Promise<string | undefined>;
   createIssue(title: string, body: string, labels: string[]): Promise<{ number: number; url: string }>;
   addToBoard(issue: number): Promise<void>;
   /**

@@ -24,6 +24,17 @@ const boardFields = (): BoardFields => ({
   lastUpdate: NOW,
 });
 
+describe('FakeTracker.authenticatedLogin', () => {
+  it('is the login, and can be made to fail', async () => {
+    const tracker = new FakeTracker();
+    tracker.login = 'agent-login';
+    await expect(tracker.authenticatedLogin()).resolves.toBe('agent-login');
+    tracker.failNext('authenticatedLogin');
+    await expect(tracker.authenticatedLogin()).rejects.toThrow(/authenticatedLogin/);
+    expect(tracker.writes).toBe(0);
+  });
+});
+
 describe('FakeTracker.failNext', () => {
   it('rejects exactly one call', async () => {
     const tracker = new FakeTracker();

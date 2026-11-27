@@ -242,6 +242,16 @@ describe('GitHubTracker login', () => {
     expect(run.calls.filter(args => args.includes('user'))).toHaveLength(1);
   });
 
+  it('exposes the login, and none when the token may not read /user', async () => {
+    const own = trackerFor([LOGIN]);
+    await expect(own.tracker.authenticatedLogin()).resolves.toBe('octo-agent');
+    await expect(own.tracker.authenticatedLogin()).resolves.toBe('octo-agent');
+    expect(own.run.calls).toHaveLength(1);
+
+    const forbidden = trackerFor([failing(['api', 'user'], 'gh: Resource not accessible by integration (HTTP 403)')]);
+    await expect(forbidden.tracker.authenticatedLogin()).resolves.toBeUndefined();
+  });
+
   it('retries the lookup after it failed', async () => {
     const { run, tracker } = trackerFor([
       view12,

@@ -110,6 +110,12 @@ export class FakeTracker implements Tracker {
     return created.id;
   }
 
+  /** Always `login`; a failure can be injected like any other call. */
+  async authenticatedLogin(): Promise<string | undefined> {
+    this.begin('authenticatedLogin');
+    return this.login;
+  }
+
   async createIssue(
     title: string,
     body: string,

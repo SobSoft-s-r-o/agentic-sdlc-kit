@@ -531,7 +531,7 @@ export class GitHubTracker implements Tracker {
    * `/user` (the Actions `GITHUB_TOKEN`) yields `undefined`: only the owners and the Actions bot
    * are then trusted. Any other failure is not remembered, so the next call looks again.
    */
-  private authenticatedLogin(): Promise<string | undefined> {
+  authenticatedLogin(): Promise<string | undefined> {
     if (!this.login) {
       const lookup = ghText(this.run, ['api', 'user', '-q', '.login']).then(
         text => text.trim() || undefined,
