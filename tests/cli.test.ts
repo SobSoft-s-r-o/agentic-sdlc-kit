@@ -11,6 +11,7 @@ import { renderGitHooks } from '../src/render/github.js';
 import { newTask } from '../src/core/stateMachine.js';
 import { GhError, type GhRunner } from '../src/github/gh.js';
 import { FakeTracker } from './support/fakeTracker.js';
+import { githubToken } from './support/secrets.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const cliPath = join(root, 'dist', 'cli.js');
@@ -221,6 +222,29 @@ describe('sdlc githook (built)', () => {
     return isolatedEnv(bin);
   }
 
+  /** An empty commit in `root` (hooks are not installed yet); returns its sha. */
+  function commitEmpty(root: string): string {
+    const env = isolatedEnv(process.env.PATH ?? '');
+    const args = ['-c', 'user.name=Test', '-c', 'user.email=test@example.test'];
+    execFileSync('git', [...args, 'commit', '-q', '--allow-empty', '-m', 'base'], { cwd: root, env });
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, env, encoding: 'utf8' }).trim();
+  }
+
+  /** Installs the rendered hook scripts in `root`; returns the environment to run git in (it finds `sdlc` and git only). */
+  function installRenderedHooks(root: string): NodeJS.ProcessEnv {
+    const hooks = join(root, '.sdlc', 'githooks');
+    mkdirSync(hooks, { recursive: true });
+    for (const change of renderGitHooks()) {
+      if (change.kind !== 'file') throw new Error('hooks are files');
+      writeFileSync(join(root, change.path), change.content, { mode: change.mode });
+    }
+    execFileSync('git', ['config', 'core.hooksPath', '.sdlc/githooks'], { cwd: root, env: isolatedEnv(process.env.PATH ?? '') });
+    const env = onlyGit();
+    // The scripts find `sdlc` on the PATH, as they do for an installed package.
+    writeFileSync(join(dir, 'only-git', 'sdlc'), `#!/bin/sh\nexec "${process.execPath}" "${cliPath}" "$@"\n`, { mode: 0o755 });
+    return env;
+  }
+
   it('pre-commit on the default branch warns in observe mode and blocks in enforce mode', () => {
     const warned = sdlc(['githook', 'pre-commit'], { cwd: repo('observe'), env: onlyGit() });
     rmSync(join(dir, 'repo'), { recursive: true });
@@ -238,7 +262,7 @@ describe('sdlc githook (built)', () => {
 
   it('pre-push reads the updates from stdin', () => {
     const root = repo('enforce');
-    const update = `refs/heads/work ${'a'.repeat(40)} refs/heads/main ${'0'.repeat(40)}\n`;
+    const update = `refs/heads/work ${commitEmpty(root)} refs/heads/main ${'0'.repeat(40)}\n`;
 
     const result = sdlc(['githook', 'pre-push', 'origin', 'git@example.test:acme/shop.git'], {
       cwd: root,
@@ -252,22 +276,72 @@ describe('sdlc githook (built)', () => {
     );
   });
 
-  it('a missing config warns and exits 0', () => {
+  it('a missing config warns and exits 0 when nothing is staged: the branch rules are skipped, the guard is not', () => {
     const root = repo('enforce');
     rmSync(join(root, 'sdlc.config.yaml'));
 
     const result = sdlc(['githook', 'pre-commit'], { cwd: root, env: onlyGit() });
 
     expect(result.status).toBe(0);
-    expect(result.stderr).toContain('sdlc: warning: could not load the config (Cannot read config file');
-    expect(result.stderr).toContain('git hook pre-commit skipped');
+    expect(result.stderr).toContain('sdlc: warning: sdlc.config.yaml could not be loaded (Cannot read config file');
+    expect(result.stderr).toContain('branch rules skipped, secret guard still active');
   });
 
-  it('outside a git repository there is no branch to judge: exit 0', () => {
+  it('a missing config does not switch the guard off: a staged secret still blocks', () => {
+    const root = repo('enforce');
+    rmSync(join(root, 'sdlc.config.yaml'));
+    const env = onlyGit();
+    const token = githubToken();
+    writeFileSync(join(root, 'app.ts'), `const t = "${token}";\n`);
+    execFileSync('git', ['add', 'app.ts'], { cwd: root, env });
+
+    const result = sdlc(['githook', 'pre-commit'], { cwd: root, env });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('branch rules skipped, secret guard still active');
+    expect(result.stderr).toContain('sdlc secret guard: commit blocked');
+    expect(result.stderr).toContain('app.ts:1 github-token ghp_…(40 chars)');
+    expect(result.stderr).not.toContain(token);
+  });
+
+  it('outside a git repository the guard cannot scan, so it blocks (fails closed)', () => {
     const result = sdlc(['githook', 'pre-commit'], { env: onlyGit() });
 
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe('');
+    expect(result.status).toBe(1);
+    expect(result.stderr.trim()).toMatch(/^sdlc secret guard: could not scan \(git diff failed: .+\); commit blocked$/);
+  });
+
+  it.each(['observe', 'enforce'] as const)('%s: a staged secret blocks the commit and only a masked match is printed', mode => {
+    const root = repo(mode);
+    const env = onlyGit();
+    const token = githubToken();
+    execFileSync('git', ['checkout', '-q', '-b', 'task/1-first'], { cwd: root, env });
+    writeFileSync(join(root, 'app.ts'), `const a = 1;\nconst t = "${token}";\n`);
+    writeFileSync(join(root, '.env.local'), 'A=1\n');
+    execFileSync('git', ['add', 'app.ts', '.env.local'], { cwd: root, env });
+
+    const result = sdlc(['githook', 'pre-commit'], { cwd: root, env });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    const lines = result.stderr.trim().split('\n');
+    expect(lines[0]).toBe('sdlc secret guard: commit blocked');
+    expect(lines.filter(line => line.startsWith('app.ts:2 github-token ghp_…(40 chars) (fingerprint '))).toHaveLength(1);
+    expect(lines.filter(line => line.startsWith('.env.local env-file .env.local (fingerprint '))).toHaveLength(1);
+    expect(lines.at(-1)).toContain('sdlc:allow-secret');
+    expect(result.stderr).not.toContain(token);
+    expect(result.stderr).not.toContain(token.slice(0, 8));
+  });
+
+  it('a push of an object git does not have cannot be scanned, so it is blocked', () => {
+    const root = repo('observe');
+    const update = `refs/heads/work ${'a'.repeat(40)} refs/heads/topic ${'0'.repeat(40)}\n`;
+
+    const result = sdlc(['githook', 'pre-push', 'origin', 'x'], { cwd: root, env: onlyGit(), input: update });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('sdlc secret guard: could not scan (git log failed: ');
+    expect(result.stderr).toContain('); push blocked');
   });
 
   it('the rendered scripts work under real git: a commit on main warns or blocks, one on a task branch passes', () => {
@@ -278,16 +352,7 @@ describe('sdlc githook (built)', () => {
     vi.stubEnv('GIT_DIR', join(dir, 'not-a-repository'));
     vi.stubEnv('GIT_INDEX_FILE', join(dir, 'not-an-index'));
     const root = repo('enforce');
-    const hooks = join(root, '.sdlc', 'githooks');
-    mkdirSync(hooks, { recursive: true });
-    for (const change of renderGitHooks()) {
-      if (change.kind !== 'file') throw new Error('hooks are files');
-      writeFileSync(join(root, change.path), change.content, { mode: change.mode });
-    }
-    execFileSync('git', ['config', 'core.hooksPath', '.sdlc/githooks'], { cwd: root, env: isolatedEnv(process.env.PATH ?? '') });
-    const env = onlyGit();
-    // The scripts find `sdlc` on the PATH, as they do for an installed package.
-    writeFileSync(join(dir, 'only-git', 'sdlc'), `#!/bin/sh\nexec "${process.execPath}" "${cliPath}" "$@"\n`, { mode: 0o755 });
+    const env = installRenderedHooks(root);
     const commit = () =>
       spawnSync(
         'git',
@@ -303,6 +368,63 @@ describe('sdlc githook (built)', () => {
     expect(onMain.stderr).toContain('sdlc: error: committing directly to main');
     expect(onTask.status).toBe(0);
     expect(onTask.stderr).toBe('');
+  });
+
+  it('the rendered scripts block a secret under real git, in observe mode: the commit, then the push of a history that holds it', () => {
+    const root = repo('observe');
+    const remote = join(dir, 'remote.git');
+    const token = githubToken();
+    const env = installRenderedHooks(root);
+    const git = (...args: string[]) =>
+      spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', ...args], { cwd: root, env, encoding: 'utf8' });
+    const mustGit = (...args: string[]): string => {
+      const result = git(...args);
+      if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
+      return result.stdout.trim();
+    };
+    const remoteRefs = () => execFileSync('git', ['for-each-ref', '--format=%(refname)'], { cwd: remote, env, encoding: 'utf8' }).trim();
+    execFileSync('git', ['init', '-q', '--bare', remote], { env });
+    mustGit('remote', 'add', 'origin', remote);
+
+    // A clean commit and push pass (the observe-mode warnings about main are not blocks).
+    expect(git('commit', '--allow-empty', '-m', 'base').status).toBe(0);
+    const cleanPush = git('push', 'origin', 'main');
+    expect(cleanPush.status).toBe(0);
+    expect(remoteRefs()).toBe('refs/heads/main');
+
+    // The commit with a staged token is refused, and nothing is committed.
+    mustGit('checkout', '-q', '-b', 'task/1-leak');
+    writeFileSync(join(root, 'app.ts'), `export const t = "${token}";\n`);
+    mustGit('add', 'app.ts');
+    const refused = git('commit', '-m', 'leak');
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain('sdlc secret guard: commit blocked');
+    expect(refused.stderr).toContain('app.ts:1 github-token ghp_…(40 chars)');
+    expect(refused.stderr).not.toContain(token);
+    expect(mustGit('rev-list', '--count', 'HEAD')).toBe('1');
+
+    // --no-verify skips the pre-commit hook (a git feature), but the pre-push hook still stops the push.
+    expect(git('commit', '--no-verify', '-m', 'leak').status).toBe(0);
+    const pushed = git('push', 'origin', 'task/1-leak');
+    expect(pushed.status).not.toBe(0);
+    expect(pushed.stderr).toContain('sdlc secret guard: push blocked');
+    expect(pushed.stderr).toContain('app.ts:1 github-token ghp_…(40 chars)');
+    expect(pushed.stderr).not.toContain(token);
+    expect(remoteRefs()).toBe('refs/heads/main');
+
+    // Deleting the file in a later commit does not help: the pushed history still holds the secret.
+    mustGit('rm', '-q', 'app.ts');
+    expect(git('commit', '-m', 'remove it').status).toBe(0);
+    expect(git('push', 'origin', 'task/1-leak').status).not.toBe(0);
+    expect(remoteRefs()).toBe('refs/heads/main');
+
+    // A line that says so is let through, commit and push.
+    mustGit('checkout', '-q', '-b', 'task/2-allowed', 'main');
+    writeFileSync(join(root, 'fixture.ts'), `export const t = "${token}"; // sdlc:allow-secret\n`);
+    mustGit('add', 'fixture.ts');
+    expect(git('commit', '-m', 'fixture').status).toBe(0);
+    expect(git('push', 'origin', 'task/2-allowed').status).toBe(0);
+    expect(remoteRefs()).toBe('refs/heads/main\nrefs/heads/task/2-allowed');
   });
 
   it('a hook gives up a hanging tracker call at its deadline and really exits, though the call is still running', () => {

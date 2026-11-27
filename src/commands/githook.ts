@@ -8,6 +8,9 @@ import { StateCommentError } from '../core/stateComment.js';
 import type { TaskState } from '../core/types.js';
 import { GhError } from '../github/gh.js';
 import type { GitRunner } from '../install/provision.js';
+import { pushedChanges, stagedChanges, type ChangeSet } from '../secrets/gitDiff.js';
+import { runGitleaks, type Exec, type Which } from '../secrets/gitleaks.js';
+import { formatFinding, scanChanges } from '../secrets/scan.js';
 import { NoStateCommentError, type Tracker } from '../tracker/types.js';
 
 /**
@@ -15,8 +18,9 @@ import { NoStateCommentError, type Tracker } from '../tracker/types.js';
  * decisions are pure functions over what git hands the hook; everything that touches the outside
  * (git, the config, the tracker, stdin, the background process, the output) comes in through
  * `GitHookContext`. A hook never blocks over a problem of its own: a config that cannot be read, an
- * unknown hook name or an unexpected failure warn and exit 0. Only the branch rules block, and only
- * in `enforce` mode.
+ * unknown hook name or an unexpected failure warn and exit 0. The branch rules block only in
+ * `enforce` mode. The one exception is the secret guard of pre-commit and pre-push: it blocks in
+ * both modes, runs first, and fails closed (a guard that cannot scan blocks, whatever the reason).
  */
 
 export const HOOK_NAMES = ['pre-commit', 'pre-push', 'post-merge', 'post-checkout'] as const;
@@ -55,6 +59,10 @@ export interface GitHookContext {
   out(text: string): void;
   /** Prints one line to stderr. */
   err(text: string): void;
+  /** Runs a program (gitleaks, in pre-commit); without it, and without `which`, gitleaks is not used. */
+  exec?: Exec;
+  /** Finds a program on the PATH (gitleaks). */
+  which?: Which;
   /** How long the hooks wait for the tracker; the defaults are `PRE_PUSH_LOOKUP_TIMEOUT_MS` and `POST_CHECKOUT_LOOKUP_TIMEOUT_MS`. */
   timeouts?: { prePushMs?: number; postCheckoutMs?: number };
   /**
@@ -105,6 +113,10 @@ export function decidePreCommit(branch: string | undefined, cfg: Config): HookDe
 
 export interface PushUpdate {
   remoteRef: string;
+  /** What is pushed (all zeros for a deletion). */
+  localSha: string;
+  /** What the remote has (all zeros for a new ref). */
+  remoteSha: string;
   /** The push deletes the remote ref (its local sha is all zeros). */
   deleting: boolean;
 }
@@ -114,9 +126,9 @@ export function parsePushUpdates(lines: readonly string[]): PushUpdate[] {
   const updates: PushUpdate[] = [];
   for (const line of lines) {
     const fields = line.trim().split(/\s+/);
-    const [, localSha, remoteRef] = fields;
-    if (fields.length < 4 || localSha === undefined || remoteRef === undefined) continue;
-    updates.push({ remoteRef, deleting: /^0+$/.test(localSha) });
+    const [, localSha, remoteRef, remoteSha] = fields;
+    if (fields.length < 4 || localSha === undefined || remoteRef === undefined || remoteSha === undefined) continue;
+    updates.push({ remoteRef, localSha, remoteSha, deleting: /^0+$/.test(localSha) });
   }
   return updates;
 }
@@ -281,7 +293,9 @@ function deadlineOf(totalMs: number): Deadline {
 
 /**
  * The config, loaded on first use. A config that cannot be loaded gives `undefined` (after one
- * warning, unless `quiet`): the rules that need it are skipped, so a config problem never blocks git.
+ * warning, unless `quiet`): the rules that need it are skipped, so a config problem never blocks git
+ * over a branch rule. The secret guard of pre-commit and pre-push still runs then, with no allowed
+ * fingerprints, and the warning says so.
  */
 function configReader(ctx: GitHookContext, hook: HookName, quiet = false): () => Config | undefined {
   let result: { cfg: Config | undefined } | undefined;
@@ -292,7 +306,14 @@ function configReader(ctx: GitHookContext, hook: HookName, quiet = false): () =>
       } catch (error) {
         result = { cfg: undefined };
         if (!quiet) {
-          ctx.err(warning(`could not load the config (${firstLine(reasonOf(error))}); git hook ${hook} skipped`));
+          const reason = firstLine(reasonOf(error));
+          ctx.err(
+            warning(
+              hook === 'pre-commit' || hook === 'pre-push'
+                ? `sdlc.config.yaml could not be loaded (${reason}); branch rules skipped, secret guard still active`
+                : `could not load the config (${reason}); git hook ${hook} skipped`,
+            ),
+          );
         }
       }
     }
@@ -302,10 +323,58 @@ function configReader(ctx: GitHookContext, hook: HookName, quiet = false): () =>
 
 type ConfigReader = () => Config | undefined;
 
+// -- the secret guard -----------------------------------------------------------------------------------
+
+const SECRET_ADVICE =
+  'Move the secret to the keystore / production secret storage. False positive? add "sdlc:allow-secret" on the line, or add the fingerprint to secrets.allow in sdlc.config.yaml.';
+/** More findings than this are counted, not listed. */
+const MAX_LISTED_FINDINGS = 50;
+
+/**
+ * The secret guard: blocks (exit code 1) when what is about to be committed (`pre-commit`) or pushed
+ * (`pre-push`) holds a secret, in `observe` and `enforce` mode alike. `collect` gives the changes to
+ * scan; with `gitleaks`, gitleaks scans the staged changes too when it is on the PATH.
+ *
+ * It fails closed: if the changes cannot be collected or anything else goes wrong, it says that it
+ * could not scan and blocks, because a pass without a scan would let a secret through. It therefore
+ * handles all its own errors (the steps around it turn an error into a warning and exit 0). A config
+ * that cannot be read only means that no fingerprint is allowed. Everything it prints is masked.
+ */
+async function secretGuard(
+  ctx: GitHookContext,
+  config: ConfigReader,
+  what: 'commit' | 'push',
+  collect: () => Promise<ChangeSet>,
+  gitleaks: boolean,
+): Promise<number> {
+  try {
+    const changes = await collect();
+    let findings = scanChanges(changes, []);
+    // The config only matters for the fingerprints the owner accepted, so it is read when there is something to accept.
+    if (findings.length > 0) findings = scanChanges(changes, config()?.secrets.allow ?? []);
+    const leaks = gitleaks && ctx.exec && ctx.which ? await runGitleaks(ctx.exec, ctx.which) : undefined;
+    if (leaks?.warning !== undefined) ctx.err(warning(leaks.warning));
+    if (findings.length === 0 && leaks?.blocked !== true) return 0;
+    ctx.err(`sdlc secret guard: ${what} blocked`);
+    for (const finding of findings.slice(0, MAX_LISTED_FINDINGS)) ctx.err(formatFinding(finding));
+    if (findings.length > MAX_LISTED_FINDINGS) ctx.err(`… and ${findings.length - MAX_LISTED_FINDINGS} more`);
+    if (leaks?.blocked) {
+      ctx.err('gitleaks found secrets (its output is redacted):');
+      for (const line of leaks.output) ctx.err(`  ${oneLine(line)}`);
+      ctx.err('Run "gitleaks git --pre-commit --staged --redact -v" for the details.');
+    }
+    ctx.err(SECRET_ADVICE);
+    return 1;
+  } catch (error) {
+    ctx.err(`sdlc secret guard: could not scan (${oneLine(firstLine(reasonOf(error)))}); ${what} blocked`);
+    return 1;
+  }
+}
+
 async function preCommit(ctx: GitHookContext, config: ConfigReader): Promise<number> {
   return runSteps(ctx, 'pre-commit', [
-    // The secret guard is a step that goes first: it blocks in both modes and also when the config
-    // could not be read (it must never fail open over config), so it handles its own errors.
+    // The guard goes first and needs no branch, so it also scans on a detached HEAD.
+    () => secretGuard(ctx, config, 'commit', () => stagedChanges(ctx.git), true),
     async () => {
       const branch = await currentBranch(ctx.git);
       if (branch === undefined) return 0;
@@ -316,10 +385,34 @@ async function preCommit(ctx: GitHookContext, config: ConfigReader): Promise<num
 }
 
 async function prePush(ctx: GitHookContext, config: ConfigReader, deadline: Deadline): Promise<number> {
-  const lines = (await ctx.readStdin()).split('\n');
+  // Read once, inside the steps: a stdin that cannot be read must reach the guard, which blocks on it.
+  let stdin: Promise<string> | undefined;
+  const readStdin = (): Promise<string> => (stdin ??= Promise.resolve().then(() => ctx.readStdin()));
   return runSteps(ctx, 'pre-push', [
-    // The secret guard step goes first here too; see `preCommit`.
+    () =>
+      secretGuard(
+        ctx,
+        config,
+        'push',
+        async () => {
+          let input: string;
+          try {
+            input = await readStdin();
+          } catch (error) {
+            throw new Error(`the push input could not be read: ${firstLine(reasonOf(error))}`);
+          }
+          const lines = input.split('\n');
+          const updates = parsePushUpdates(lines);
+          // Every non-blank line is an update; one that cannot be read is one that cannot be scanned.
+          if (lines.filter(line => line.trim() !== '').length !== updates.length) {
+            throw new Error('the push input has a line that cannot be read');
+          }
+          return pushedChanges(ctx.git, updates);
+        },
+        false,
+      ),
     async () => {
+      const lines = (await readStdin()).split('\n');
       if (!parsePushUpdates(lines).some(update => !update.deleting)) return 0;
       const cfg = config();
       if (cfg === undefined) return 0;

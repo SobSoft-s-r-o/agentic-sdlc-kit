@@ -27,6 +27,7 @@ import { loadConfig, type Config } from './config/schema.js';
 import { defaultGhRunner } from './github/gh.js';
 import { GitHubTracker } from './github/githubTracker.js';
 import { createGitRunner } from './install/provision.js';
+import { execProgram, findOnPath } from './secrets/gitleaks.js';
 import { packageVersion } from './version.js';
 
 const CONFIG_FILE = 'sdlc.config.yaml';
@@ -133,6 +134,8 @@ export function buildProgram(deps: CliDeps = {}): Command {
       return {
         repoRoot,
         git: createGitRunner(repoRoot),
+        exec: execProgram(repoRoot),
+        which: command => findOnPath(command, process.env),
         loadConfig: () => environment().cfg,
         makeTracker: cfg => new GitHubTracker(defaultGhRunner, cfg, { repoRoot }),
         readStdin: () => readAllStdin(),
