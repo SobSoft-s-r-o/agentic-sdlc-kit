@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+import { parseOwnerCommand } from '../core/ownerCommand.js';
 import { applyEvent, TransitionError } from '../core/stateMachine.js';
 import { renderCancelReport } from '../core/summary.js';
 import type { Approval, Phase, TaskEvent, TaskState } from '../core/types.js';
@@ -72,18 +73,22 @@ async function findComment(
   throw new Error(`Comment ${url} was not found on #${issue} or its pull requests`);
 }
 
-/** The latest merge time of the task's recorded final PRs, as far as the tracker reports one. */
+/**
+ * When the task's final PR merged: the latest `mergedAt` the tracker reports for its recorded final
+ * PRs, else the time the merge was recorded (later than the real merge, so the stricter bound).
+ */
 function finalMergeTime(state: TaskState, prs: PrInfo[]): string | undefined {
   const finals = new Set(state.prs.filter(pr => pr.scope === 'final').map(pr => pr.number));
   const times = prs.filter(pr => finals.has(pr.number) && pr.merged && pr.mergedAt).map(pr => pr.mergedAt as string);
-  return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
+  return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? state.finalMergedAt;
 }
 
 /**
  * Records an owner decision on the task: `approve` a published stage, `accept` the published result,
  * confirm the production-data run (`ran`) or `cancel`. The decision needs a source: an owner's
- * `commentUrl`, which must be newer than what it acts on, or `unverified` (observe mode only).
- * `cancel` posts the cancel report before the state is written.
+ * `commentUrl`, which must be that command (`/approve`, `/accept`, `/ran`, `/cancel <reason>`) and
+ * newer than what it acts on, or `unverified` (observe mode only). `cancel` takes its reason from
+ * `input.reason`, else from the comment, and posts the cancel report before the state is written.
  */
 export async function approve(ctx: CommandContext, issue: number, input: ApproveInput): Promise<TaskState> {
   const { action, commentUrl, unverified = false } = input;
@@ -98,7 +103,7 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
   const loaded = await loadTask(ctx, issue);
   const { state } = loaded.task;
   const phase = input.phase ?? state.phase;
-  const reason = input.reason?.trim() ?? '';
+  let reason = input.reason?.trim() ?? '';
   const eventWith = (approval: Approval): TaskEvent => eventFor(action, phase, reason, approval);
 
   // Fail on anything but timing (not published, wrong task type, done) before looking up comments.
@@ -117,6 +122,9 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
     if (!ctx.cfg.owners.some(owner => owner.toLowerCase() === comment.author.toLowerCase())) {
       throw new Error(`Comment ${comment.url} is by ${comment.author || 'an unknown author'}, who is not a configured owner`);
     }
+    const command = parseOwnerCommand(comment.body);
+    if (command?.action !== action) throw new Error(`Comment ${comment.url} is not a /${action} command`);
+    if (!reason) reason = command.reason ?? '';
     approval = { source: 'comment', ref: comment.url, by: comment.author, at: comment.createdAt };
 
     // The state machine checks the comment against the publication and the reopen; it does not

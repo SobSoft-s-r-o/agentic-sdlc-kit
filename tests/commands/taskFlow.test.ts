@@ -100,8 +100,15 @@ async function pausedFeature(h: Harness): Promise<number> {
   return issue;
 }
 
-const ownerComment = (tracker: FakeTracker, thread: number, createdAt: string, author = OWNER): string => {
-  const id = tracker.seedComment(thread, { body: '/approve', author, createdAt });
+/** Seeds a comment (an `/approve` by the owner unless told otherwise) and returns its URL. */
+const ownerComment = (
+  tracker: FakeTracker,
+  thread: number,
+  createdAt: string,
+  options: { author?: string; body?: string } = {},
+): string => {
+  const { author = OWNER, body = '/approve' } = options;
+  const id = tracker.seedComment(thread, { body, author, createdAt });
   return tracker.comments.find(c => c.id === id)!.url;
 };
 
@@ -566,7 +573,7 @@ describe('approve sources', () => {
   it("accepts an owner's comment on the issue, stored with its url, author and time", async () => {
     const h = setup();
     const issue = await pausedFeature(h);
-    const url = ownerComment(h.tracker, issue, AFTER, 'Shop-Owner');
+    const url = ownerComment(h.tracker, issue, AFTER, { author: 'Shop-Owner' });
 
     const state = await approve(h.ctx, issue, { action: 'approve', commentUrl: url });
 
@@ -588,11 +595,32 @@ describe('approve sources', () => {
   it('refuses a comment by someone who is not an owner', async () => {
     const h = setup();
     const issue = await pausedFeature(h);
-    const url = ownerComment(h.tracker, issue, AFTER, 'drive-by');
+    const url = ownerComment(h.tracker, issue, AFTER, { author: 'drive-by' });
     await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
       /by drive-by, who is not a configured owner/,
     );
     expect((await stateOf(h.tracker, issue)).status).toBe('paused');
+  });
+
+  it('refuses an owner comment that is not the command being run', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    const bodies = ['Looks good to me', '> /approve', 'Thanks!\n/approve', '/approved', '/accept'];
+    for (const body of bodies) {
+      const url = ownerComment(h.tracker, issue, AFTER, { body });
+      await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
+        `Comment ${url} is not a /approve command`,
+      );
+    }
+    expect((await stateOf(h.tracker, issue)).status).toBe('paused');
+  });
+
+  it('accepts the command in any letter case with a note after it', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    const url = ownerComment(h.tracker, issue, AFTER, { body: '\n/Approve  go ahead\n\nThanks' });
+    const state = await approve(h.ctx, issue, { action: 'approve', commentUrl: url });
+    expect(state.stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: url });
   });
 
   it('refuses a comment older than the stage it approves', async () => {
@@ -650,12 +678,12 @@ describe('approve actions', () => {
     await stageStart(h.ctx, issue, 'analysis');
     await stagePublish(h.ctx, issue, 'analysis', { file: await summaryFile('Findings'), needsApproval: false });
 
-    const stale = ownerComment(h.tracker, issue, BEFORE);
+    const stale = ownerComment(h.tracker, issue, BEFORE, { body: '/accept' });
     await expect(approve(h.ctx, issue, { action: 'accept', commentUrl: stale })).rejects.toThrow(
       /not newer than the result published at/,
     );
 
-    const url = ownerComment(h.tracker, issue, AFTER);
+    const url = ownerComment(h.tracker, issue, AFTER, { body: '/accept' });
     const state = await approve(h.ctx, issue, { action: 'accept', commentUrl: url });
     expect(state).toMatchObject({ status: 'done', outcome: 'completed' });
     expect(state.outcomeApproval).toMatchObject({ source: 'comment', ref: url, by: OWNER });
@@ -672,8 +700,11 @@ describe('approve actions', () => {
   });
 
   describe('ran', () => {
-    /** A production-data task whose final PR 50 merged at `mergedAt`, as reconcile would record it. */
-    async function mergedProductionData(h: Harness, mergedAt: string): Promise<number> {
+    /**
+     * A production-data task whose final PR 50 merged at `mergedAt` (the tracker reports none when
+     * it is undefined); the merge was recorded at 2026-06-02, as reconcile would.
+     */
+    async function mergedProductionData(h: Harness, mergedAt: string | undefined): Promise<number> {
       const issue = await newTask(h, 'production-data');
       await evidenceAdd(h.ctx, issue, { kind: 'backup', ref: 'b' });
       await evidenceAdd(h.ctx, issue, { kind: 'dry_run', ref: 'd' });
@@ -685,14 +716,14 @@ describe('approve actions', () => {
         issue,
         applyEvent(state, { kind: 'pr_merged', pr: 50, scope: 'final', mergeSha: 'abc123' }, type, '2026-06-02T00:00:00.000Z'),
       );
-      Object.assign(h.tracker.prs[0], { merged: true, mergeSha: 'abc123', mergedAt });
+      Object.assign(h.tracker.prs[0], { merged: true, mergeSha: 'abc123', ...(mergedAt && { mergedAt }) });
       return issue;
     }
 
     it('confirms a run with an owner comment posted after the PR merged', async () => {
       const h = setup();
       const issue = await mergedProductionData(h, '2026-06-10T00:00:00.000Z');
-      const url = ownerComment(h.tracker, issue, '2026-06-11T00:00:00.000Z');
+      const url = ownerComment(h.tracker, issue, '2026-06-11T00:00:00.000Z', { body: '/ran' });
 
       const state = await approve(h.ctx, issue, { action: 'ran', commentUrl: url });
       expect(state).toMatchObject({ status: 'done', outcome: 'completed' });
@@ -702,12 +733,26 @@ describe('approve actions', () => {
     it('refuses a comment posted before the final PR merged', async () => {
       const h = setup();
       const issue = await mergedProductionData(h, '2026-06-10T00:00:00.000Z');
-      const early = ownerComment(h.tracker, issue, '2026-06-09T00:00:00.000Z');
+      const early = ownerComment(h.tracker, issue, '2026-06-09T00:00:00.000Z', { body: '/ran' });
 
       await expect(approve(h.ctx, issue, { action: 'ran', commentUrl: early })).rejects.toThrow(
         /not newer than the final PR merged at 2026-06-10/,
       );
       expect((await stateOf(h.tracker, issue)).status).toBe('paused');
+    });
+
+    it('falls back to the recorded merge time when the PR has no mergedAt', async () => {
+      const h = setup();
+      const issue = await mergedProductionData(h, undefined);
+
+      const early = ownerComment(h.tracker, issue, BEFORE, { body: '/ran' });
+      await expect(approve(h.ctx, issue, { action: 'ran', commentUrl: early })).rejects.toThrow(
+        /not newer than the final PR merged at 2026-06-02/,
+      );
+      expect((await stateOf(h.tracker, issue)).status).toBe('paused');
+
+      const late = ownerComment(h.tracker, issue, AFTER, { body: '/ran' });
+      expect((await approve(h.ctx, issue, { action: 'ran', commentUrl: late })).status).toBe('done');
     });
 
     it('refuses before the final PR is merged', async () => {
@@ -774,13 +819,39 @@ describe('approve actions', () => {
       await approve(h.ctx, issue, { action: 'cancel', reason: 'r', unverified: true });
       await taskReopen(h.ctx, issue);
 
-      const stale = ownerComment(h.tracker, issue, BEFORE);
-      await expect(approve(h.ctx, issue, { action: 'cancel', reason: 'again', commentUrl: stale })).rejects.toThrow(
+      const stale = ownerComment(h.tracker, issue, BEFORE, { body: '/cancel again' });
+      await expect(approve(h.ctx, issue, { action: 'cancel', commentUrl: stale })).rejects.toThrow(
         /not newer than the reopen/,
       );
-      const fresh = ownerComment(h.tracker, issue, AFTER);
-      const state = await approve(h.ctx, issue, { action: 'cancel', reason: 'again', commentUrl: fresh });
+      const fresh = ownerComment(h.tracker, issue, AFTER, { body: '/cancel again' });
+      const state = await approve(h.ctx, issue, { action: 'cancel', commentUrl: fresh });
       expect(state.outcomeApproval).toMatchObject({ source: 'comment', ref: fresh });
+    });
+
+    it("takes the reason from the owner's comment, unless --reason is given", async () => {
+      const h = setup();
+      const first = await newTask(h);
+      const second = await newTask(h);
+      const fromComment = ownerComment(h.tracker, first, AFTER, { body: '/cancel scope dropped\n\nsorry' });
+      const overridden = ownerComment(h.tracker, second, AFTER, { body: '/cancel scope dropped' });
+
+      const a = await approve(h.ctx, first, { action: 'cancel', commentUrl: fromComment });
+      const b = await approve(h.ctx, second, { action: 'cancel', commentUrl: overridden, reason: 'Superseded by #8' });
+
+      expect(a.cancelReason).toBe('scope dropped');
+      expect(h.tracker.fields.get(first)?.currentStep).toBe('Cancelled — scope dropped');
+      expect(visibleComments(h.tracker, first).at(-1)?.body).toContain('**Reason:** scope dropped');
+      expect(b.cancelReason).toBe('Superseded by #8');
+    });
+
+    it('refuses a /cancel comment that gives no reason', async () => {
+      const h = setup();
+      const issue = await newTask(h);
+      const url = ownerComment(h.tracker, issue, AFTER, { body: '/cancel' });
+      await expect(approve(h.ctx, issue, { action: 'cancel', commentUrl: url })).rejects.toThrow(
+        `Comment ${url} is not a /cancel command`,
+      );
+      expect((await stateOf(h.tracker, issue)).status).toBe('in_progress');
     });
   });
 });
