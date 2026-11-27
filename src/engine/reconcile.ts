@@ -5,6 +5,7 @@ import { targetByName, typeRegistry } from '../config/schema.js';
 import {
   approvalEvent,
   ApprovalRefusedError,
+  assertApprovalFits,
   finalMergeTime,
   normalizeCommentUrl,
   parseApprovalCommands,
@@ -57,11 +58,19 @@ export interface ReconcileResult {
   errors: number;
 }
 
-/** Later than any real timestamp: checks whether an approval fits the state whatever its time. */
-const FAR_FUTURE = '9999-12-31T23:59:59.999Z';
-
 const reasonOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-const byTime = (a: string | undefined, b: string | undefined): number => Date.parse(a ?? '') - Date.parse(b ?? '');
+/** Milliseconds of `iso`; a missing or unparseable time sorts last. */
+const timeOf = (iso: string | undefined): number => {
+  const ms = Date.parse(iso ?? '');
+  return Number.isNaN(ms) ? Infinity : ms;
+};
+/** Oldest first, missing times last; never NaN, so the sort is well defined. */
+const byTime = (a: string | undefined, b: string | undefined): number => {
+  const [x, y] = [timeOf(a), timeOf(b)];
+  return x === y ? 0 : x < y ? -1 : 1;
+};
+/** `at`, unless the stored `updatedAt` is later: an event time from GitHub never moves it back. */
+const laterOf = (stored: string, at: string): string => (byTime(stored, at) > 0 ? stored : at);
 
 /**
  * Wraps `inner` for one run: deployments, releases, ancestry and the login are read at most once
@@ -141,12 +150,13 @@ export async function reconcile(ctx: CommandContext, opts: ReconcileOptions = {}
   const dryRun = opts.dryRun ?? false;
   const only = opts.only ?? 'all';
   const run: CommandContext = { ...ctx, tracker: runTracker(ctx.tracker, dryRun) };
+  const types = typeRegistry(ctx.cfg);
   const actions: ReconcileAction[] = [];
 
   for (const task of await loadTasks(run, opts, only, actions)) {
     if (only === 'deployments' && task.state.status !== 'awaiting_deployment') continue;
     try {
-      await reconcileTask(run, task, { dryRun, only }, actions);
+      await reconcileTask(run, task, { dryRun, only, types }, actions);
     } catch (error) {
       actions.push({ issue: task.issue, kind: 'error', detail: reasonOf(error) });
     }
@@ -201,12 +211,12 @@ interface TaskRun {
 async function reconcileTask(
   ctx: CommandContext,
   task: TrackedTask,
-  opts: { dryRun: boolean; only: 'deployments' | 'all' },
+  opts: { dryRun: boolean; only: 'deployments' | 'all'; types: ReadonlyMap<string, TaskTypeDef> },
   actions: ReconcileAction[],
 ): Promise<void> {
   const { issue } = task;
   const push = (kind: ReconcileAction['kind'], detail: string): void => void actions.push({ issue, kind, detail });
-  const type = typeRegistry(ctx.cfg).get(task.state.type);
+  const type = opts.types.get(task.state.type);
   if (!type) {
     push('skipped_unknown_type', `task type "${task.state.type}" is not enabled`);
     return;
@@ -223,10 +233,17 @@ async function reconcileTask(
   await project(t, reportPosted);
 }
 
+/** Applies `event` at GitHub time `at`; the task's `updatedAt` never moves backwards. */
+function applyAt(t: TaskRun, event: TaskEvent, at: string): void {
+  const next = applyEvent(t.state, event, t.type, at);
+  next.updatedAt = laterOf(t.state.updatedAt, at);
+  t.state = next;
+}
+
 /** Applies `event`; an invalid transition is an `error` action and leaves the state as it was. */
 function applyOrReport(t: TaskRun, event: TaskEvent, at: string): boolean {
   try {
-    t.state = applyEvent(t.state, event, t.type, at);
+    applyAt(t, event, at);
     return true;
   } catch (error) {
     if (!(error instanceof TransitionError)) throw error;
@@ -239,7 +256,7 @@ function applyOrReport(t: TaskRun, event: TaskEvent, at: string): boolean {
 function applyMerges(t: TaskRun, prs: readonly PrInfo[]): void {
   const merged = prs
     .filter(pr => pr.merged && pr.mergeSha && pr.baseRef === t.ctx.cfg.github.defaultBranch)
-    .sort((a, b) => byTime(a.mergedAt, b.mergedAt));
+    .sort((a, b) => byTime(a.mergedAt, b.mergedAt) || a.number - b.number);
   for (const pr of merged) {
     if (t.state.status === 'done') return;
     if (t.state.prs.some(recorded => recorded.number === pr.number && recorded.mergeSha)) continue;
@@ -281,7 +298,6 @@ async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void>
   for (const thread of [task.issue, ...prs.map(pr => pr.number)]) {
     comments.push(...(await trackerStep('listComments', task.issue, () => ctx.tracker.listComments(thread))));
   }
-  comments.sort((a, b) => byTime(a.createdAt, b.createdAt));
   const parsed = parseApprovalCommands(comments, ctx.cfg.owners);
   const commands = [...parsed, ...parsed.ignored].sort((a, b) => byTime(a.comment.createdAt, b.comment.createdAt));
   const login = () => trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin());
@@ -298,8 +314,7 @@ async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void>
       if (parsed.includes(command)) {
         // Whether the command fits the task at all, before its author, edits or timing are checked.
         if (action === 'approve' && !pausedOnOwner) throw new TransitionError('the task is not paused waiting on the owner');
-        const probe: Approval = { source: 'unverified', ref: '', by: '', at: FAR_FUTURE };
-        applyEvent(state, approvalEvent(action, state.phase, reason, probe), t.type, FAR_FUTURE);
+        assertApprovalFits(state, t.type, action, state.phase, reason);
       }
       const { approval } = await validateCommentApproval({
         comment,
@@ -310,7 +325,7 @@ async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void>
         login,
         finalMergedAt: async () => finalMergeTime(state, prs),
       });
-      t.state = applyEvent(state, approvalEvent(action, state.phase, reason, approval), t.type, comment.createdAt);
+      applyAt(t, approvalEvent(action, state.phase, reason, approval), comment.createdAt);
       t.push('approval', describeApproval(command, approval, t.state));
     } catch (error) {
       if (!(error instanceof ApprovalRefusedError || error instanceof TransitionError)) throw error;
@@ -328,12 +343,15 @@ async function evidenceTime(t: TaskRun, targets: string[], urls: string[]): Prom
   const times: string[] = [];
   for (const name of targets) {
     const target = targetByName(t.ctx.cfg, name);
-    const deployments = await t.ctx.tracker.listSuccessfulDeployments(target.environment, DEPLOYMENT_LOOKBACK);
+    const deployments = await trackerStep('listSuccessfulDeployments', t.task.issue, () =>
+      t.ctx.tracker.listSuccessfulDeployments(target.environment, DEPLOYMENT_LOOKBACK),
+    );
     const deployment = deployments.find(d => wanted.has(d.url));
     if (deployment) {
       times.push(deployment.createdAt);
     } else if (target.deploy.via === 'release') {
-      const release = (await t.ctx.tracker.listReleases(DEPLOYMENT_LOOKBACK)).find(r => wanted.has(r.url));
+      const releases = await trackerStep('listReleases', t.task.issue, () => t.ctx.tracker.listReleases(DEPLOYMENT_LOOKBACK));
+      const release = releases.find(r => wanted.has(r.url));
       if (release) times.push(release.publishedAt);
     }
   }

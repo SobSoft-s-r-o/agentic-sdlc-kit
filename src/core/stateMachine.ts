@@ -69,6 +69,50 @@ function requireNewerThanReopen(state: TaskState, approval: Approval, action: st
   }
 }
 
+/** The events that record an owner decision. */
+export type ApprovalEvent = Extract<TaskEvent, { kind: 'stage_approved' | 'accepted' | 'confirmed_ran' | 'cancelled' }>;
+
+/**
+ * Throws `TransitionError` unless the owner decision in `event` is newer than what it acts on: the
+ * published stage (`stage_approved`, which also needs the stage to be published), the published
+ * result (`accepted`, which also needs a result) and, for decisions that end the task, the last
+ * reopen. The one timing check for `applyEvent` and for owner comments read from GitHub.
+ */
+export function assertApprovalTiming(state: TaskState, event: ApprovalEvent): void {
+  const { approval } = event;
+  switch (event.kind) {
+    case 'stage_approved': {
+      const publishedAt = state.stages[event.phase]?.publishedAt;
+      if (!publishedAt) {
+        throw new TransitionError(`stage "${event.phase}" has not been published, nothing to approve`);
+      }
+      if (!isAfter(approval.at, publishedAt)) {
+        throw new TransitionError(
+          `approval at ${approval.at} is not newer than stage "${event.phase}" published at ${publishedAt}`,
+        );
+      }
+      return;
+    }
+    case 'accepted':
+      if (!state.resultPublishedAt) {
+        throw new TransitionError('cannot accept: no result has been published');
+      }
+      if (!isAfter(approval.at, state.resultPublishedAt)) {
+        throw new TransitionError(
+          `acceptance at ${approval.at} is not newer than the result published at ${state.resultPublishedAt}`,
+        );
+      }
+      requireNewerThanReopen(state, approval, 'acceptance');
+      return;
+    case 'confirmed_ran':
+      requireNewerThanReopen(state, approval, 'confirmation');
+      return;
+    case 'cancelled':
+      requireNewerThanReopen(state, approval, 'cancellation');
+      return;
+  }
+}
+
 function complete(state: TaskState, approval?: Approval): void {
   state.status = 'done';
   state.outcome = 'completed';
@@ -137,15 +181,9 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
     }
 
     case 'stage_approved': {
+      assertApprovalTiming(state, event);
       const stage = next.stages[event.phase];
-      if (!stage?.publishedAt) {
-        throw new TransitionError(`stage "${event.phase}" has not been published, nothing to approve`);
-      }
-      if (!isAfter(event.approval.at, stage.publishedAt)) {
-        throw new TransitionError(
-          `approval at ${event.approval.at} is not newer than stage "${event.phase}" published at ${stage.publishedAt}`,
-        );
-      }
+      if (!stage) throw new TransitionError(`stage "${event.phase}" has not been published, nothing to approve`);
       stage.approval = { ...event.approval };
       next.status = 'in_progress';
       next.waitingOn = 'agent';
@@ -223,15 +261,7 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
       if (!ACCEPTANCE_ENDS.includes(type.endsOn)) {
         throw new TransitionError(`task type "${type.id}" does not end on owner acceptance`);
       }
-      if (!next.resultPublishedAt) {
-        throw new TransitionError('cannot accept: no result has been published');
-      }
-      if (!isAfter(event.approval.at, next.resultPublishedAt)) {
-        throw new TransitionError(
-          `acceptance at ${event.approval.at} is not newer than the result published at ${next.resultPublishedAt}`,
-        );
-      }
-      requireNewerThanReopen(state, event.approval, 'acceptance');
+      assertApprovalTiming(state, event);
       complete(next, event.approval);
       break;
     }
@@ -243,13 +273,13 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
       if (!next.finalMergedAt) {
         throw new TransitionError('cannot confirm: the final PR has not been merged');
       }
-      requireNewerThanReopen(state, event.approval, 'confirmation');
+      assertApprovalTiming(state, event);
       complete(next, event.approval);
       break;
     }
 
     case 'cancelled': {
-      requireNewerThanReopen(state, event.approval, 'cancellation');
+      assertApprovalTiming(state, event);
       next.status = 'done';
       next.outcome = 'cancelled';
       next.cancelReason = event.reason;

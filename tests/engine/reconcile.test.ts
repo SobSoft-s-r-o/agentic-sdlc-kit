@@ -187,6 +187,35 @@ describe('merged PRs', () => {
     expect((await stateOf(h, 1)).status).toBe('done');
   });
 
+  it('never moves updatedAt back to an older GitHub event time', async () => {
+    const h = setup();
+    const later = '2026-04-01T00:00:00.000Z';
+    h.tracker.seedTask(inReview(1, 'feature', { updatedAt: later }));
+    mergedPr(h, 1, 51);
+
+    await reconcile(h.ctx, {});
+
+    expect(await stateOf(h, 1)).toMatchObject({ status: 'awaiting_deployment', finalMergedAt: MERGED, updatedAt: later });
+  });
+
+  it('applies merges in merge order, a merge without a time last, ties by PR number', async () => {
+    const h = setup();
+    h.tracker.seedTask(inReview(1, 'tooling', { prs: [] }));
+    mergedPr(h, 1, 53, { mergedAt: undefined, mergeSha: 'c'.repeat(40), body: 'Related to #1\nScope: partial' });
+    mergedPr(h, 1, 52, { mergeSha: 'b'.repeat(40), body: 'Related to #1\nScope: partial' });
+    mergedPr(h, 1, 51, { mergedAt: '2026-03-16T00:00:00.000Z', body: 'Related to #1\nScope: partial' });
+    mergedPr(h, 1, 54, { mergedAt: undefined, mergeSha: 'd'.repeat(40), body: 'Related to #1\nScope: partial' });
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(result.actions.filter(a => a.kind === 'pr_merged').map(a => a.detail.slice(0, 6))).toEqual([
+      'PR #52',
+      'PR #51',
+      'PR #53',
+      'PR #54',
+    ]);
+  });
+
   it('ignores PRs that are unmerged or merged into another branch', async () => {
     const h = setup();
     h.tracker.seedTask(inReview(1, 'tooling'));

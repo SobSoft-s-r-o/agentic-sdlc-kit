@@ -1,14 +1,14 @@
 import type { Config } from '../config/schema.js';
 import type { IssueComment, PrInfo } from '../tracker/types.js';
 import { parseOwnerCommand, type OwnerCommand } from './ownerCommand.js';
-import { TransitionError } from './stateMachine.js';
-import type { Approval, Phase, TaskEvent, TaskState } from './types.js';
+import { applyEvent, assertApprovalTiming, TransitionError, type ApprovalEvent } from './stateMachine.js';
+import type { Approval, Phase, TaskState, TaskTypeDef } from './types.js';
 
 export const APPROVAL_ACTIONS = ['approve', 'accept', 'ran', 'cancel'] as const;
 export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
 
 /** The state-machine event that records `action`; `phase` is only used by `approve`, `reason` by `cancel`. */
-export function approvalEvent(action: ApprovalAction, phase: Phase, reason: string, approval: Approval): TaskEvent {
+export function approvalEvent(action: ApprovalAction, phase: Phase, reason: string, approval: Approval): ApprovalEvent {
   switch (action) {
     case 'approve':
       return { kind: 'stage_approved', phase, approval };
@@ -19,6 +19,24 @@ export function approvalEvent(action: ApprovalAction, phase: Phase, reason: stri
     case 'cancel':
       return { kind: 'cancelled', reason, approval };
   }
+}
+
+/** Later than any real timestamp, so only a transition that is impossible whatever the time fails. */
+export const FAR_FUTURE = '9999-12-31T23:59:59.999Z';
+
+/**
+ * Throws `TransitionError` when `action` cannot apply to the task whatever its time: the stage is
+ * not published, the task type does not end that way, the task is done or awaiting deployment.
+ */
+export function assertApprovalFits(
+  state: TaskState,
+  type: TaskTypeDef,
+  action: ApprovalAction,
+  phase: Phase,
+  reason: string,
+): void {
+  const probe: Approval = { source: 'unverified', ref: '', by: '', at: FAR_FUTURE };
+  applyEvent(state, approvalEvent(action, phase, reason, probe), type, FAR_FUTURE);
 }
 
 /** An owner command read from a comment. */
@@ -81,8 +99,6 @@ export function finalMergeTime(state: TaskState, prs: readonly PrInfo[]): string
   return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? state.finalMergedAt;
 }
 
-const isAfter = (later: string, earlier: string): boolean => Date.parse(later) > Date.parse(earlier);
-
 export interface CommentApprovalCheck {
   comment: IssueComment;
   action: ApprovalAction;
@@ -134,41 +150,15 @@ export async function validateCommentApproval(check: CommentApprovalCheck): Prom
   }
 
   const at = comment.createdAt;
-  switch (action) {
-    case 'approve': {
-      const publishedAt = state.stages[check.phase]?.publishedAt;
-      if (!publishedAt) throw new TransitionError(`stage "${check.phase}" has not been published, nothing to approve`);
-      if (!isAfter(at, publishedAt)) {
-        throw new TransitionError(
-          `approval at ${at} is not newer than stage "${check.phase}" published at ${publishedAt}`,
-        );
-      }
-      break;
+  const approval: Approval = { source: ownComment ? 'unverified' : 'comment', ref: comment.url, by: comment.author, at };
+  // The state machine's own record of the merge is later than the real one, so `ran` is checked here
+  // against the merge time GitHub reports; every other time check is the state machine's.
+  if (action === 'ran') {
+    const merged = await check.finalMergedAt();
+    if (merged !== undefined && !(Date.parse(at) > Date.parse(merged))) {
+      throw new TransitionError(`confirmation at ${at} is not newer than the final PR merged at ${merged}`);
     }
-    case 'accept': {
-      if (!state.resultPublishedAt) throw new TransitionError('cannot accept: no result has been published');
-      if (!isAfter(at, state.resultPublishedAt)) {
-        throw new TransitionError(`acceptance at ${at} is not newer than the result published at ${state.resultPublishedAt}`);
-      }
-      break;
-    }
-    case 'ran': {
-      const merged = await check.finalMergedAt();
-      if (merged !== undefined && !isAfter(at, merged)) {
-        throw new TransitionError(`confirmation at ${at} is not newer than the final PR merged at ${merged}`);
-      }
-      break;
-    }
-    case 'cancel':
-      break;
   }
-  if (action !== 'approve' && state.reopenedAt && !isAfter(at, state.reopenedAt)) {
-    const noun = { accept: 'acceptance', ran: 'confirmation', cancel: 'cancellation' }[action];
-    throw new TransitionError(`${noun} at ${at} is not newer than the reopen at ${state.reopenedAt}`);
-  }
-
-  return {
-    approval: { source: ownComment ? 'unverified' : 'comment', ref: comment.url, by: comment.author, at },
-    command,
-  };
+  assertApprovalTiming(state, approvalEvent(action, check.phase, command.reason ?? '', approval));
+  return { approval, command };
 }

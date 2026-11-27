@@ -2,12 +2,12 @@ import type { Command } from 'commander';
 import {
   APPROVAL_ACTIONS,
   approvalEvent,
+  assertApprovalFits,
   finalMergeTime,
   normalizeCommentUrl,
   validateCommentApproval,
   type ApprovalAction,
 } from '../core/approvals.js';
-import { applyEvent } from '../core/stateMachine.js';
 import { renderCancelReport } from '../core/summary.js';
 import type { Approval, Phase, TaskEvent, TaskState } from '../core/types.js';
 import type { IssueComment, PrInfo } from '../tracker/types.js';
@@ -37,9 +37,6 @@ export interface ApproveInput {
   /** Records the approval without proof; observe mode only. */
   unverified?: boolean;
 }
-
-/** Later than any real timestamp, so only a transition that is impossible whatever the time fails. */
-const FAR_FUTURE = '9999-12-31T23:59:59.999Z';
 
 /** The comment `url` on the task issue or one of its PRs; the PRs are only listed when the issue does not hold it. */
 async function findComment(
@@ -89,7 +86,7 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
   const eventWith = (approval: Approval): TaskEvent => approvalEvent(action, phase, reason, approval);
 
   // Fail on anything but timing (not published, wrong task type, done) before looking up comments.
-  applyEvent(state, eventWith({ source: 'unverified', ref: '', by: '', at: FAR_FUTURE }), loaded.type, ctx.now());
+  assertApprovalFits(state, loaded.type, action, phase, reason);
 
   let prsRead: Promise<PrInfo[]> | undefined;
   const listPrs = (): Promise<PrInfo[]> =>
