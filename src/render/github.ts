@@ -6,6 +6,8 @@ import { loadTemplate } from './templates.js';
 
 const PR_TEMPLATE_PATH = '.github/pull_request_template.md';
 const WORKFLOW_PATH = '.github/workflows/sdlc-reconcile.yml';
+/** Where the hook scripts go; `core.hooksPath` is set to it (`HOOKS_PATH` in install/provision.ts, which a test keeps equal). */
+const HOOKS_DIR = '.sdlc/githooks';
 
 function renderFile(path: string, template: string, data: Record<string, unknown>): Change {
   return { kind: 'file', path, content: renderTemplate(loadTemplate(template), data, template) };
@@ -38,4 +40,26 @@ export function renderGithub(cfg: Config, data: RenderData): Change[] {
   if (cfg.stack.actions) changes.push(renderFile(WORKFLOW_PATH, 'github/sdlc-reconcile.yml', templateData));
   changes.push({ kind: 'line-block', path: '.gitignore', content: gitignoreLines(cfg).join('\n'), comment: '#' });
   return changes;
+}
+
+/** The git hooks, in the order `git` is likely to run them. */
+const GIT_HOOKS = ['pre-commit', 'pre-push', 'post-merge', 'post-checkout'] as const;
+
+/** The hooks that carry the secret guard: when sdlc is missing, they say the guard is off. */
+const GUARDED_HOOKS: ReadonlySet<string> = new Set(['pre-commit', 'pre-push']);
+
+/**
+ * The four git hook scripts at `.sdlc/githooks/<name>` (mode 0755; `core.hooksPath` points there).
+ * Each one hands over to `sdlc githook <name>`, or skips with a notice when sdlc is not installed,
+ * so a missing install never blocks a commit.
+ */
+export function renderGitHooks(): Change[] {
+  return GIT_HOOKS.map(
+    (name): Change => ({
+      kind: 'file',
+      path: `${HOOKS_DIR}/${name}`,
+      content: renderTemplate(loadTemplate('githooks/hook.sh'), { name, guard: GUARDED_HOOKS.has(name) }, 'githooks/hook.sh'),
+      mode: 0o755,
+    }),
+  );
 }

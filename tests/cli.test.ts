@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +7,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { formatCliError, runCli } from '../src/cli.js';
 import type { CommandContext } from '../src/commands/context.js';
 import { loadConfig, typeRegistry } from '../src/config/schema.js';
+import { renderGitHooks } from '../src/render/github.js';
 import { newTask } from '../src/core/stateMachine.js';
 import { GhError, type GhRunner } from '../src/github/gh.js';
 import { FakeTracker } from './support/fakeTracker.js';
@@ -16,7 +17,7 @@ const cliPath = join(root, 'dist', 'cli.js');
 const version = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version;
 const validConfig = join(root, 'tests', 'fixtures', 'config', 'valid.yaml');
 
-const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board', 'config'];
+const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board', 'config', 'githook'];
 
 let dir: string;
 beforeAll(() => {
@@ -39,10 +40,14 @@ interface Spawned {
   stderr: string;
 }
 
-function sdlc(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; script?: string } = {}): Spawned {
+function sdlc(
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; script?: string; input?: string } = {},
+): Spawned {
   const result = spawnSync(process.execPath, [options.script ?? cliPath, ...args], {
     cwd: options.cwd ?? dir,
     env: options.env ?? process.env,
+    input: options.input,
     encoding: 'utf8',
   });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
@@ -167,6 +172,123 @@ describe('cli (built)', () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('unknown command');
+  });
+});
+
+describe('sdlc githook (built)', () => {
+  /** A fresh repository on `main` with the valid test config in the given mode. */
+  function repo(mode: 'observe' | 'enforce'): string {
+    const root = join(dir, 'repo');
+    mkdirSync(root);
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: root });
+    writeFileSync(join(root, 'sdlc.config.yaml'), readFileSync(validConfig, 'utf8').replace('mode: observe', `mode: ${mode}`));
+    return root;
+  }
+
+  /** A PATH that finds git and nothing else, so no hook can reach `gh` and the real GitHub. */
+  function onlyGit(): NodeJS.ProcessEnv {
+    const bin = join(dir, 'only-git');
+    if (!existsSync(bin)) {
+      mkdirSync(bin);
+      symlinkSync(execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim(), join(bin, 'git'));
+    }
+    return { ...process.env, PATH: bin };
+  }
+
+  it('pre-commit on the default branch warns in observe mode and blocks in enforce mode', () => {
+    const warned = sdlc(['githook', 'pre-commit'], { cwd: repo('observe'), env: onlyGit() });
+    rmSync(join(dir, 'repo'), { recursive: true });
+    const blocked = sdlc(['githook', 'pre-commit'], { cwd: repo('enforce'), env: onlyGit() });
+
+    expect(warned.status).toBe(0);
+    expect(warned.stderr.trim()).toBe(
+      'sdlc: warning: committing directly to main; work on a task branch (task/<issue>-<slug>)',
+    );
+    expect(blocked.status).toBe(1);
+    expect(blocked.stderr.trim()).toBe(
+      'sdlc: error: committing directly to main; work on a task branch (task/<issue>-<slug>)',
+    );
+  });
+
+  it('pre-push reads the updates from stdin', () => {
+    const root = repo('enforce');
+    const update = `refs/heads/work ${'a'.repeat(40)} refs/heads/main ${'0'.repeat(40)}\n`;
+
+    const result = sdlc(['githook', 'pre-push', 'origin', 'git@example.test:acme/shop.git'], {
+      cwd: root,
+      env: onlyGit(),
+      input: update,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr.trim()).toBe(
+      'sdlc: error: pushing directly to main; work on a task branch (task/<issue>-<slug>)',
+    );
+  });
+
+  it('a missing config warns and exits 0', () => {
+    const root = repo('enforce');
+    rmSync(join(root, 'sdlc.config.yaml'));
+
+    const result = sdlc(['githook', 'pre-commit'], { cwd: root, env: onlyGit() });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain('sdlc: warning: could not load the config (Cannot read config file');
+    expect(result.stderr).toContain('git hook pre-commit skipped');
+  });
+
+  it('outside a git repository there is no branch to judge: exit 0', () => {
+    const result = sdlc(['githook', 'pre-commit'], { env: onlyGit() });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  it('the rendered scripts work under real git: a commit on main warns or blocks, one on a task branch passes', () => {
+    const root = repo('enforce');
+    const hooks = join(root, '.sdlc', 'githooks');
+    mkdirSync(hooks, { recursive: true });
+    for (const change of renderGitHooks()) {
+      if (change.kind !== 'file') throw new Error('hooks are files');
+      writeFileSync(join(root, change.path), change.content, { mode: change.mode });
+    }
+    execFileSync('git', ['config', 'core.hooksPath', '.sdlc/githooks'], { cwd: root });
+    const env = onlyGit();
+    // The scripts find `sdlc` on the PATH, as they do for an installed package.
+    writeFileSync(join(dir, 'only-git', 'sdlc'), `#!/bin/sh\nexec "${process.execPath}" "${cliPath}" "$@"\n`, { mode: 0o755 });
+    const commit = () =>
+      spawnSync(
+        'git',
+        ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '--allow-empty', '-m', 'x'],
+        { cwd: root, env, encoding: 'utf8' },
+      );
+
+    const onMain = commit();
+    execFileSync('git', ['checkout', '-q', '-b', 'task/1-first'], { cwd: root, env });
+    const onTask = commit();
+
+    expect(onMain.status).toBe(1);
+    expect(onMain.stderr).toContain('sdlc: error: committing directly to main');
+    expect(onTask.status).toBe(0);
+    expect(onTask.stderr).toBe('');
+  });
+
+  it('post-merge on the default branch starts a detached reconcile that logs to .sdlc/cache/reconcile.log', async () => {
+    const root = repo('observe');
+
+    const result = sdlc(['githook', 'post-merge', '0'], { cwd: root, env: onlyGit() });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('sdlc: reconcile started in the background (log: .sdlc/cache/reconcile.log)');
+    const log = join(root, '.sdlc', 'cache', 'reconcile.log');
+    let text = '';
+    for (let attempt = 0; attempt < 200 && !text.includes('gh CLI not found'); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      text = existsSync(log) ? readFileSync(log, 'utf8') : '';
+    }
+    // The child is the real `sdlc reconcile`; with no gh on its PATH it stops at the first call.
+    expect(text).toContain('gh CLI not found');
   });
 });
 

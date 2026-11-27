@@ -10,6 +10,12 @@ import { registerConfigCommand, type ConfigCommandContext } from './commands/con
 import type { CommandContext, ContextFactory } from './commands/context.js';
 import { registerDeployCommand } from './commands/deploy.js';
 import { registerEvidenceCommand } from './commands/evidence.js';
+import {
+  readAllStdin,
+  registerGitHookCommand,
+  spawnDetachedLogged,
+  type GitHookContext,
+} from './commands/githook.js';
 import { registerReconcileCommand } from './commands/reconcile.js';
 import { registerReviewCommand } from './commands/review.js';
 import { registerStageCommand } from './commands/stage.js';
@@ -19,6 +25,7 @@ import { errorAsJson, formatCliError } from './commands/errors.js';
 import { loadConfig, type Config } from './config/schema.js';
 import { defaultGhRunner } from './github/gh.js';
 import { GitHubTracker } from './github/githubTracker.js';
+import { createGitRunner } from './install/provision.js';
 import { packageVersion } from './version.js';
 
 const CONFIG_FILE = 'sdlc.config.yaml';
@@ -30,6 +37,8 @@ export interface CliDeps {
   makeBoardContext?: () => BoardCommandContext | Promise<BoardCommandContext>;
   /** Builds the context of `config`, which needs no loadable config; defaults to the git root and `gh`. */
   makeConfigContext?: () => ConfigCommandContext | Promise<ConfigCommandContext>;
+  /** Builds the context of `githook`, which loads the config and builds the tracker only if a hook needs them. */
+  makeGitHookContext?: () => GitHookContext | Promise<GitHookContext>;
   /** Where results go; defaults to stdout. */
   out?: (text: string) => void;
   /** Where errors go; defaults to stderr. */
@@ -113,6 +122,31 @@ export function buildProgram(deps: CliDeps = {}): Command {
       };
     });
 
+  const makeGitHookContext =
+    deps.makeGitHookContext ??
+    ((): GitHookContext => {
+      // Git runs a hook in the repository root; nothing here may throw, or git would see a failed hook.
+      const cwd = process.cwd();
+      const repoRoot = gitRoot(cwd) ?? cwd;
+      const configOption = program.opts<{ config?: string }>().config;
+      return {
+        repoRoot,
+        git: createGitRunner(repoRoot),
+        loadConfig: () => environment().cfg,
+        makeTracker: cfg => new GitHubTracker(defaultGhRunner, cfg, { repoRoot }),
+        readStdin: () => readAllStdin(),
+        spawnReconcile: logPath => {
+          // The same program that runs this hook, so it works through `sdlc` on the PATH and through npx alike.
+          const entry = process.argv[1];
+          if (entry === undefined) throw new Error('cannot tell which program is running');
+          const config = configOption === undefined ? [] : ['--config', resolve(cwd, configOption)];
+          spawnDetachedLogged({ command: process.execPath, args: [entry, ...config, 'reconcile'], cwd: repoRoot, logPath });
+        },
+        out,
+        err,
+      };
+    });
+
   // Commander gives `--json` to the program wherever it appears, so hand it on to the command that runs.
   program.hook('preAction', (_program, command) => {
     if (program.opts<{ json?: boolean }>().json) command.setOptionValue('json', true);
@@ -128,6 +162,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
   registerStatusCommand(program, makeContext);
   registerBoardCommand(program, makeBoardContext);
   registerConfigCommand(program, makeConfigContext);
+  registerGitHookCommand(program, makeGitHookContext);
   return program;
 }
 

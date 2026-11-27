@@ -1,0 +1,12 @@
+#!/bin/sh
+# agentic-sdlc-kit git hook: pre-push. Managed by `sdlc init` and `sdlc upgrade`; local edits are overwritten.
+# The logic is `sdlc githook pre-push`; this script only finds the sdlc command and hands over.
+if command -v sdlc >/dev/null 2>&1; then
+  exec sdlc githook pre-push "$@"
+fi
+# --no-install: a hook must never download a package, and npx would ask before doing so.
+if command -v npx >/dev/null 2>&1 && npx --no-install sdlc --version >/dev/null 2>&1; then
+  exec npx --no-install sdlc githook pre-push "$@"
+fi
+echo "sdlc not found; agentic-sdlc-kit git hook pre-push skipped (install: see INSTALL.md); the secret guard is NOT active" >&2
+exit 0
