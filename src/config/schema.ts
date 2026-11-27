@@ -3,6 +3,7 @@ import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 import { buildTypeRegistry, ConfigError } from '../core/taskTypes.js';
 import type { EndsOn, EvidenceKind, Phase, TaskTypeDef } from '../core/types.js';
+import { packageVersion } from '../version.js';
 
 /** Type-level guard: resolves to `never` unless `V` lists every member of the union `T`. */
 type Exhaustive<T extends string, V extends readonly T[]> = Exclude<T, V[number]> extends never
@@ -39,6 +40,37 @@ export type Harness = (typeof HARNESSES)[number];
 const SLUG = /^[a-z0-9][a-z0-9-]*$/;
 const SLUG_MESSAGE = 'must be lowercase kebab-case (a-z, 0-9 and hyphens, e.g. "my-target")';
 const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+/** A git tag or branch name made of plain characters: it ends up inside generated commands. */
+const KIT_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+const KIT_REF_MESSAGE = 'must be a git tag or branch name (letters, digits, ".", "_", "-" and "/", e.g. "v0.2.0" or "main")';
+/** Fingerprint of an accepted secret-guard false positive: 16 lowercase hex characters. */
+const SECRET_FINGERPRINT = /^[0-9a-f]{16}$/;
+const SECRET_FINGERPRINT_MESSAGE = 'must be a fingerprint of 16 lowercase hex characters ([0-9a-f]{16})';
+
+/** Servers of the built-in MCP catalog; the catalog (Task 6) takes over through `setMcpIdValidator`. */
+const DEFAULT_MCP_IDS = ['github', 'context7', 'playwright'] as const;
+
+/** Returns one error message per problem found in the MCP server ids; none means they are all known. */
+export type McpIdValidator = (ids: string[]) => string[];
+
+const defaultMcpIdValidator: McpIdValidator = ids =>
+  ids
+    .filter(id => !(DEFAULT_MCP_IDS as readonly string[]).includes(id))
+    .map(id => `unknown MCP server "${id}" (catalog ids: ${DEFAULT_MCP_IDS.join(', ')})`);
+
+let mcpIdValidator: McpIdValidator = defaultMcpIdValidator;
+
+/**
+ * Replaces the validator that `mcp.servers` is checked with; the catalog installs
+ * `validateMcpIds` here. Returns a function that puts the previous validator back.
+ */
+export function setMcpIdValidator(validator: McpIdValidator): () => void {
+  const previous = mcpIdValidator;
+  mcpIdValidator = validator;
+  return () => {
+    mcpIdValidator = previous;
+  };
+}
 
 const nonEmpty = z.string().min(1);
 
@@ -123,8 +155,35 @@ const RawConfigSchema = z
         actions: z.boolean().default(true),
       })
       .prefault({}),
+    mcp: z
+      .strictObject({
+        /** Catalog ids; every id is checked by the injected validator in the cross-field pass. */
+        servers: z.array(nonEmpty).default(['github']),
+        scope: z.enum(['project', 'user']).default('project'),
+        github_transport: z.enum(['remote', 'local']).default('remote'),
+      })
+      .prefault({}),
+    /** Git ref of the kit that generated files run through `npx`; defaults to the installed version's tag. */
+    kit_ref: z.string().regex(KIT_REF, KIT_REF_MESSAGE).optional(),
+    reconcile: z
+      .strictObject({
+        closed_lookback_days: z.number().int().min(1).default(30),
+      })
+      .prefault({}),
+    secrets: z
+      .strictObject({
+        /** `auto`, `keychain`, `secret-service`, `wincred`; any other value names a password-manager CLI. */
+        local_store: nonEmpty.default('auto'),
+        production_store: nonEmpty.default('GitHub Actions environment secrets'),
+        allow: z.array(z.string().regex(SECRET_FINGERPRINT, SECRET_FINGERPRINT_MESSAGE)).default([]),
+      })
+      .prefault({}),
   })
   .superRefine((cfg, ctx) => {
+    for (const message of mcpIdValidator(cfg.mcp.servers)) {
+      ctx.addIssue({ code: 'custom', path: ['mcp', 'servers'], message });
+    }
+
     const owners = new Set(cfg.owners.map(login => login.toLowerCase()));
     cfg.agents.forEach((login, i) => {
       if (owners.has(login.toLowerCase())) {
@@ -228,6 +287,18 @@ export const ConfigSchema = RawConfigSchema.transform(raw => {
       branchProtection: raw.stack.branch_protection,
       actions: raw.stack.actions,
     },
+    mcp: {
+      servers: raw.mcp.servers,
+      scope: raw.mcp.scope,
+      githubTransport: raw.mcp.github_transport,
+    },
+    kitRef: raw.kit_ref ?? `v${packageVersion()}`,
+    reconcile: { closedLookbackDays: raw.reconcile.closed_lookback_days },
+    secrets: {
+      localStore: raw.secrets.local_store,
+      productionStore: raw.secrets.production_store,
+      allow: raw.secrets.allow,
+    },
   };
 });
 
@@ -242,25 +313,44 @@ function formatPath(path: ReadonlyArray<PropertyKey>): string {
   );
 }
 
+export interface ConfigIssue {
+  /** Dotted path of the offending field, `(root)` for the document itself. */
+  path: string;
+  message: string;
+}
+
+/** A `ConfigError` that also keeps each issue separately, for `sdlc config validate --json`. */
+export class ConfigValidationError extends ConfigError {
+  constructor(readonly issues: ConfigIssue[], message: string) {
+    super(message);
+    this.name = 'ConfigValidationError';
+  }
+}
+
 /**
- * Parses and validates `sdlc.config.yaml` text. Throws ConfigError listing the issue paths:
- * field-level issues are reported first; cross-field checks (unique targets, task type rules)
- * run once those are fixed.
+ * Parses and validates `sdlc.config.yaml` text. Throws ConfigValidationError listing the issue
+ * paths: field-level issues are reported first; cross-field checks (unique targets, task type
+ * rules, known MCP servers) run once those are fixed.
  */
-export function parseConfig(text: string): Config {
+export function loadConfigFromString(text: string): Config {
   let raw: unknown;
   try {
     raw = parseYaml(text);
   } catch (err) {
-    throw new ConfigError(`Invalid config: YAML syntax error: ${(err as Error).message}`);
+    const message = `YAML syntax error: ${(err as Error).message}`;
+    throw new ConfigValidationError([{ path: '(root)', message }], `Invalid config: ${message}`);
   }
   const result = ConfigSchema.safeParse(raw);
   if (!result.success) {
-    const lines = result.error.issues.map(i => `  - ${formatPath(i.path)}: ${i.message}`);
-    throw new ConfigError(`Invalid config:\n${lines.join('\n')}`);
+    const issues = result.error.issues.map(i => ({ path: formatPath(i.path), message: i.message }));
+    const lines = issues.map(i => `  - ${i.path}: ${i.message}`);
+    throw new ConfigValidationError(issues, `Invalid config:\n${lines.join('\n')}`);
   }
   return result.data;
 }
+
+/** Same as `loadConfigFromString`; the name the Plan 1 code and tests use. */
+export const parseConfig = loadConfigFromString;
 
 export function loadConfig(path: string): Config {
   let text: string;

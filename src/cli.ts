@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { registerApproveCommand } from './commands/approve.js';
 import { registerBoardCommand, type BoardCommandContext } from './commands/board.js';
+import { registerConfigCommand, type ConfigCommandContext } from './commands/config.js';
 import type { CommandContext, ContextFactory } from './commands/context.js';
 import { registerDeployCommand } from './commands/deploy.js';
 import { registerEvidenceCommand } from './commands/evidence.js';
@@ -18,6 +19,7 @@ import { errorAsJson, formatCliError } from './commands/errors.js';
 import { loadConfig, type Config } from './config/schema.js';
 import { defaultGhRunner } from './github/gh.js';
 import { GitHubTracker } from './github/githubTracker.js';
+import { packageVersion } from './version.js';
 
 const CONFIG_FILE = 'sdlc.config.yaml';
 
@@ -26,6 +28,8 @@ export interface CliDeps {
   makeContext?: ContextFactory;
   /** Builds the context of `board`; defaults to config + `gh`. */
   makeBoardContext?: () => BoardCommandContext | Promise<BoardCommandContext>;
+  /** Builds the context of `config`, which needs no loadable config; defaults to the git root and `gh`. */
+  makeConfigContext?: () => ConfigCommandContext | Promise<ConfigCommandContext>;
   /** Where results go; defaults to stdout. */
   out?: (text: string) => void;
   /** Where errors go; defaults to stderr. */
@@ -33,13 +37,6 @@ export interface CliDeps {
 }
 
 const writeLine = (stream: NodeJS.WriteStream) => (text: string) => void stream.write(`${text}\n`);
-
-function readVersion(): string {
-  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
-    version?: string;
-  };
-  return manifest.version ?? '0.0.0';
-}
 
 /** The top-level directory of the git repository containing `cwd`, or `undefined` outside one (or without git). */
 function gitRoot(cwd: string): string | undefined {
@@ -79,7 +76,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
   const program = new Command()
     .name('sdlc')
     .description('Track agentic SDLC tasks on GitHub Issues and a Projects v2 board')
-    .version(readVersion())
+    .version(packageVersion())
     .option('--config <path>', `config file (default: ${CONFIG_FILE} in the git root)`)
     .option('--json', 'print machine-readable JSON, as --json does on each command');
 
@@ -100,6 +97,22 @@ export function buildProgram(deps: CliDeps = {}): Command {
     deps.makeBoardContext ??
     ((): BoardCommandContext => ({ run: defaultGhRunner, config: environment().cfg, out, err }));
 
+  const makeConfigContext =
+    deps.makeConfigContext ??
+    ((): ConfigCommandContext => {
+      // No `loadEnvironment`: `config validate` reports a broken config and `config suggest` creates one.
+      const cwd = process.cwd();
+      const repoRoot = gitRoot(cwd) ?? cwd;
+      const configOption = program.opts<{ config?: string }>().config;
+      return {
+        run: defaultGhRunner,
+        repoRoot,
+        configPath: configOption === undefined ? join(repoRoot, CONFIG_FILE) : resolve(cwd, configOption),
+        out,
+        err,
+      };
+    });
+
   // Commander gives `--json` to the program wherever it appears, so hand it on to the command that runs.
   program.hook('preAction', (_program, command) => {
     if (program.opts<{ json?: boolean }>().json) command.setOptionValue('json', true);
@@ -114,6 +127,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
   registerReconcileCommand(program, makeContext);
   registerStatusCommand(program, makeContext);
   registerBoardCommand(program, makeBoardContext);
+  registerConfigCommand(program, makeConfigContext);
   return program;
 }
 

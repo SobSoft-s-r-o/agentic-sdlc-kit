@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +16,7 @@ const cliPath = join(root, 'dist', 'cli.js');
 const version = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version;
 const validConfig = join(root, 'tests', 'fixtures', 'config', 'valid.yaml');
 
-const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board'];
+const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board', 'config'];
 
 let dir: string;
 beforeAll(() => {
@@ -123,6 +123,43 @@ describe('cli (built)', () => {
 
     expect(result.status).toBe(1);
     expect(JSON.parse(result.stdout)).toEqual({ error: expect.stringContaining('Cannot read config file') });
+  });
+
+  it('config validate reads --config and needs neither a git repository nor gh', () => {
+    const result = sdlc(['--config', validConfig, 'config', 'validate'], { env: withoutGh });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('Config OK');
+  });
+
+  it('config validate lists the issues and exits 1', () => {
+    const bad = join(dir, 'bad.yaml');
+    writeFileSync(bad, readFileSync(validConfig, 'utf8').replace('version: 1', 'version: 1\nreconcile: { closed_lookback_days: 0 }'));
+
+    const result = sdlc(['--config', bad, 'config', 'validate'], { env: withoutGh });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('reconcile.closed_lookback_days');
+  });
+
+  it('config suggest --write keeps an existing sdlc.config.yaml in the git root', () => {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    writeFileSync(join(dir, 'sdlc.config.yaml'), 'keep: me\n');
+    mkdirSync(join(dir, 'sub'));
+
+    // The real environment: git must be found to resolve the root. gh is never reached.
+    const result = sdlc(['config', 'suggest', '--write'], { cwd: join(dir, 'sub') });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr.trim()).toBe('sdlc.config.yaml exists; edit it instead');
+    expect(readFileSync(join(dir, 'sdlc.config.yaml'), 'utf8')).toBe('keep: me\n');
+  });
+
+  it('config suggest without gh fails with the gh error, not a stack trace', () => {
+    const result = sdlc(['config', 'suggest'], { env: withoutGh });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('gh CLI not found');
   });
 
   it('rejects an unknown command', () => {

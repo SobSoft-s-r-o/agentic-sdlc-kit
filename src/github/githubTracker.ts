@@ -25,7 +25,7 @@ import {
 } from '../tracker/types.js';
 import { trustedLogins } from '../core/trust.js';
 import { BoardError, FIELD_NAMES, resolveFieldIds, type FieldMap } from './board.js';
-import { GhError, ghJson, graphql, type GhRunner } from './gh.js';
+import { GhError, ghJson, ghText, graphql, type GhRunner } from './gh.js';
 
 /** What `gh api` prints when GitHub refuses to edit a comment: not the author's, or no longer there. */
 const EDIT_REFUSED = /\bHTTP (?:403|404)\b/;
@@ -150,13 +150,6 @@ interface PlannedWrite {
 export interface GitHubTrackerOptions {
   /** Directory holding `.sdlc/cache/` for board field ids; defaults to the git root of the working directory. */
   repoRoot?: string;
-}
-
-/** Runs `gh` and returns stdout; a failed run throws. */
-async function ghText(run: GhRunner, args: string[]): Promise<string> {
-  const result = await run(args);
-  if (result.code !== 0) throw new GhError(args, result.stderr);
-  return result.stdout;
 }
 
 /**

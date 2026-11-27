@@ -86,6 +86,13 @@ export async function ghJson<T>(run: GhRunner, args: string[], input?: unknown):
   }
 }
 
+/** Runs `gh` and returns stdout as text; a failed run throws. */
+export async function ghText(run: GhRunner, args: string[]): Promise<string> {
+  const result = await run(args);
+  if (result.code !== 0) throw new GhError(args, result.stderr);
+  return result.stdout;
+}
+
 interface GraphqlResponse<T> {
   data?: T;
   errors?: { message?: string }[];
