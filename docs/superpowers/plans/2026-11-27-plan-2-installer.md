@@ -12,7 +12,7 @@
 
 **Tech Stack:** Node.js ≥ 20, TypeScript strict ESM, `commander`, `yaml`, `zod`, `vitest`. No new runtime dependency: the template engine and the TOML block writer are in-house.
 
-**Spec:** `docs/superpowers/specs/2026-11-27-agentic-sdlc-design.md`. This plan implements §6 and §12, §9 rendering, §11 (git-hook layer only) and §14 (MCP). It covers the instruction and skill content that §12 requires, the §10 workflow template, and the doctor checks of §6 step 7 except the harness-hook round trip, which is Plan 3.
+**Spec:** `docs/superpowers/specs/2026-11-27-agentic-sdlc-design.md`. This plan implements §6 and §12, §9 rendering, §11 (git-hook layer only), §14 (MCP) and §14a (secrets rule and commit guard). It covers the instruction and skill content that §12 requires, the §10 workflow template, and the doctor checks of §6 step 7 except the harness-hook round trip, which is Plan 3.
 
 **Harness formats:** verified 2026-11-27 against official docs, see "Harness Facts" below. Re-verify a format only if a test against a real harness disagrees.
 
@@ -40,7 +40,7 @@
   - AGENTS.md-only harnesses: `AGENTS.md` block with a "Roles" section.
   - Skills for Codex, Gemini and AGENTS.md-only harnesses: `.agents/skills/sdlc-<skill>/SKILL.md`.
   - GitHub: `.github/pull_request_template.md`, `.github/workflows/sdlc-reconcile.yml`.
-  - `.gitignore` lines `.sdlc/cache/` and, with `stack.graphify`, `graphify-out/`, inside a `# sdlc:begin` / `# sdlc:end` block.
+  - `.gitignore` lines `.sdlc/cache/`, `.env`, `.env.*`, `!.env.example` and, with `stack.graphify`, `graphify-out/`, inside a `# sdlc:begin` / `# sdlc:end` block.
 - Secrets never go into a file. MCP credentials are read from env var `GITHUB_PERSONAL_ACCESS_TOKEN`:
   - Claude: `${GITHUB_PERSONAL_ACCESS_TOKEN}`.
   - Codex: `bearer_token_env_var = "GITHUB_PERSONAL_ACCESS_TOKEN"`.
@@ -53,6 +53,7 @@
   - never `git push --force`, `git worktree prune` or `rm -rf`;
   - PRs use `Related to #N`, never closing keywords.
 - The managed instruction block is under 150 lines for every config (test).
+- Secrets: no rendered file, log line, notice or test fixture contains a real secret. The commit guard blocks in **both** modes and prints only masked matches (first 4 characters + `…` + length). Test fixtures build fake tokens by string concatenation at run time, so the kit's own repository never holds a literal that its guard or GitHub push protection would flag.
 - Every command supports `--json` and `--dry-run` where it writes. The exit code is non-zero on any failed write or failed doctor check.
 - The kit is referenced in generated files as `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<kit_ref>`. `kit_ref` defaults to `v<package version>` until npm publishing (Plan 4).
 
@@ -79,15 +80,16 @@
 - Gemini CLI stays a target, as the spec says. Antigravity reads `AGENTS.md` and `.agents/skills`, so the `agents-md` tier already covers it. A native Antigravity target (`.agents/agents`, `.agents/mcp_config.json`) is deferred — cost if wrong: one more adapter later.
 - Harness hooks, enforcement blocks, and installing Superpowers or graphify all belong to Plan 3. Plan 2 only renders the instruction text that mentions them — cost if wrong: installs before Plan 3 have no harness-level guard, only git hooks.
 - The Actions workflow needs a PAT secret `SDLC_TOKEN` with repo and project scopes, because `GITHUB_TOKEN` cannot write Projects v2. If that PAT is the owner's own token and mode is enforce, R30 ignores the owner's `/approve` comments, since owner and agent comments come from the same login. INSTALL.md recommends that agents run under a separate account listed in `agents`, and doctor warns about it — cost if wrong: owners in enforce mode with one account must approve with `--prompt` (Plan 3).
+- The secret guard blocks in observe mode too. A pushed secret cannot be taken back, so for this one check "warn" is not a safe default (spec §14a). It is built in with no dependency, and gitleaks runs as an extra when present — cost if wrong: false positives block commits until marked with `sdlc:allow-secret` or added to `secrets.allow`.
 - Until tags exist (Plan 4), the kit's own dogfood config sets `kit_ref: main`.
 - Still deferred from Plan 1: M6 label check, M7 retry dedup, M8 old-approval noise, M10 review-body commands, M11 package `files`, the threat-model write-up, the outbox / `sdlc sync`, and the Plan 3 minors listed in `docs/notes/plan-1-rulings.md`.
 
 ## Review Focus
 
-1. **The repository already has a hand-written `CLAUDE.md`, `.mcp.json` with its own `github` server, and a `.codex/config.toml` with root keys.** Init keeps every byte outside its managed regions. It skips the user's `github` server with a notice and does not take ownership of it. It appends the TOML block after the user's content (Task 3 test `preserves user content in every merge kind`; Task 10 test `init into a customized repository`).
-2. **Running `init` twice, or `upgrade` with no template change**, writes nothing and reports `up to date` (Task 10 test `second init is a no-op`).
+1. **The repository already has a hand-written `CLAUDE.md`, `.mcp.json` with its own `github` server, and a `.codex/config.toml` with root keys.** Init keeps every byte outside its managed regions. It skips the user's `github` server with a notice and does not take ownership of it. It appends the TOML block after the user's content (Task 3 test `preserves user content in every merge kind`; Task 11 test `init into a customized repository`).
+2. **Running `init` twice, or `upgrade` with no template change**, writes nothing and reports `up to date` (Task 11 test `second init is a no-op`).
 3. **The user edited a managed agent file, then runs `upgrade`.** The file is kept, the notice names it, and the exit code is 0. `--overwrite-modified` replaces it (Task 3 test `keeps locally modified managed content`).
-4. **`uninstall` after the user changed a managed file or added their own MCP server** removes only unmodified managed content, leaves user servers and text, and removes the manifest last (Task 10 test `uninstall leaves user content`).
+4. **`uninstall` after the user changed a managed file or added their own MCP server** removes only unmodified managed content, leaves user servers and text, and removes the manifest last (Task 11 test `uninstall leaves user content`).
 5. **Markers damaged by hand** (a `<!-- sdlc:begin -->` without its end, or two begin markers) → the apply refuses that file with a precise error and writes nothing to it. Other files still apply and the exit code is non-zero (Task 3 test `refuses damaged markers`).
 
 ---
@@ -138,7 +140,8 @@ tests/golden/<scenario>/…                  golden renders
 - Produces: config fields (YAML → `Config`):
   - `mcp: { servers: string[] (default ["github"]), scope: 'project'|'user' (default 'project'), github_transport: 'remote'|'local' (default 'remote') }` → `cfg.mcp = { servers, scope, githubTransport }`;
   - `kit_ref?: string` → `cfg.kitRef` (default `v<package version>`, read from package.json);
-  - `reconcile: { closed_lookback_days: number (int ≥ 1, default 30) }` → `cfg.reconcile.closedLookbackDays`.
+  - `reconcile: { closed_lookback_days: number (int ≥ 1, default 30) }` → `cfg.reconcile.closedLookbackDays`;
+  - `secrets: { local_store: string (default 'auto'; known values 'auto'|'keychain'|'secret-service'|'wincred', any other non-empty string is a password-manager CLI name), production_store: string (default 'GitHub Actions environment secrets'), allow: string[] (default [], each `^[0-9a-f]{16}$`) }` → `cfg.secrets = { localStore, productionStore, allow }`.
 - Unknown MCP ids are a config error naming the catalog ids, validated in Task 6 through `validateMcpIds(ids: string[]): string[]` (error messages). Task 1 adds a zod refinement hook that calls an injected validator. Until Task 6 the validator accepts `github`, `context7` and `playwright`.
 - `detectConfig(probe: RepoProbe): DetectedConfig` (pure), where:
   - `RepoProbe = { repo: string; defaultBranch: string; ownerType: 'org'|'user'; login: string; files: string[] /* repo-relative paths */; workflowEnvironments: Array<{ workflow: string; environment: string }>; packageScripts: Record<string,string> }`;
@@ -155,6 +158,7 @@ tests/golden/<scenario>/…                  golden renders
   - `mcp.servers: [nope]` → error mentioning `github, context7, playwright`.
   - `kit_ref` default equals `v` + package.json version.
   - `reconcile.closed_lookback_days: 0` → error.
+  - `secrets` defaults; `secrets.allow: ['xyz']` → error naming the 16-hex format.
 - [ ] **Step 2: Write failing `detectConfig` tests**
   - **Harnesses from files:** `CLAUDE.md` → `claude`; `GEMINI.md` → `gemini`; `.codex/` or `AGENTS.md` → `codex` (with note `AGENTS.md found: choose codex or agents-md`). None → `[claude]` with note `no harness files found; defaulting to claude`.
   - **Targets:** `workflowEnvironments [{workflow:'.github/workflows/deploy-web.yml', environment:'production'}]` → `targets: [{name: web, environment: production, deploy: {via: actions, workflow: …}}]`. The name comes from the workflow file name with `deploy-` stripped, else from the environment name.
@@ -292,7 +296,7 @@ tests/golden/<scenario>/…                  golden renders
   - `qualityGate: string[]`, `graphify: boolean`, `superpowers: boolean`, `contentLanguage`;
   - `roles: Array<{ role, description, tier }>` (from Task 5's library; Task 4 passes `[]` until Task 5 lands, and the template guards with `{{#if roles}}`).
 - `renderInstructions(cfg: Config, harness: Harness, data: RenderData): Change[]` returns:
-  - the `md-block` for the harness's instruction file (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`). Codex and agents-md both target `AGENTS.md`: when both are selected, one block is emitted (dedupe by path in Task 10's `renderAll`);
+  - the `md-block` for the harness's instruction file (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`). Codex and agents-md both target `AGENTS.md`: when both are selected, one block is emitted (dedupe by path in Task 11's `renderAll`);
   - a skill `file` change per skill: `.claude/skills/sdlc-<skill>/SKILL.md` for claude, `.agents/skills/sdlc-<skill>/SKILL.md` for others (deduped by path);
   - skill front matter `name: sdlc-<skill>` and `description` (required by Codex).
 - Required sections of `block.md`, all in English, terse, linking to skills for detail:
@@ -304,6 +308,7 @@ tests/golden/<scenario>/…                  golden renders
   6. **Merge and deploy authority.** The merge-policy text, and the prohibitions from Global Constraints.
   7. **Production data** (only if the `production-data` type is enabled). Backup + dry-run evidence; the owner runs the script.
   8. **Worktrees.** `.worktrees/<issue>-<slug>` from fresh `origin/<default>`. After merge, remove with `git worktree remove` (no force) and `git branch -d`.
+  9a. **Secrets.** Never put tokens, keys, passwords or connection strings into tracked files, code, commits, issues, PRs, comments or logs. Local testing: read them from the OS keystore into env vars at run time; the text shows the command for `secrets.local_store` (`auto` lists macOS `security find-generic-password -s <name> -w`, Linux `secret-tool lookup service <name>`, Windows Credential Manager). Production: only `{{cfg.secrets.production_store}}`. Ask the owner to store a needed secret; never ask for its value in chat, never print it. `.env` only gitignored. The commit guard blocks staged secrets; never bypass it with `--no-verify`.
   9. **Context survival.** Keep a running work index file beside the plan and update it after every step.
   10. **graphify** (only `{{#if graphify}}`). Query before grep, `graphify update .` after changes, `graphify-out/` is not committed.
   11. **Roles** (only `{{#if roles}}`). One line per role with its tier.
@@ -318,6 +323,7 @@ tests/golden/<scenario>/…                  golden renders
   - `owner_only` vs `agent_on_request` wording differs;
   - **every prohibition present:** assert the regexes `/--admin/`, `/rm -rf/`, `/worktree prune/`, `/push --force/`, `/production data/i`, `/another AI/i`, `/explicit confirmation/i`, `/Related to #/` match the block for every harness;
   - the block is under 150 lines for the full config;
+  - the Secrets section is present for every harness, shows the configured `production_store` text, and with `local_store: keychain` shows only the macOS command; regexes `/keystore/i`, `/--no-verify/` match.
   - codex + agents-md together → exactly one `AGENTS.md` change.
 - [ ] **Step 2: Run** → FAIL.
 - [ ] **Step 3: Write templates and `renderInstructions`.** Golden files are written by running the tests with `UPDATE_GOLDEN=1`. A helper `expectGolden(dir, changes)` in `tests/support/golden.ts` compares, or writes when the env var is set. Read the golden output once and check it against the section list above before committing it.
@@ -475,6 +481,10 @@ Lands before the Actions workflow (Task 8). It replaces the 500-issue ceiling of
   - reads `repos/<repo>/branches/<default>/protection`. 404 "Branch not protected" → PUT a minimal protection: `required_pull_request_reviews: { required_approving_review_count: 0 }`, `enforce_admins: false`, `required_status_checks: null`, `restrictions: null`, `allow_force_pushes: false`, `allow_deletions: false`.
   - Existing protection → `exists`, never modified.
   - 403 with "Upgrade to GitHub Pro" or a similar plan message → `unavailable` with the message, not an error.
+- `ensurePushProtection(run, cfg, { dryRun }): Promise<{ status: 'enabled'|'already'|'unavailable'; message }>`:
+  - reads `gh api repos/<repo> --jq .security_and_analysis`; both `secret_scanning` and `secret_scanning_push_protection` `enabled` → `already`;
+  - otherwise `gh api -X PATCH repos/<repo> --input -` with body `{"security_and_analysis":{"secret_scanning":{"status":"enabled"},"secret_scanning_push_protection":{"status":"enabled"}}}`;
+  - 403/422 (plan without secret protection, or not an admin) → `unavailable` with the message `GitHub push protection unavailable for this repository; the local commit guard still blocks secrets`, not an error.
 - `setHooksPath(git: GitRunner, { dryRun }): Promise<'set'|'already'|'conflict'>`, where `GitRunner = (args: string[]) => Promise<{ stdout; code; stderr }>`:
   - `git config --get core.hooksPath`; an unset value → set `.sdlc/githooks`; equal → `already`;
   - another value → `conflict`. The notice says hooks are not active and names both paths, and nothing is overwritten.
@@ -486,6 +496,8 @@ Lands before the Actions workflow (Task 8). It replaces the 500-issue ceiling of
   - no workflow when `stack.actions: false`;
   - `ensureLabels` creates only missing labels, with exact gh args (fakeGh);
   - branch protection paths: not protected → PUT body exact; protected → `exists`; 403 plan message → `unavailable`; dry run → no PUT;
+  - `ensurePushProtection`: already on; PATCH body exact; 422 → `unavailable`; dry run → no PATCH;
+  - `.gitignore` block contains `.env`, `.env.*`, `!.env.example`;
   - `setHooksPath` for all three cases.
 - [ ] **Step 2–4:** run, fail, implement, pass.
 - [ ] **Step 5: Commit** `feat: PR template, reconcile workflow and GitHub provisioning`.
@@ -503,7 +515,7 @@ Lands before the Actions workflow (Task 8). It replaces the 500-issue ceiling of
 - `renderGitHooks(): Change[]` creates four `file` changes with mode 0755 at `.sdlc/githooks/<name>` for `pre-commit`, `pre-push`, `post-merge` and `post-checkout`. Script body:
   - `#!/bin/sh`;
   - run `sdlc githook <name> "$@"` when `command -v sdlc` succeeds, else `npx --no-install sdlc githook <name> "$@"` when that resolves;
-  - otherwise print `sdlc not found; agentic-sdlc-kit git hook <name> skipped (install: see INSTALL.md)` to stderr and exit 0;
+  - otherwise print `sdlc not found; agentic-sdlc-kit git hook <name> skipped (install: see INSTALL.md)` to stderr and exit 0 (for `pre-commit` and `pre-push` the message adds `; the secret guard is NOT active`). GitHub push protection (Task 8) is the server-side backstop;
   - `pre-push` passes stdin through.
 - `sdlc githook <name> [args…]`. Decisions are pure functions in `src/commands/githook.ts`; IO is injected.
   - **pre-commit** (`decidePreCommit(branch, cfg)`):
@@ -534,7 +546,56 @@ Lands before the Actions workflow (Task 8). It replaces the 500-issue ceiling of
 
 ---
 
-### Task 10: `init`, `upgrade`, `uninstall`
+### Task 10: Secret guard
+
+**Files:**
+- Create: `src/secrets/rules.ts`, `src/secrets/scan.ts`, `src/secrets/gitDiff.ts`
+- Modify: `src/commands/githook.ts` (pre-commit and pre-push call the guard first)
+- Test: `tests/secrets/scan.test.ts`, `tests/secrets/gitDiff.test.ts`, `tests/commands/githook.test.ts`
+
+**Interfaces:**
+- `SecretRule = { id: string; description: string; pattern: RegExp }`. Built-in content rules (`src/secrets/rules.ts`):
+  - `github-token` `\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b`, `github-pat` `\bgithub_pat_[A-Za-z0-9_]{82}\b`;
+  - `aws-access-key` `\b(AKIA|ASIA)[A-Z0-9]{16}\b`;
+  - `gcp-api-key` `\bAIza[0-9A-Za-z_-]{35}\b`;
+  - `private-key` `-----BEGIN (RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----` (also covers service-account JSON);
+  - `slack-token` `\bxox[abprs]-[A-Za-z0-9-]{10,}\b`;
+  - `stripe-live-key` `\b(sk|rk)_live_[A-Za-z0-9]{24,}\b`;
+  - `anthropic-key` `\bsk-ant-[A-Za-z0-9_-]{32,}\b`, `openai-key` `\bsk-(proj-)?[A-Za-z0-9_-]{32,}\b` (checked after anthropic so a match is reported once);
+  - `jwt` `\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`;
+  - `generic-assignment` (case-insensitive) `(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*["'][^"'\s]{12,}["']`, ignored when the value contains `${`, `$(`, `<`, or is one of `changeme`, `example`, `placeholder`, or is made of one repeated character.
+- File-name rules: `.env` and `.env.*` except `.env.example`/`.env.sample`/`.env.template`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*` (not `*.pub`), `credentials*.json`, `service-account*.json`.
+- `Finding = { path: string; line?: number; rule: string; masked: string; fingerprint: string }`:
+  - `masked` = first 4 characters of the match + `…` + `(<length> chars)`;
+  - `fingerprint` = first 16 hex chars of sha256 of `<rule>:<match>`.
+- `scanAddedLines(path: string, lines: Array<{ line: number; text: string }>, allow: string[]): Finding[]`. A line containing `sdlc:allow-secret` is skipped; findings whose fingerprint is in `allow` are dropped.
+- `scanFileName(path: string): Finding | undefined` (no line, `masked` = the file name).
+- `parseUnifiedDiff(text: string): Array<{ path: string; lines: Array<{ line: number; text: string }> }>`. It reads `+++ b/<path>`, hunk headers `@@ -a,b +c,d @@`, and `+` lines; skips `/dev/null` targets and `Binary files` entries.
+- `stagedChanges(git)`: `git diff --cached -U0 --no-color --no-ext-diff --diff-filter=ACMR`, plus staged names from `git diff --cached --name-only --diff-filter=ACR`.
+- `pushedChanges(git, updates)`: per pushed ref, `git log -p -U0 --no-color --no-ext-diff --format= <remote_sha>..<local_sha>`. A new branch (remote sha all zeros) uses `<local_sha> --not --remotes`. A deletion is skipped.
+- `runGitleaks(exec, which)`: when `gitleaks` is on PATH, run `gitleaks git --pre-commit --staged --redact --no-banner`. Exit 1 → findings, so block with its output. Any other failure → warn `gitleaks failed (<code>); built-in guard only`.
+- Guard behaviour in `sdlc githook`:
+  - `pre-commit` and `pre-push` run the guard **before** the branch rules, in both modes;
+  - any finding → print `sdlc secret guard: commit blocked` (or `push blocked`), then one line per finding `<path>:<line> <rule> <masked> (fingerprint <fp>)`, then `Move the secret to the keystore / production secret storage. False positive? add "sdlc:allow-secret" on the line, or add the fingerprint to secrets.allow in sdlc.config.yaml.`; exit 1;
+  - a config load failure still runs the guard with an empty allow list. It never fails open over config.
+
+- [ ] **Step 1: Write failing tests** (fake tokens assembled at run time, for example `'gh' + 'p_' + 'A'.repeat(36)`):
+  - each content rule matches its sample and does not match a near miss (one char short; the `${GITHUB_PERSONAL_ACCESS_TOKEN}` placeholder; `password: "changeme"`);
+  - the anthropic key is reported once, as `anthropic-key`;
+  - file-name rules: `.env.local` blocked, `.env.example` allowed, `id_ed25519.pub` allowed, `config/credentials.prod.json` blocked;
+  - `masked` never contains more than 4 characters of the secret, and no output line contains the full sample;
+  - `sdlc:allow-secret` and `secrets.allow` fingerprints suppress the finding;
+  - `parseUnifiedDiff` line numbers across two hunks, a new file, a deleted file and a binary file;
+  - githook pre-commit with a staged token blocks in **observe** and in enforce; pre-push blocks a commit range that contains a token; a config error still blocks;
+  - gitleaks: absent → not called; exit 1 → blocks; exit 2 → warn and the built-in result decides.
+- [ ] **Step 2: Run** `npx vitest run tests/secrets tests/commands/githook.test.ts` → FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** `npm test` → PASS.
+- [ ] **Step 5: Commit** `feat: secret guard in pre-commit and pre-push`.
+
+---
+
+### Task 11: `init`, `upgrade`, `uninstall`
 
 **Files:**
 - Create: `src/render/plan.ts`, `src/commands/init.ts`, `src/commands/upgrade.ts`, `src/commands/uninstall.ts`
@@ -554,7 +615,8 @@ Lands before the Actions workflow (Task 8). It replaces the 500-issue ceiling of
   4. Unless `--skip-github`:
      - `ensureBoard` (Plan 1). A newly created project number is printed with the instruction to set `github.project.number`; init never edits the config;
      - `ensureLabels`;
-     - `ensureBranchProtection`.
+     - `ensureBranchProtection`;
+     - `ensurePushProtection`.
   5. Print `userCommands`, `notes`, and the next steps:
      - `commit the changes on a branch and open the install PR "chore: install agentic-sdlc-kit"`;
      - `run sdlc doctor`;
@@ -583,7 +645,7 @@ Lands before the Actions workflow (Task 8). It replaces the 500-issue ceiling of
 
 ---
 
-### Task 11: `sdlc doctor`
+### Task 12: `sdlc doctor`
 
 **Files:**
 - Create: `src/install/doctor.ts`, `src/commands/doctor.ts`
@@ -612,6 +674,9 @@ Lands before the Actions workflow (Task 8). It replaces the 500-issue ceiling of
   - `actions.workflow` + `actions.secret` (`gh secret list --json name` contains `SDLC_TOKEN`, else fail with fix `gh secret set SDLC_TOKEN`), only with `stack.actions`;
   - `mcp.token` (`GITHUB_PERSONAL_ACCESS_TOKEN` set in the environment when github is configured, else warn);
   - `mcp.claude` (when claude is selected and `claude` is on PATH: `claude mcp list` output lists every configured id. A missing id → warn with fix `approve the server in Claude Code or run the printed claude mcp add command`. `claude` absent → ok `claude CLI not found; skipped`);
+  - `secrets.guard`: hooksPath active and `sdlc` resolvable → ok; otherwise fail `secret guard inactive` with fix `sdlc init` / install sdlc;
+  - `secrets.pushProtection`: from `security_and_analysis`; not enabled → warn;
+  - `secrets.trackedFiles`: `git ls-files` names matching the file-name rules → fail listing them, fix `git rm --cached <file>, rotate the secret, store it in the keystore`;
   - `approvals.trust`: mode enforce, `stack.actions` and `agents` empty → warn `comment approvals from the Actions token's login are ignored in enforce mode; run agents under a separate account listed in agents (see INSTALL.md)`.
 - `DoctorEnv = { run: GhRunner; git: GitRunner; fs: RepoFs; which(cmd): Promise<boolean>; exec(cmd, args): Promise<{stdout; code; stderr}>; env: NodeJS.ProcessEnv; nodeVersion: string }`. This is all IO, injected.
 - `sdlc doctor [--preflight] [--json]`:
@@ -628,7 +693,7 @@ Lands before the Actions workflow (Task 8). It replaces the 500-issue ceiling of
 
 ---
 
-### Task 12: INSTALL.md, README and the install smoke
+### Task 13: INSTALL.md, README and the install smoke
 
 **Files:**
 - Create: `INSTALL.md`
@@ -638,14 +703,14 @@ Lands before the Actions workflow (Task 8). It replaces the 500-issue ceiling of
 **Interfaces:**
 - `INSTALL.md` is the procedure the installing agent follows, step by step, matching spec §6:
   1. Preflight: `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> doctor --preflight`, then fix fails with the owner.
-  2. `config suggest`, then ask the install questions one topic at a time. Use the §6 list: harnesses, board, mode, task types, targets, quality gate, merge policy, MCP servers and scope, models, stack, owners and agents, content language. Each question proposes the detected default.
+  2. `config suggest`, then ask the install questions one topic at a time. Use the §6 list: harnesses, board, mode, task types, targets, quality gate, merge policy, MCP servers and scope, secrets storage (local keystore and production store), models, stack, owners and agents, content language. Each question proposes the detected default.
   3. Write `sdlc.config.yaml`, show it, and get the owner's OK.
   4. `init --dry-run`, show the plan, then `init`.
   5. Commit on branch `task/<n>-install-agentic-sdlc-kit`, open the PR `chore: install agentic-sdlc-kit`, and track it as the first `tooling` task.
   6. `doctor`.
   7. Owner-only steps:
      - `gh secret set SDLC_TOKEN`;
-     - export `GITHUB_PERSONAL_ACCESS_TOKEN`;
+     - store the GitHub PAT in the OS keystore and export `GITHUB_PERSONAL_ACCESS_TOKEN` from it in the shell profile (the exact command for the chosen `local_store`), never in a file in the repository;
      - approve the MCP servers; trust the project in Codex;
      - run the printed user-scope commands.
 - The INSTALL.md section "Owner, agents and tokens" explains:
