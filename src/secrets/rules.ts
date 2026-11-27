@@ -14,13 +14,13 @@ export interface SecretRule {
   ignore?: (match: RegExpMatchArray) => boolean;
 }
 
-/** Values of `generic-assignment` that are placeholders, whatever their case. */
-const PLACEHOLDER_VALUES = new Set(['changeme', 'example', 'placeholder']);
-
-/** A value that is a reference to a secret, a template or a filler, not a secret. */
+/**
+ * A value that is a reference to a secret, a template or a filler, not a secret. (The placeholder
+ * words `changeme`, `example` and `placeholder` need no check of their own: each is shorter than the
+ * 12 characters that `generic-assignment` asks of a value, so none is ever matched.)
+ */
 function isPlaceholderValue(value: string): boolean {
   if (value.includes('${') || value.includes('$(') || value.includes('<')) return true;
-  if (PLACEHOLDER_VALUES.has(value.toLowerCase())) return true;
   const [first] = value;
   return first !== undefined && [...value].every(char => char === first);
 }
@@ -100,6 +100,8 @@ export interface FileNameRule {
   matches(name: string): boolean;
 }
 
+const SSH_KEY_PREFIXES = ['id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa'];
+
 const ENV_EXAMPLES = new Set(['.env.example', '.env.sample', '.env.template']);
 
 export const FILE_NAME_RULES: readonly FileNameRule[] = [
@@ -115,8 +117,8 @@ export const FILE_NAME_RULES: readonly FileNameRule[] = [
   },
   {
     id: 'ssh-private-key-file',
-    description: 'SSH private key (id_rsa*, id_ed25519*)',
-    matches: name => (name.startsWith('id_rsa') || name.startsWith('id_ed25519')) && !name.endsWith('.pub'),
+    description: 'SSH private key (id_rsa*, id_ed25519*, id_ecdsa*, id_dsa*; not the .pub file)',
+    matches: name => SSH_KEY_PREFIXES.some(prefix => name.startsWith(prefix)) && !name.endsWith('.pub'),
   },
   {
     id: 'credentials-file',

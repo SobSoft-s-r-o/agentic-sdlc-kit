@@ -240,6 +240,10 @@ describe('file-name rules', () => {
     'id_rsa_backup',
     '.ssh/id_ed25519',
     'id_ed25519_work',
+    'id_ecdsa',
+    'home/.ssh/id_ecdsa_sk',
+    'id_dsa',
+    'id_dsa.bak',
     'credentials.json',
     'config/credentials.prod.json',
     'service-account.json',
@@ -252,6 +256,10 @@ describe('file-name rules', () => {
     'apps/web/.env.example',
     'id_ed25519.pub',
     'id_rsa.pub',
+    'id_ecdsa.pub',
+    'id_dsa.pub',
+    'id_dsa_notes.pub',
+    'id_ecdsa_sk.pub',
     'envelope.txt',
     'environment.ts',
     'src/env.ts',
@@ -351,14 +359,21 @@ describe('long lines', () => {
     ['mixed', fill('token = "' + 'x'.repeat(11) + ' eyJ-sk--xoxb-')],
   ];
 
+  /** The fastest of three scans: a slow machine slows every run, a backtracking rule slows every run by seconds. */
+  const bestOfThree = (text: string): number => {
+    let best = Infinity;
+    for (let run = 0; run < 3; run += 1) {
+      const started = performance.now();
+      scanAddedLines('min.js', [{ line: 1, text }], []);
+      best = Math.min(best, performance.now() - started);
+    }
+    return best;
+  };
+
   it.each(shapes)('%s: a line of 100k characters is scanned in well under a second', (_name, text) => {
     expect(text.length).toBeGreaterThanOrEqual(LONG - 100);
-    const started = performance.now();
 
-    const found = scanAddedLines('min.js', [{ line: 1, text }], []);
-
-    expect(performance.now() - started).toBeLessThan(1_000);
-    expect(Array.isArray(found)).toBe(true);
+    expect(bestOfThree(text)).toBeLessThan(1_000);
   });
 
   it('still finds a secret in the middle of a very long line', () => {

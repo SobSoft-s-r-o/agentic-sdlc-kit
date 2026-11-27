@@ -1,3 +1,5 @@
+import { rmSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseUnifiedDiff, pushedChanges, stagedChanges, type ChangeSet } from '../../src/secrets/gitDiff.js';
 import { scanChanges } from '../../src/secrets/scan.js';
@@ -203,9 +205,32 @@ describe('parseUnifiedDiff', () => {
       '+++ "b/caf\\303\\251 \\"q\\".key"',
       '@@ -0,0 +1 @@',
       '+c',
+      // A quoted path with a space gets git's trailing tab after the closing quote.
+      'diff --git "a/caf\\303\\251 y.md" "b/caf\\303\\251 y.md"',
+      '--- /dev/null',
+      '+++ "b/caf\\303\\251 y.md"\t',
+      '@@ -0,0 +1 @@',
+      '+d',
     );
 
-    expect(parseUnifiedDiff(text).map(file => file.path)).toEqual(['new name.txt', 'café "q".key']);
+    expect(parseUnifiedDiff(text).map(file => file.path)).toEqual(['new name.txt', 'café "q".key', 'café y.md']);
+  });
+
+  it('decodes git octal escapes and keeps non-ASCII characters outside the BMP whole', () => {
+    const text = diff(
+      'diff --git "a/\\360\\237\\224\\221.txt" "b/\\360\\237\\224\\221.txt"',
+      '--- /dev/null',
+      '+++ "b/\\360\\237\\224\\221.txt"',
+      '@@ -0,0 +1 @@',
+      '+a',
+      'diff --git a/\u{1F511}2.txt b/\u{1F511}2.txt',
+      '--- /dev/null',
+      '+++ "b/\u{1F511}2 \\t.txt"\t',
+      '@@ -0,0 +1 @@',
+      '+b',
+    );
+
+    expect(parseUnifiedDiff(text).map(file => file.path)).toEqual(['\u{1F511}.txt', '\u{1F511}2 \t.txt']);
   });
 
   it('reads a combined diff of a merge: only a line that is new to every parent is added', () => {
@@ -240,6 +265,22 @@ describe('parseUnifiedDiff', () => {
     expect(() => parseUnifiedDiff(diff('diff --git a/x b/x', '+++ b/x', '@@ nonsense @@', '+x'))).toThrow(
       'unreadable hunk header',
     );
+  });
+
+  it('the error for a hunk header it cannot read names the file and the line, and holds no diff text', () => {
+    const token = githubToken();
+    const text = diff('diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -0,0 +1 @@', '+ok', 'diff --git a/y.ts b/y.ts', '+++ b/y.ts', `@@ ${token} @@`, '+x');
+
+    expect(() => parseUnifiedDiff(text)).toThrow('unreadable hunk header in y.ts (line 8 of the diff)');
+    let message = '';
+    try {
+      parseUnifiedDiff(text);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).not.toContain(token);
+    expect(message).not.toContain(token.slice(0, 6));
+    expect(() => parseUnifiedDiff(diff('@@ nonsense @@'))).toThrow('unreadable hunk header (line 1 of the diff)');
   });
 
   it('skips blank lines between files (git log prints one after a commit)', () => {
@@ -292,8 +333,11 @@ describe('stagedChanges', () => {
     const changes = await stagedChanges(git);
 
     expect(calls.map(call => call.args)).toEqual([
-      ['diff', '--cached', '-U0', '--no-color', '--no-ext-diff', '--diff-filter=ACMR'],
-      ['diff', '--cached', '--name-only', '-z', '--diff-filter=ACR'],
+      [
+        'diff', '--cached', '-U0', '--no-color', '--no-ext-diff', '--no-textconv',
+        '--src-prefix=a/', '--dst-prefix=b/', '--diff-filter=ACMRT',
+      ],
+      ['diff', '--cached', '--name-only', '-z', '--diff-filter=ACRT'],
     ]);
     expect(changes).toEqual({ files: [{ path: 'a.txt', lines: [{ line: 1, text: 'hello' }] }], names: ['a.txt', '.env'] });
   });
@@ -315,8 +359,11 @@ describe('stagedChanges', () => {
 });
 
 describe('pushedChanges', () => {
-  const LOG = ['log', '-p', '-U0', '--no-color', '--no-ext-diff', '--cc', '--format='];
-  const NAMES = ['log', '--name-only', '-z', '--no-color', '--diff-filter=ACR', '--format='];
+  const LOG = [
+    'log', '-p', '-U0', '--no-color', '--no-ext-diff', '--no-textconv',
+    '--src-prefix=a/', '--dst-prefix=b/', '--root', '--cc', '--format=',
+  ];
+  const NAMES = ['log', '--name-only', '-z', '--no-color', '--root', '--diff-filter=ACRT', '--format='];
 
   it('scans <remote sha>..<local sha> of each pushed ref, patch and names', async () => {
     const { git, calls } = fakeGit([{ stdout: ADDED }, { stdout: 'a.txt\0' }]);
@@ -570,5 +617,110 @@ describe('with real git', () => {
     const changes = await pushedChanges(createGitRunner(r.root), [{ localSha: head, remoteSha: remote, deleting: false }]);
 
     expect(scanned(changes)).toEqual([]);
+  });
+
+  describe('what git config and attributes must not be able to hide', () => {
+    it('pushedChanges: the root commit is scanned although log.showRoot is false (a new branch, patch and names)', async () => {
+      const r = setup();
+      r.git('config', 'log.showRoot', 'false');
+      r.write('app.ts', `const t = "${githubToken()}";\n`);
+      r.write('.env', 'A=1\n');
+      r.commit('root, made with --no-verify');
+      const head = r.git('rev-parse', 'HEAD').trim();
+
+      const changes = await pushedChanges(createGitRunner(r.root), [{ localSha: head, remoteSha: ZEROS, deleting: false }]);
+
+      expect(scanned(changes).sort()).toEqual(['.env:-:env-file', 'app.ts:1:github-token']);
+    });
+
+    it('pushedChanges: the root commit of a history the remote knows nothing of is scanned too (remote sha given)', async () => {
+      const r = setup();
+      r.git('config', 'log.showRoot', 'false');
+      r.write('seed.txt', 'x\n');
+      r.commit('what the remote has');
+      const remote = r.git('rev-parse', 'HEAD').trim();
+      r.git('checkout', '-q', '--orphan', 'unrelated');
+      r.git('rm', '-rfq', '.');
+      r.write('leak.ts', `const t = "${githubToken()}";\n`);
+      r.commit('an unrelated root');
+      const head = r.git('rev-parse', 'HEAD').trim();
+
+      const changes = await pushedChanges(createGitRunner(r.root), [{ localSha: head, remoteSha: remote, deleting: false }]);
+
+      expect(scanned(changes)).toEqual(['leak.ts:1:github-token']);
+    });
+
+    it('stagedChanges: a textconv driver cannot replace what a staged file holds', async () => {
+      const r = setup();
+      r.write('.gitattributes', '*.txt diff=hide\n');
+      r.git('config', 'diff.hide.textconv', 'echo hidden');
+      r.write('seed.md', 'x\n');
+      r.commit('init');
+      r.write('notes.txt', `token = "${githubToken()}"\n`);
+      r.git('add', 'notes.txt');
+
+      expect(scanned(await stagedChanges(createGitRunner(r.root)))).toEqual(['notes.txt:1:github-token']);
+    });
+
+    it('pushedChanges: a textconv driver cannot replace what a pushed commit holds', async () => {
+      const r = setup();
+      r.write('.gitattributes', '*.txt diff=hide\n');
+      r.git('config', 'diff.hide.textconv', 'echo hidden');
+      r.write('seed.md', 'x\n');
+      r.commit('init');
+      const base = r.git('rev-parse', 'HEAD').trim();
+      r.write('notes.txt', `token = "${githubToken()}"\n`);
+      r.commit('leak');
+      const head = r.git('rev-parse', 'HEAD').trim();
+
+      const changes = await pushedChanges(createGitRunner(r.root), [{ localSha: head, remoteSha: base, deleting: false }]);
+
+      expect(scanned(changes)).toEqual(['notes.txt:1:github-token']);
+    });
+
+    it('stagedChanges: a type change (a symlink that becomes a file) is scanned, by content and by name', async () => {
+      const r = setup();
+      symlinkSync('target', join(r.root, 'link'));
+      symlinkSync('target', join(r.root, '.env'));
+      r.commit('two symlinks');
+      for (const name of ['link', '.env']) rmSync(join(r.root, name));
+      r.write('link', `const t = "${githubToken()}";\n`);
+      r.write('.env', 'A=1\n');
+      r.git('add', 'link', '.env');
+      expect(r.git('diff', '--cached', '--name-status').trim().split('\n').map(line => line.split('\t')[0])).toEqual(['T', 'T']);
+
+      expect(scanned(await stagedChanges(createGitRunner(r.root))).sort()).toEqual(['.env:-:env-file', 'link:1:github-token']);
+    });
+
+    it('stagedChanges: diff.mnemonicPrefix and diff.noprefix change no path; a path with a space and non-ASCII is read right', async () => {
+      const r = setup();
+      r.write('seed.md', 'x\n');
+      r.commit('init');
+      r.git('config', 'diff.mnemonicPrefix', 'true');
+      r.write('café y.md', `token = "${githubToken()}"\n`);
+      r.write('b/inner.ts', `token = "${githubToken()}"\n`);
+      r.git('add', 'café y.md', 'b/inner.ts');
+      const runner = createGitRunner(r.root);
+
+      expect(scanned(await stagedChanges(runner)).sort()).toEqual(['b/inner.ts:1:github-token', 'café y.md:1:github-token']);
+      r.git('config', 'diff.noprefix', 'true');
+      expect(scanned(await stagedChanges(runner)).sort()).toEqual(['b/inner.ts:1:github-token', 'café y.md:1:github-token']);
+    });
+
+    it('pushedChanges: the same for diff.mnemonicPrefix and diff.noprefix', async () => {
+      const r = setup();
+      r.write('seed.md', 'x\n');
+      r.commit('init');
+      const base = r.git('rev-parse', 'HEAD').trim();
+      r.git('config', 'diff.noprefix', 'true');
+      r.write('café y.md', `token = "${githubToken()}"\n`);
+      r.write('b/inner.ts', `token = "${githubToken()}"\n`);
+      r.commit('leak');
+      const head = r.git('rev-parse', 'HEAD').trim();
+
+      const changes = await pushedChanges(createGitRunner(r.root), [{ localSha: head, remoteSha: base, deleting: false }]);
+
+      expect(scanned(changes).sort()).toEqual(['b/inner.ts:1:github-token', 'café y.md:1:github-token']);
+    });
   });
 });

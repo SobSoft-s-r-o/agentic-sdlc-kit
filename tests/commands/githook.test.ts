@@ -716,7 +716,9 @@ describe('runGitHook pre-commit: the secret guard', () => {
       crash.ctx.loadConfig = () => ({ ...enforce, secrets: { ...enforce.secrets, allow: 5 as unknown as string[] } });
 
       expect(await runGitHook('pre-commit', [], unreadable.ctx)).toBe(1);
-      expect(unreadable.err[0]).toMatch(/^sdlc secret guard: could not scan \(unreadable hunk header: .*\); commit blocked$/);
+      expect(unreadable.err[0]).toBe(
+        'sdlc secret guard: could not scan (unreadable hunk header in x (line 3 of the diff)); commit blocked',
+      );
       expect(await runGitHook('pre-commit', [], crash.ctx)).toBe(1);
       expect(crash.err).toHaveLength(1);
       expect(crash.err[0]).toMatch(/^sdlc secret guard: could not scan \(.*\); commit blocked$/);

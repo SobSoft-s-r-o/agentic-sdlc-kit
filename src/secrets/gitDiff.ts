@@ -15,34 +15,42 @@ export interface ChangedFile {
 
 const firstLine = (text: string): string => text.split('\n')[0]?.trim() ?? '';
 
-/** Git's C-style quoting of a path with unusual characters: `"caf\303\251"`. */
+const ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
+
+/** Git's C-style quoting of a path with unusual characters: `"caf\303\251"` is `café`. */
 function unquotePath(quoted: string): string {
   const inner = quoted.slice(1, -1);
   const bytes: number[] = [];
-  const escapes: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
-  for (let index = 0; index < inner.length; index += 1) {
-    const char = inner.charAt(index);
+  let index = 0;
+  while (index < inner.length) {
+    const char = String.fromCodePoint(inner.codePointAt(index) ?? 0);
+    index += char.length;
     if (char !== '\\') {
       bytes.push(...Buffer.from(char, 'utf8'));
       continue;
     }
-    const next = inner.charAt(index + 1);
-    const octal = /^[0-7]{3}/.exec(inner.slice(index + 1))?.[0];
+    // A backslash is followed by three octal digits (one byte of the UTF-8 name) or by one character.
+    const octal = /^[0-7]{3}/.exec(inner.slice(index))?.[0];
     if (octal !== undefined) {
       bytes.push(Number.parseInt(octal, 8) & 0xff);
       index += 3;
-    } else {
-      bytes.push(escapes[next] ?? next.charCodeAt(0));
-      index += 1;
+      continue;
     }
+    const next = String.fromCodePoint(inner.codePointAt(index) ?? 0x5c);
+    index += next.length;
+    bytes.push(...(ESCAPES[next] === undefined ? Buffer.from(next, 'utf8') : [ESCAPES[next]]));
   }
   return Buffer.from(bytes).toString('utf8');
 }
 
-/** The path of a `+++ ` line: unquoted, without git's trailing tab and its `b/` prefix. */
+/**
+ * The path of a `+++ ` line: without git's trailing tab (it follows a name with a space, quoted or
+ * not), unquoted, without its `b/` prefix (the commands below ask for that prefix whatever the
+ * user's `diff.noprefix` and `diff.mnemonicPrefix` say), or `undefined` for `/dev/null`.
+ */
 function targetPath(rest: string): string | undefined {
-  const quoted = rest.length >= 2 && rest.startsWith('"') && rest.endsWith('"');
-  const path = quoted ? unquotePath(rest) : rest.replace(/\t$/, '');
+  const name = rest.replace(/\t$/, '');
+  const path = name.length >= 2 && name.startsWith('"') && name.endsWith('"') ? unquotePath(name) : name;
   if (path === '/dev/null') return undefined;
   return path.startsWith('b/') ? path.slice(2) : path;
 }
@@ -67,7 +75,7 @@ export function parseUnifiedDiff(text: string): ChangedFile[] {
   let inHunk = false;
   let columns = 1;
   let line = 0;
-  for (const raw of text.split('\n')) {
+  for (const [index, raw] of text.split('\n').entries()) {
     if (inHunk && !raw.startsWith('diff ') && !raw.startsWith('@@')) {
       if (raw === '' || raw.startsWith('\\')) continue;
       const prefix = raw.slice(0, columns);
@@ -86,7 +94,10 @@ export function parseUnifiedDiff(text: string): ChangedFile[] {
       if (target !== undefined) files.push(target);
     } else if (raw.startsWith('@@')) {
       const header = HUNK.exec(raw);
-      if (header === null) throw new Error(`unreadable hunk header: ${raw.slice(0, 60)}`);
+      // Only where it is, never what it says: the line is diff text, and diff text can hold a secret.
+      if (header === null) {
+        throw new Error(`unreadable hunk header${target === undefined ? '' : ` in ${target.path}`} (line ${index + 1} of the diff)`);
+      }
       columns = (header[1] ?? '@@').length - 1;
       line = Number(header[2]);
       inHunk = true;
@@ -107,10 +118,21 @@ async function run(git: GitRunner, args: string[]): Promise<string> {
 /** NUL-separated names (`-z`: git quotes nothing then, so a name is never changed on the way). */
 const namesOf = (output: string): string[] => output.split('\0').filter(name => name !== '');
 
-/** The added lines of the staged changes, and the staged names of added, copied and renamed files. */
+/**
+ * What makes the patch the same whatever the user's git config and attributes say: no colour, no
+ * external diff driver and no textconv driver (either would show something else than the file's
+ * content, and a secret would not be in it), and the plain `a/` and `b/` prefixes (`diff.noprefix`
+ * and `diff.mnemonicPrefix` would change the `+++` line that `parseUnifiedDiff` reads).
+ */
+const PATCH_OPTIONS = ['-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'];
+
+/**
+ * The added lines of the staged changes, and the staged names of added, copied, renamed and
+ * type-changed files (T: a symlink that became a file holds new content like an added file does).
+ */
 export async function stagedChanges(git: GitRunner): Promise<ChangeSet> {
-  const patch = await run(git, ['diff', '--cached', '-U0', '--no-color', '--no-ext-diff', '--diff-filter=ACMR']);
-  const names = await run(git, ['diff', '--cached', '--name-only', '-z', '--diff-filter=ACR']);
+  const patch = await run(git, ['diff', '--cached', ...PATCH_OPTIONS, '--diff-filter=ACMRT']);
+  const names = await run(git, ['diff', '--cached', '--name-only', '-z', '--diff-filter=ACRT']);
   return { files: parseUnifiedDiff(patch), names: [...new Set(namesOf(names))] };
 }
 
@@ -124,8 +146,9 @@ export interface PushedRef {
 const OBJECT_NAME = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const isZeros = (sha: string): boolean => /^0+$/.test(sha);
 
-const LOG_PATCH = ['log', '-p', '-U0', '--no-color', '--no-ext-diff', '--cc', '--format='];
-const LOG_NAMES = ['log', '--name-only', '-z', '--no-color', '--diff-filter=ACR', '--format='];
+// `--root`: the first commit of a history is shown as a creation event, whatever `log.showRoot` says.
+const LOG_PATCH = ['log', '-p', ...PATCH_OPTIONS, '--root', '--cc', '--format='];
+const LOG_NAMES = ['log', '--name-only', '-z', '--no-color', '--root', '--diff-filter=ACRT', '--format='];
 
 /**
  * The added lines and added file names of the commits being pushed: for each ref the commits the

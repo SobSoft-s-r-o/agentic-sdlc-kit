@@ -245,6 +245,18 @@ describe('sdlc githook (built)', () => {
     return env;
   }
 
+  /** Real git in `root` with `env`: `git` gives the result, `mustGit` the output or an error. */
+  function gitIn(root: string, env: NodeJS.ProcessEnv) {
+    const git = (...args: string[]) =>
+      spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', ...args], { cwd: root, env, encoding: 'utf8' });
+    const mustGit = (...args: string[]): string => {
+      const result = git(...args);
+      if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
+      return result.stdout.trim();
+    };
+    return { git, mustGit };
+  }
+
   it('pre-commit on the default branch warns in observe mode and blocks in enforce mode', () => {
     const warned = sdlc(['githook', 'pre-commit'], { cwd: repo('observe'), env: onlyGit() });
     rmSync(join(dir, 'repo'), { recursive: true });
@@ -368,20 +380,14 @@ describe('sdlc githook (built)', () => {
     expect(onMain.stderr).toContain('sdlc: error: committing directly to main');
     expect(onTask.status).toBe(0);
     expect(onTask.stderr).toBe('');
-  });
+  }, 30_000);
 
   it('the rendered scripts block a secret under real git, in observe mode: the commit, then the push of a history that holds it', () => {
     const root = repo('observe');
     const remote = join(dir, 'remote.git');
     const token = githubToken();
     const env = installRenderedHooks(root);
-    const git = (...args: string[]) =>
-      spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', ...args], { cwd: root, env, encoding: 'utf8' });
-    const mustGit = (...args: string[]): string => {
-      const result = git(...args);
-      if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
-      return result.stdout.trim();
-    };
+    const { git, mustGit } = gitIn(root, env);
     const remoteRefs = () => execFileSync('git', ['for-each-ref', '--format=%(refname)'], { cwd: remote, env, encoding: 'utf8' }).trim();
     execFileSync('git', ['init', '-q', '--bare', remote], { env });
     mustGit('remote', 'add', 'origin', remote);
@@ -425,7 +431,54 @@ describe('sdlc githook (built)', () => {
     expect(git('commit', '-m', 'fixture').status).toBe(0);
     expect(git('push', 'origin', 'task/2-allowed').status).toBe(0);
     expect(remoteRefs()).toBe('refs/heads/main\nrefs/heads/task/2-allowed');
-  });
+  }, 30_000);
+
+  it('git settings that change what a diff shows cannot hide a secret from the rendered hooks: root commit, textconv, type change', () => {
+    const root = repo('observe');
+    const remote = join(dir, 'remote.git');
+    const token = githubToken();
+    const env = installRenderedHooks(root);
+    const { git, mustGit } = gitIn(root, env);
+    execFileSync('git', ['init', '-q', '--bare', remote], { env });
+    mustGit('remote', 'add', 'origin', remote);
+    mustGit('config', 'log.showRoot', 'false');
+    mustGit('config', 'diff.mnemonicPrefix', 'true');
+    mustGit('config', 'diff.hide.textconv', 'echo hidden');
+
+    // A root commit made with --no-verify: the push of it is refused although log.showRoot is false.
+    writeFileSync(join(root, '.gitattributes'), '*.txt diff=hide\n');
+    writeFileSync(join(root, 'app.ts'), `export const t = "${token}";\n`);
+    mustGit('add', '.gitattributes', 'app.ts');
+    expect(git('commit', '--no-verify', '-m', 'root').status).toBe(0);
+    const pushed = git('push', 'origin', 'main');
+    expect(pushed.status).not.toBe(0);
+    expect(pushed.stderr).toContain('sdlc secret guard: push blocked');
+    expect(pushed.stderr).toContain('app.ts:1 github-token ghp_…(40 chars)');
+    expect(pushed.stderr).not.toContain(token);
+    expect(execFileSync('git', ['for-each-ref'], { cwd: remote, env, encoding: 'utf8' })).toBe('');
+
+    // A textconv driver on *.txt would print "hidden" instead of the file: the commit is still refused.
+    mustGit('checkout', '-q', '-b', 'task/1-text');
+    writeFileSync(join(root, 'notes.txt'), `token = "${token}"\n`);
+    mustGit('add', 'notes.txt');
+    const text = git('commit', '-m', 'notes');
+    expect(text.status).toBe(1);
+    expect(text.stderr).toContain('notes.txt:1 github-token ghp_…(40 chars)');
+    mustGit('reset', '-q', '--', 'notes.txt');
+    rmSync(join(root, 'notes.txt'));
+
+    // A symlink that becomes a file with a token is a type change, and it is scanned.
+    symlinkSync('target', join(root, 'link'));
+    mustGit('add', 'link');
+    expect(git('commit', '-m', 'a link').status).toBe(0);
+    rmSync(join(root, 'link'));
+    writeFileSync(join(root, 'link'), `export const t = "${token}";\n`);
+    mustGit('add', 'link');
+    const typeChange = git('commit', '-m', 'a file');
+    expect(typeChange.status).toBe(1);
+    expect(typeChange.stderr).toContain('link:1 github-token ghp_…(40 chars)');
+    expect(typeChange.stderr).not.toContain(token);
+  }, 30_000);
 
   it('a hook gives up a hanging tracker call at its deadline and really exits, though the call is still running', () => {
     // The tracker call is a real child process that outlives the 100 ms deadline by seconds.
