@@ -7,7 +7,8 @@ Rules for the whole install:
 - Ask the install questions one topic at a time, each with the default you detected, and wait for the answer. Do not batch them.
 - The installer never commits, pushes or writes outside the repository. You commit; the owner runs the steps in Step 7.
 - No secret goes into a file, a commit, a chat message or a log. Never ask the owner to paste a token to you.
-- `<ref>` is the kit version to install: a release tag such as `v0.1.0`, or `main`. Until `sdlc` is installed (Step 4), run every `sdlc` command as `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> <command>`.
+- `<ref>` is the kit version to install: a release tag such as `v0.1.0`, or `main`.
+- How to run `sdlc`: until it is installed (Step 4), as `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> <command>`. After the project dependency of Step 4, as `npx --no-install sdlc <command>`: a dev dependency lives in `node_modules/.bin`, which is not on the PATH, so plain `sdlc` works only after a global install. Elsewhere in this document `sdlc <command>` in running text means whichever form applies.
 
 ## Step 1: Preflight
 
@@ -45,7 +46,7 @@ Which agents work in this repository? Key `harnesses`, any of `claude`, `codex`,
 
 #### 2. Board
 
-Use an existing GitHub Project or create one? Key `github.project`: `owner` (the login that owns it), `owner_type` (`org` or `user`) and `number`. For an existing project list them (`gh project list --owner <owner>`) and set `number`. Leave `number` out to have `init` create one titled `<repo> SDLC tasks`; `init` then prints the number and you add it to the config (Step 4).
+Use an existing GitHub Project or create one? Key `github.project`: `owner` (the login that owns it), `owner_type` (`org` or `user`) and `number`. For an existing project list them (`gh project list --owner <owner>`) and set `number`. `config suggest` never sets `number`. Leave it out to have `init` create a board titled `<repo> SDLC tasks`; `init` then prints the number and you add it to the config (Step 4).
 
 #### 3. Enforcement mode
 
@@ -53,7 +54,7 @@ Key `mode`: `observe` (default) records gaps and warns; `enforce` blocks. In `en
 
 #### 4. Task types
 
-Key `task_types.enabled`; built-in ids are `feature`, `bugfix`, `tooling`, `analysis`, `production-data`, `artifact`, `spike`. Keep `tooling`: the install PR is a `tooling` task. `feature` and `bugfix` end on a deploy and need at least one target, so they are off when no target was detected. Custom types go under `task_types.custom` (see section 7 of the design).
+Key `task_types.enabled`; built-in ids are `feature`, `bugfix`, `tooling`, `analysis`, `production-data`, `artifact`, `spike`. Keep `tooling`: the install PR is a `tooling` task. `feature` and `bugfix` end on a deploy and need at least one target, so they are off when no target was detected. Custom types go under `task_types.custom`; see [the design, Task types](https://github.com/SobSoft-s-r-o/agentic-sdlc-kit/blob/main/docs/superpowers/specs/2026-11-27-agentic-sdlc-design.md#7-task-types).
 
 #### 5. Deploy targets
 
@@ -74,7 +75,7 @@ Key `merge_policy`: `owner_only` (default) or `agent_on_request` (the agent may 
 
 #### 8. MCP servers and scope
 
-Keys `mcp.servers` (catalog ids: `github` is the default; optional `context7` for library docs and `playwright` for browser checks), `mcp.scope` and `mcp.github_transport`. Ask for each server whether it is configured for the project or the owner's user account.
+Keys `mcp.servers` (catalog ids: `github` is the default; optional `context7` for library docs and `playwright` for browser checks), `mcp.scope` and `mcp.github_transport`. Ask which servers, then ask once whether they are configured for the project or for the owner's user account: there is one `mcp.scope` for all of them.
 
 - `mcp.scope: project` (default): `init` writes `.mcp.json` (Claude Code), `.codex/config.toml` (Codex) and `.gemini/settings.json` (Gemini CLI).
 - `mcp.scope: user`: `init` writes nothing and prints one command per server for the owner to run (Step 7). It never touches `~/.claude.json`, `~/.codex` or `~/.gemini`.
@@ -94,8 +95,8 @@ Key `models.<harness>`, each `{ deep, standard, fast }`. Claude defaults to `opu
 
 Keys `stack.superpowers`, `stack.graphify`, `stack.branch_protection` and `stack.actions`, all default `true`.
 
-- `stack.superpowers`: adds the Superpowers skill route to the instructions. The kit does not install the Superpowers plugin; the owner does, per harness.
-- `stack.graphify`: adds the graphify rules and `graphify-out/` to `.gitignore`.
+- `stack.superpowers`: adds the Superpowers skill route to the instructions. The kit does not install the plugin; the owner does, per harness (Step 7): in Claude Code `/plugin install superpowers@claude-plugins-official`, for Gemini CLI `gemini extensions install https://github.com/obra/superpowers`, for Codex the Superpowers entry in its plugin marketplace (`/plugins`). Other harnesses: see https://github.com/obra/superpowers.
+- `stack.graphify`: adds the graphify rules and `graphify-out/` to `.gitignore`. The kit does not install graphify either: `uv tool install graphifyy` (or `pipx install graphifyy`; the package name has two `y`), then build the graph once as its documentation says.
 - `stack.branch_protection`: `init` protects the default branch (pull request required, no force pushes or deletions).
 - `stack.actions`: renders `.github/workflows/sdlc-reconcile.yml`, which needs the `SDLC_TOKEN` secret. Without it the board updates only from local commands and hooks.
 
@@ -160,23 +161,23 @@ npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init --dry-run
 Show the plan to the owner, then run `init` without `--dry-run`. It writes the managed files (instruction blocks, agent roles, skills, MCP config, the PR template, the reconcile workflow, `.sdlc/manifest.json`, the git hooks and `.gitignore` lines), sets `core.hooksPath` to `.sdlc/githooks` (the hooks `pre-commit` and `pre-push`, which run the secret guard and the branch rules, then `post-merge` and `post-checkout`), and provisions the board, labels, default-branch protection and secret scanning push protection. It commits nothing. `init` is idempotent: run it again and nothing changes.
 
 - Files that already exist and are not the kit's are kept (notice `exists, not managed by sdlc; kept`); files you or the owner edited are kept (notice `modified locally; kept`); `--overwrite-modified` replaces them.
-- If `init` created a board, it printed `Created project #N`. Put `number: N` under `github.project` in `sdlc.config.yaml` and run `init` again, or a second board is created next time.
-- `--skip-github` leaves GitHub alone; use it when the account is not an admin of the repository.
+- If `init` created a board, it printed `Created project #N`. Put `number: N` under `github.project` in `sdlc.config.yaml` now: `sdlc task new` and `doctor` need it, and without it every `init` creates another board.
+- `--skip-github` leaves GitHub alone (no board, labels, branch protection or push protection). Use it only when the owner provisions the board and the labels themselves, because Step 5 needs both before it can create the task. An account that is not an admin does not need it: `init` reports the admin-only parts as unavailable and goes on.
 
-Then make `sdlc` resolvable, because the git hooks call it and, when they cannot find it, the secret guard does not run (see "Secret guard"):
+Then make `sdlc` resolvable, because the git hooks call it and, when they cannot find it, the secret guard does not run (see "Secret guard"; until then `doctor` fails `secrets.guard`). Tell the owner first: this adds a dev dependency to `package.json` and the lockfile, and the PR body of Step 5 must list it. Use the repository's own package manager:
 
 ```sh
-npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>
+npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>   # pnpm add -D ...  /  yarn add -D ...  with the same specifier
 ```
 
-For a repository without `package.json`, install it for the owner's machine instead: `npm install --global github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>`. From here on plain `sdlc <command>` works.
+The hooks then find `sdlc` through `npx --no-install sdlc`, and from here on you run `npx --no-install sdlc <command>`. A repository without a `package.json`, or one that uses Yarn Plug'n'Play (no `node_modules/.bin`), needs a global install instead: `npm install --global github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>`, after which plain `sdlc <command>` works. A global install protects only that machine: tell the owner that every other clone and every other contributor needs the same install, or the guard is not active there.
 
 ## Step 5: Commit, open the PR, track it
 
 The install is the first task, type `tooling`. Create it before the branch, because the branch name carries its number:
 
 ```sh
-sdlc task new --type tooling --title "Install agentic-sdlc-kit" --summary "Install agentic-sdlc-kit"
+npx --no-install sdlc task new --type tooling --title "Install agentic-sdlc-kit" --summary "Install agentic-sdlc-kit"
 ```
 
 It prints `Created #<n>: <url>`. Then:
@@ -189,28 +190,28 @@ git push -u origin task/<n>-install-agentic-sdlc-kit
 gh pr create --title "chore: install agentic-sdlc-kit" --body-file <body>
 ```
 
-The PR body says `Related to #<n>` (never `Fixes` or `Closes`) and `Scope: final`. Then hand it over: `sdlc review handoff <n> --pr <pr-number>`. The owner reviews and merges.
+The PR body says `Related to #<n>` (never `Fixes` or `Closes`) and `Scope: final`, and lists what the install added, including the dev dependency of Step 4. Then hand it over: `npx --no-install sdlc review handoff <n> --pr <pr-number>`. The owner reviews and merges.
 
 If the commit is blocked, the secret guard found something: see "Secret guard". Never use `--no-verify`.
 
 ## Step 6: Verify
 
 ```sh
-sdlc doctor
+npx --no-install sdlc doctor
 ```
 
-Each line starts with `✓` (ok), `!` (warning) or `✗` (failure), and a failure exits non-zero. Until the owner finishes Step 7, expect `actions.secret` to fail and `mcp.token` to warn; report anything else to the owner instead of hiding it. The checks and their fixes are in "Troubleshooting".
+Each line starts with `✓` (ok), `!` (warning) or `✗` (failure), and a failure exits non-zero. Until the owner finishes Step 7, expect `actions.secret` to fail (`SDLC_TOKEN` is not set) and `mcp.token` to warn (the variable is not exported); a failing `secrets.guard` means `sdlc` is not installed yet (Step 4). Report anything else to the owner instead of hiding it. The checks and their fixes are in "Troubleshooting".
 
 ## Step 7: Owner-only steps
 
 Give the owner this list; do not do these yourself and do not ask for any value.
 
 1. `gh secret set SDLC_TOKEN` (when `stack.actions` is on): the token the reconcile workflow uses, see "Owner, agents and tokens". `gh` prompts for the value.
-2. Store the GitHub token for the MCP server in the OS keystore and export `GITHUB_PERSONAL_ACCESS_TOKEN` from it in the shell profile, with the commands for the chosen `secrets.local_store` in "Secrets". Never in a file in the repository.
+2. Create the GitHub token for the MCP server, store it in the OS keystore and export `GITHUB_PERSONAL_ACCESS_TOKEN` from it in the shell profile, with the commands for the chosen `secrets.local_store` in "Secrets". Never in a file in the repository, never pasted into the chat.
 3. Approve the project's MCP servers when Claude Code asks, and trust the project in Codex (it loads `.codex/config.toml` only for trusted projects).
 4. Run the user-scope commands `init` printed (`mcp.scope: user`), then check them as described in "MCP servers".
 5. Turn on secret scanning push protection if `doctor` warns that it is off (repository settings, Code security).
-6. Install the Superpowers plugin for each harness if `stack.superpowers` is on.
+6. Install the Superpowers plugin for each harness if `stack.superpowers` is on, and graphify if `stack.graphify` is on (commands under question 11).
 
 ## Secrets
 
@@ -219,6 +220,13 @@ The policy, set by the owner and written into every agent's instructions:
 - Secrets for local testing live in the OS keystore and are exported into the shell from it when needed. They are never written to a file in the repository, and never printed.
 - Production secrets live only in the store named by `secrets.production_store`. An agent that needs one asks the owner to put it there and never asks for the value.
 - `.env` files exist only gitignored. The `.gitignore` block that `init` adds covers `.env` and `.env.*` (not `.env.example`).
+
+**The GitHub token for the MCP server.** The owner creates it under the account the agents act as (the one listed in `agents`; the owner's own when there is no separate account), either fine-grained at https://github.com/settings/personal-access-tokens or classic at https://github.com/settings/tokens, with an expiry and the least it needs:
+
+- Fine-grained: limited to this repository, with Contents, Issues and Pull requests (read is enough when the agents only read through MCP; Metadata read is automatic). GitHub's fine-grained tokens do not cover a board owned by a user account, only an organization's; for such a board use a classic token.
+- Classic: the scopes `repo` and `project`.
+
+`sdlc` itself uses `gh`, not this token. The token goes straight into the keystore with the command below. It is never written to a file and never pasted into the chat.
 
 Store a secret once, then export it in the shell profile (`~/.zshrc`, `~/.bashrc`, or the PowerShell `$PROFILE`). Replace `github-mcp` with any service name; the commands prompt for the value, so it is not in the shell history.
 
@@ -266,8 +274,8 @@ secrets:
 Limits you must tell the owner:
 
 - `git commit --no-verify` skips the local hooks, and the pre-push hook can be skipped the same way. The server-side backstop is GitHub secret scanning push protection: `init` enables it where the plan allows, and `doctor` warns when it is off. Turn it on.
-- The hooks call `sdlc`: from the PATH, or the project's installed dev dependency. When neither resolves, the hook prints that `sdlc` was not found and that the secret guard is NOT active, and lets the commit through. Run `sdlc doctor` (checks `sdlc.onPath` and `secrets.guard`).
-- Version skew: the hooks run the installed `sdlc`, not the version `init` ran from. After `sdlc upgrade`, keep the dev dependency at the same version (`npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<new-ref>`), or the hooks keep running the old guard.
+- The hooks call `sdlc` from the PATH, or from the project's dev dependency through `npx --no-install sdlc`. When neither resolves, the hook prints that `sdlc` was not found and that the secret guard is NOT active, and lets the commit through. Run `npx --no-install sdlc doctor` (it checks `sdlc.onPath` and `secrets.guard`), or install the dev dependency as in Step 4. A global install covers only that machine.
+- Version skew: the hooks run the installed `sdlc`, not the version `init` ran from. When you upgrade, move the dev dependency to the same version (`npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<new-ref>`), or the hooks keep running the old guard.
 
 ## Owner, agents and tokens
 
@@ -289,18 +297,18 @@ In short: owner decides under the owner login; agents and the workflow act under
 
 ## Custom agent roles
 
-Project-specific roles are Markdown files in `.sdlc/agents/custom/`, named `<role>.md`, never overwritten by `upgrade`. The front matter has exactly `role` (equal to the file name), `description`, `tier` (`deep`, `standard` or `fast`), `can_edit`, `returns` and `escalate_when`; the body is the prompt. After adding one, run `sdlc upgrade` to render it for every harness. A role named like a built-in one replaces it, with a notice.
+Project-specific roles are Markdown files in `.sdlc/agents/custom/`, named `<role>.md`, never overwritten by `upgrade`. The front matter has exactly `role` (equal to the file name), `description`, `tier` (`deep`, `standard` or `fast`), `can_edit`, `returns` and `escalate_when`; the body is the prompt. After adding one, run `npx --no-install sdlc upgrade` to render it for every harness. A role named like a built-in one replaces it, with a notice.
 
 Role files are templates: `{{...}}` is filled in when the file is rendered. To write a literal `{{`, put a backslash before it (`\{{`), for example to quote a GitHub Actions expression.
 
 ## Upgrading and uninstalling
 
-- `sdlc upgrade --dry-run`, then `sdlc upgrade`: re-render the managed files from the installed kit version and remove what the kit no longer generates. It keeps everything outside managed blocks, edited files and custom roles, and never touches GitHub. If you set `kit_ref`, change it to the new ref first or the regenerated files keep calling the old one. Update the dev dependency to the same version, and commit through a task PR.
-- `sdlc uninstall --dry-run`, then `sdlc uninstall`: removes the managed files and unsets `core.hooksPath` when it is the kit's. It keeps `sdlc.config.yaml`, `.sdlc/agents/custom/`, the cache and any file that was edited. The board, labels, issues, branch protection and push protection stay on GitHub. Remove the dev dependency yourself.
+- Upgrade: set `kit_ref` to the new ref, move the dev dependency to it (the command in Step 4), then run `npx --no-install sdlc upgrade --dry-run` and `npx --no-install sdlc upgrade`. Without a dev dependency, run `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<new-ref> upgrade` instead. It re-renders the managed files from the installed kit version and removes what the kit no longer generates, keeps everything outside managed blocks, edited files and custom roles, and never touches GitHub. Commit the result through a task PR.
+- Uninstall: `npx --no-install sdlc uninstall --dry-run`, then `npx --no-install sdlc uninstall`. It removes the managed files and unsets `core.hooksPath` when it is the kit's. It keeps `sdlc.config.yaml`, `.sdlc/agents/custom/`, the cache and any file that was edited. The board, labels, issues, branch protection and push protection stay on GitHub. Remove the dev dependency yourself.
 
 ## Troubleshooting and limits
 
-`sdlc doctor` prints one line per check, and a `fix:` line under a failed one.
+`npx --no-install sdlc doctor` prints one line per check, and a `fix:` line under a failed one. In the fixes below, `sdlc <command>` means `npx --no-install sdlc <command>`.
 
 | Check | Meaning and fix |
 |---|---|

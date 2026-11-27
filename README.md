@@ -18,23 +18,26 @@ The agent runs the preflight, detects your setup, asks you the install questions
 
 ## Two-minute walkthrough
 
-Run these yourself instead, from the root of a git repository with `gh` logged in:
+Run these yourself instead, from the root of a git repository with `gh` logged in. `<ref>` is the kit version: a release tag such as `v0.1.0`, or `main`.
 
 ```sh
-npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> doctor --preflight   # git, Node, gh, repository
+npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> doctor --preflight       # git, Node, gh, repository
 npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> config suggest --write   # sdlc.config.yaml from what it finds
-$EDITOR sdlc.config.yaml                                                 # answer the questions of INSTALL.md
-npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init --dry-run       # the plan; nothing is written
-npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init                 # files, git hooks, board, labels, protection
-npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>      # the hooks need `sdlc` to resolve
-sdlc doctor                                                              # every check should pass
+$EDITOR sdlc.config.yaml                    # answer the questions of INSTALL.md; set kit_ref to <ref>
+npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init --dry-run           # the plan; nothing is written
+npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init                     # files, git hooks, board, labels, protection
+$EDITOR sdlc.config.yaml                    # init printed "Created project #N": set github.project.number to N
+npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>          # the git hooks need sdlc to resolve
+npx --no-install sdlc doctor                # expect only actions.secret and mcp.token to complain
 ```
 
-Then commit the result on a branch, open a pull request, and give the agents their work as tasks: `sdlc task new --type feature --title "..." --summary "..."`. Tokens and MCP approvals are the owner-only steps in [INSTALL.md](INSTALL.md).
+Those two go away with the owner-only steps in [INSTALL.md](INSTALL.md): `gh secret set SDLC_TOKEN`, and a GitHub token in your OS keystore exported as `GITHUB_PERSONAL_ACCESS_TOKEN`. Then commit the result on a branch, open a pull request, and give the agents their work as tasks: `npx --no-install sdlc task new --type <type> --title "..." --summary "..."`.
 
 ## CLI
 
 `sdlc` tracks each task as a GitHub issue with a hidden state comment and mirrors it onto a Projects v2 board. It needs the [GitHub CLI](https://cli.github.com) (`gh`), authenticated, and reads `sdlc.config.yaml` from the root of the git repository (override with `--config <path>`). Every command prints JSON with `--json` and exits non-zero on failure.
+
+After the project install above, run it as `npx --no-install sdlc <command>`: a dev dependency is in `node_modules/.bin`, not on the PATH. Plain `sdlc <command>`, as written below, works after a global install (`npm install --global`).
 
 Tasks and the board:
 

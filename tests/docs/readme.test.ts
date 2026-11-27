@@ -17,11 +17,11 @@ const BOOTSTRAP_PROMPT =
 
 // --- reading the commands a document mentions ------------------------------------------------------
 
-/** The lines of the fenced code blocks of a Markdown document, then its inline `code spans`. */
+/** The lines of the fenced code blocks of a Markdown document without their trailing ` # comment`, then its inline `code spans`. */
 function codeSnippets(markdown: string): string[] {
   const fenced: string[] = [];
   const prose = markdown.replace(/^```[^\n]*\n([\s\S]*?)^```[ \t]*$/gm, (_block, body: string) => {
-    fenced.push(...body.split('\n'));
+    fenced.push(...body.split('\n').map(line => line.replace(/\s#(?:\s.*)?$/, '')));
     return '';
   });
   const inline = [...prose.matchAll(/`([^`\n]+)`/g)].map(match => match[1] ?? '');
@@ -40,17 +40,24 @@ interface Mention {
 }
 
 /**
- * A command mentioned in code is `sdlc <word>` or, for the first run through npx,
- * `npx [-y] github:<owner>/agentic-sdlc-kit#<ref> <word>`. Prose is not read, so a sentence such as "sdlc not found" is not a
- * mention; a line is cut at `&&`, `||`, `;` and `|` so each command keeps only its own flags.
+ * A command mentioned in code is written in one of three forms, each followed by the command word:
+ * `sdlc <word>` (a global install, or a name in running text),
+ * `npx --no-install sdlc <word>` (the project dependency), and
+ * `npx [-y] github:<owner>/agentic-sdlc-kit#<ref> <word>` (the first run, before it is installed).
+ * Prose is not read, so a sentence such as "sdlc not found" is not a mention; a line is cut at `&&`,
+ * `||`, `;` and `|` so each command keeps only its own flags.
  */
+const CALL = /(?:\bnpx\s+--no-install\s+sdlc|\bnpx\s+(?:-y\s+)?\S*agentic-sdlc-kit#\S+|\bsdlc)\s+([a-z][a-z-]*)(?:\s+([a-z][a-z-]*))?/;
+
 function mentions(markdown: string): Mention[] {
   const found: Mention[] = [];
   for (const snippet of codeSnippets(markdown)) {
     for (const part of snippet.split(/\s*(?:&&|\|\||[;|])\s*/)) {
-      const call = /(?:\bsdlc|\bnpx\s+(?:-y\s+)?\S*agentic-sdlc-kit#\S+)\s+([a-z][a-z-]*)(?:\s+([a-z][a-z-]*))?/.exec(part);
+      const call = CALL.exec(part);
       if (call === null) continue;
-      const flags = [...part.matchAll(/(?<![\w-])(--[a-z][a-z-]*)/g)].map(match => match[1] ?? '');
+      // The flags of the sdlc command only: not npx's own (`--no-install`), which come before it.
+      const rest = part.slice(call.index + call[0].length);
+      const flags = [...rest.matchAll(/(?<![\w-])(--[a-z][a-z-]*)/g)].map(match => match[1] ?? '');
       found.push({ command: call[1] ?? '', ...(call[2] === undefined ? {} : { next: call[2] }), flags, code: part.trim() });
     }
   }
@@ -92,6 +99,34 @@ function unknownMentions(markdown: string): string[] {
 const mentioned = (markdown: string): Set<string> =>
   new Set(mentions(markdown).map(mention => (mention.next === undefined ? mention.command : `${mention.command} ${mention.next}`)));
 
+// --- the extractor itself ---------------------------------------------------------------------------
+
+describe('the command extractor', () => {
+  it('reads the three forms, and only code', () => {
+    const text = [
+      'Not code: sdlc nothing at all.',
+      '```sh',
+      'sdlc doctor',
+      'npx --no-install sdlc config suggest --write   # sdlc to the rescue',
+      'npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init --dry-run && git status',
+      '```',
+      'Inline `npx --no-install sdlc review handoff <n> --pr <pr>` and `git commit` and `sdlc board`.',
+    ].join('\n');
+    expect(mentions(text).map(({ command, next, flags }) => ({ command, next, flags }))).toEqual([
+      { command: 'doctor', flags: [] },
+      { command: 'config', next: 'suggest', flags: ['--write'] },
+      { command: 'init', flags: ['--dry-run'] },
+      { command: 'review', next: 'handoff', flags: ['--pr'] },
+      { command: 'board', flags: [] },
+    ]);
+  });
+
+  it('does not take the flags of npx for the flags of sdlc', () => {
+    expect(unknownMentions('`npx --no-install sdlc doctor --preflight`')).toEqual([]);
+    expect(unknownMentions('`npx --no-install sdlc doctor --bogus`')).toHaveLength(1);
+  });
+});
+
 // --- README ---------------------------------------------------------------------------------------------
 
 describe('README', () => {
@@ -121,38 +156,78 @@ describe('README', () => {
     expect(mentions(readme).length).toBeGreaterThan(10);
     expect(unknownMentions(readme)).toEqual([]);
   });
+
+  it('walks through the install in the order that works', () => {
+    const walkthrough = readme.slice(readme.search(/^## Two-minute walkthrough/m), readme.search(/^## CLI/m));
+    expect(walkthrough).toContain('`<ref>` is the kit version: a release tag such as `v0.1.0`, or `main`');
+    const steps = ['doctor --preflight', 'config suggest --write', 'set kit_ref to <ref>', 'init --dry-run', 'init  ', 'set github.project.number to N', 'npm install --save-dev', 'npx --no-install sdlc doctor'];
+    const positions = steps.map(step => walkthrough.indexOf(step));
+    expect(positions.map((position, index) => (position < 0 ? steps[index] : ''))).toEqual(steps.map(() => ''));
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(walkthrough).toContain('expect only actions.secret and mcp.token to complain');
+    expect(walkthrough).not.toMatch(/every check should pass/i);
+  });
 });
 
 // --- INSTALL.md -----------------------------------------------------------------------------------------
 
 /** The install questions of the design's section 6, in its order: the heading each gets and the config keys it settles. */
 const QUESTION_TOPICS: Array<{ topic: string; heading: RegExp; terms: string[] }> = [
-  { topic: 'harnesses', heading: /harnesses/i, terms: ['harnesses', 'agents-md'] },
-  { topic: 'board', heading: /board/i, terms: ['github.project', 'owner_type'] },
-  { topic: 'enforcement mode', heading: /mode/i, terms: ['observe', 'enforce'] },
-  { topic: 'task types', heading: /task types/i, terms: ['task_types'] },
-  { topic: 'deploy targets', heading: /targets/i, terms: ['targets', 'environment', 'deploy'] },
-  { topic: 'quality gate', heading: /quality gate/i, terms: ['quality_gate'] },
-  { topic: 'merge policy', heading: /merge policy/i, terms: ['merge_policy', 'owner_only', 'agent_on_request'] },
-  { topic: 'MCP servers and scope', heading: /mcp servers/i, terms: ['mcp.servers', 'mcp.scope'] },
-  { topic: 'secrets storage', heading: /secrets/i, terms: ['secrets.local_store', 'secrets.production_store'] },
-  { topic: 'models', heading: /models/i, terms: ['models', 'deep', 'standard', 'fast'] },
-  { topic: 'stack', heading: /stack/i, terms: ['stack.superpowers', 'stack.graphify', 'stack.branch_protection', 'stack.actions'] },
-  { topic: 'owners and agents', heading: /owners/i, terms: ['owners', 'agents'] },
-  { topic: 'content language', heading: /language/i, terms: ['content_language'] },
+  { topic: 'harnesses', heading: /harnesses/i, terms: ['Key `harnesses`', '`agents-md`'] },
+  { topic: 'board', heading: /board/i, terms: ['`github.project`', '`owner_type`', '`config suggest` never sets `number`'] },
+  { topic: 'enforcement mode', heading: /mode/i, terms: ['Key `mode`', '`observe`', '`enforce`'] },
+  { topic: 'task types', heading: /task types/i, terms: ['`task_types.enabled`', '`task_types.custom`'] },
+  { topic: 'deploy targets', heading: /targets/i, terms: ['Key `targets`', '`deploy.via`', '`environment`'] },
+  { topic: 'quality gate', heading: /quality gate/i, terms: ['Key `quality_gate`'] },
+  { topic: 'merge policy', heading: /merge policy/i, terms: ['Key `merge_policy`', '`owner_only`', '`agent_on_request`'] },
+  { topic: 'MCP servers and scope', heading: /mcp servers/i, terms: ['`mcp.servers`', '`mcp.scope`', '`mcp.github_transport`', 'there is one `mcp.scope` for all of them'] },
+  { topic: 'secrets storage', heading: /secrets/i, terms: ['`secrets.local_store`', '`secrets.production_store`'] },
+  { topic: 'models', heading: /models/i, terms: ['Key `models.<harness>`', '`{ deep, standard, fast }`'] },
+  { topic: 'stack', heading: /stack/i, terms: ['`stack.superpowers`', '`stack.graphify`', '`stack.branch_protection`', '`stack.actions`'] },
+  { topic: 'owners and agents', heading: /owners/i, terms: ['`owners`:', '`agents`:'] },
+  { topic: 'content language', heading: /language/i, terms: ['Key `content_language`'] },
 ];
 
-/** What INSTALL.md has to say, so that an edit cannot silently drop it. */
+/** What INSTALL.md has to say, so that an edit cannot silently drop it. Phrases, not single words. */
 const REQUIRED_TOPICS: Array<{ about: string; terms: string[] }> = [
-  { about: 'the preflight', terms: ['doctor --preflight', 'repo', 'project', 'workflow'] },
-  { about: 'the install PR', terms: ['chore: install agentic-sdlc-kit', 'task/<n>-install-agentic-sdlc-kit', 'tooling'] },
-  { about: 'the owner-only steps', terms: ['gh secret set SDLC_TOKEN', 'GITHUB_PERSONAL_ACCESS_TOKEN', 'claude mcp list', 'CODEX_HOME'] },
-  { about: 'the keystore commands', terms: ['security add-generic-password', 'security find-generic-password', 'secret-tool store', 'secret-tool lookup', 'SecretManagement', 'op read'] },
-  { about: 'the local_store values', terms: ['`auto`', '`keychain`', '`secret-service`', '`wincred`'] },
-  { about: 'the secret guard', terms: ['sdlc:allow-secret', 'secrets.allow', 'fingerprint', '--no-verify', 'push protection', 'rulesets', '.gitattributes', 'google-services.json', 'fails closed'] },
-  { about: 'the git hooks needing sdlc', terms: ['core.hooksPath', 'dev dependency', 'NOT active', 'same version'] },
-  { about: 'owner, agents and tokens', terms: ['## Owner, agents and tokens', 'SDLC_TOKEN', 'enforce'] },
-  { about: 'custom agent roles', terms: ['.sdlc/agents/custom', '\\{{'] },
+  { about: 'the preflight', terms: ['doctor --preflight', 'token scopes `repo` and `project`', 'gh auth refresh -s repo -s project -s workflow'] },
+  { about: 'the install PR', terms: ['chore: install agentic-sdlc-kit', 'task/<n>-install-agentic-sdlc-kit', 'task new --type tooling', 'Related to #<n>', 'sdlc review handoff <n> --pr'] },
+  { about: 'the owner-only steps', terms: ['gh secret set SDLC_TOKEN', 'export `GITHUB_PERSONAL_ACCESS_TOKEN` from it in the shell profile', 'claude mcp list', '`CODEX_HOME`', 'trust the project in Codex'] },
+  {
+    about: 'the keystore commands',
+    terms: [
+      'security add-generic-password -a "$USER" -s github-mcp -w',
+      'security find-generic-password -s github-mcp -w',
+      'secret-tool store --label=github-mcp service github-mcp',
+      'secret-tool lookup service github-mcp',
+      'Install-Module Microsoft.PowerShell.SecretManagement',
+      'Get-Secret -Vault CredMan -Name github-mcp -AsPlainText',
+      "op read 'op://<vault>/<item>/<field>'",
+    ],
+  },
+  { about: 'the local_store values', terms: ['`auto` on macOS', '`keychain` (macOS Keychain', '`secret-service` (Linux', '`wincred` (Windows Credential Manager'] },
+  { about: 'creating the GitHub token', terms: ['https://github.com/settings/personal-access-tokens', 'https://github.com/settings/tokens', 'the scopes `repo` and `project`', 'never pasted into the chat'] },
+  {
+    about: 'the secret guard',
+    terms: [
+      'sdlc:allow-secret',
+      'It skips the whole line',
+      'Quote every fingerprint',
+      '`git commit --no-verify` skips the local hooks',
+      'GitHub secret scanning push protection',
+      'A repository that uses rulesets',
+      'A file marked `binary` or `-diff`',
+      '`google-services.json` and `GoogleService-Info.plist` are not blocked by name',
+      '(starting `AIza`)',
+      'It fails closed.',
+    ],
+  },
+  { about: 'the git hooks needing sdlc', terms: ['`core.hooksPath` to `.sdlc/githooks`', 'npx --no-install sdlc', 'the secret guard is NOT active', 'move the dev dependency to the same version'] },
+  { about: 'how sdlc is run after the install', terms: ['plain `sdlc` works only after a global install', 'A global install protects only that machine'] },
+  { about: 'the dev dependency', terms: ['the PR body of Step 5 must list it', 'pnpm add -D', 'yarn add -D', 'the repository\'s own package manager'] },
+  { about: 'the stack installs', terms: ['/plugin install superpowers@claude-plugins-official', 'gemini extensions install https://github.com/obra/superpowers', 'uv tool install graphifyy'] },
+  { about: 'owner, agents and tokens', terms: ['## Owner, agents and tokens', 'Agents should write under a separate account', "authored by the agent's own login", 'Use a token with the scopes `repo` and `project`'] },
+  { about: 'custom agent roles', terms: ['.sdlc/agents/custom', 'To write a literal `{{`, put a backslash before it (`\\{{`)'] },
 ];
 
 describe('INSTALL.md', () => {
@@ -200,6 +275,21 @@ describe('INSTALL.md', () => {
     expect(examples.length).toBeGreaterThan(0);
     for (const example of examples) expect(() => loadConfigFromString(example)).not.toThrow();
   });
+
+  it('has a secrets.allow example that loads, with the all-digit fingerprint kept as text', () => {
+    const fragments = [...install.matchAll(/^```ya?ml\n([\s\S]*?)^```[ \t]*$/gm)].map(match => match[1] ?? '').filter(text => !/^version:/m.test(text) && /^secrets:/m.test(text));
+    expect(fragments).toHaveLength(1);
+    const minimal = [
+      'version: 1',
+      'harnesses: [claude]',
+      'mode: observe',
+      'github: { repo: owner/name, default_branch: main, project: { owner: owner, owner_type: org } }',
+      'owners: [owner-login]',
+      'task_types: { enabled: [tooling] }',
+    ].join('\n');
+    const cfg = loadConfigFromString(`${minimal}\n${fragments[0]}`);
+    expect(cfg.secrets.allow).toEqual(['3f9a1c0b7d2e4a58', '1234567890123456']);
+  });
 });
 
 describe.each([
@@ -208,5 +298,10 @@ describe.each([
 ])('%s', (_name, text) => {
   it('has no email address', () => {
     expect(text).not.toMatch(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/);
+  });
+
+  it('runs sdlc in copyable blocks as npx, never as a bare command that a project install does not put on the PATH', () => {
+    const blocks = [...text.matchAll(/^```[^\n]*\n([\s\S]*?)^```[ \t]*$/gm)].flatMap(match => (match[1] ?? '').split('\n'));
+    expect(blocks.filter(line => /^\s*sdlc\s/.test(line))).toEqual([]);
   });
 });
