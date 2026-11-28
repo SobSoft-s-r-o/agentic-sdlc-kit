@@ -9,6 +9,8 @@ import {
   finalMergeTime,
   normalizeCommentUrl,
   parseApprovalCommands,
+  PR_BODY_EDITED_MESSAGE,
+  prBodyEditedAfter,
   recordedRefs,
   validateCommentApproval,
   type ApprovalCommand,
@@ -38,6 +40,8 @@ export interface ReconcileAction {
     | 'issue_reopened'
     | 'issue_closed'
     | 'fields_synced'
+    /** `sdlc:partial` added to or removed from a PR so that it matches its body's `Scope:`; the detail is `PR #<n>: +sdlc:partial` or `-sdlc:partial`. */
+    | 'pr_label'
     | 'delivery_report'
     | 'cancel_report'
     | 'skipped_unknown_type'
@@ -155,6 +159,9 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
  *    `cancelled`, checked by `validateCommentApproval` like `sdlc approve`. A comment already
  *    recorded as an approval is skipped silently; any other command that does not count (including
  *    one on a PR that links more than this task) is an `ignored_approval` saying why;
+ * 3b. each PR linking the task gets the `sdlc:partial` label when its body says `Scope: partial`
+ *    and loses it otherwise (`pr_label`; a PR that links several tasks is labelled once); a
+ *    failed label write is an `error` and the other steps still run;
  * 4. a task awaiting deployment gets `targets_deployed` for the targets deployment evidence
  *    satisfies. When a cancellation or the deployments end the task in this run, the cancel or
  *    delivery report is posted before the state is written, unless a trusted author (tracker
@@ -183,10 +190,12 @@ export async function reconcile(ctx: CommandContext, opts: ReconcileOptions = {}
   const types = typeRegistry(ctx.cfg);
   const actions: ReconcileAction[] = [];
 
+  // PRs already labelled (or reported) in this run: one PR can link several tasks.
+  const labelled = new Set<number>();
   for (const task of await loadTasks(run, opts, only, actions)) {
     if (only === 'deployments' && task.state.status !== 'awaiting_deployment') continue;
     try {
-      await reconcileTask(run, task, { dryRun, only, types }, actions);
+      await reconcileTask(run, task, { dryRun, only, types, labelled }, actions);
     } catch (error) {
       actions.push({ issue: task.issue, kind: 'error', detail: reasonOf(error) });
     }
@@ -235,13 +244,20 @@ interface TaskRun {
   type: TaskTypeDef;
   state: TaskState;
   dryRun: boolean;
+  /** Numbers of the PRs whose `sdlc:partial` label this reconcile run has dealt with, shared by all tasks. */
+  labelled: Set<number>;
   push: (kind: ReconcileAction['kind'], detail: string) => void;
 }
 
 async function reconcileTask(
   ctx: CommandContext,
   task: TrackedTask,
-  opts: { dryRun: boolean; only: 'deployments' | 'all'; types: ReadonlyMap<string, TaskTypeDef> },
+  opts: {
+    dryRun: boolean;
+    only: 'deployments' | 'all';
+    types: ReadonlyMap<string, TaskTypeDef>;
+    labelled: Set<number>;
+  },
   actions: ReconcileAction[],
 ): Promise<void> {
   const { issue } = task;
@@ -252,11 +268,12 @@ async function reconcileTask(
     return;
   }
 
-  const t: TaskRun = { ctx, task, type, state: task.state, dryRun: opts.dryRun, push };
+  const t: TaskRun = { ctx, task, type, state: task.state, dryRun: opts.dryRun, labelled: opts.labelled, push };
   if (t.state.status !== 'done' && opts.only === 'all') {
     const prs = await trackerStep('listTaskPrs', issue, () => ctx.tracker.listTaskPrs(issue));
     applyMerges(t, prs);
     await applyApprovals(t, prs);
+    await applyPartialLabels(t, prs);
   }
   const deliveredNow = await applyDeployments(t);
   const reportPosted = await postOutcomeReport(t, deliveredNow);
@@ -334,25 +351,40 @@ function describeApproval(command: ApprovalCommand, approval: Approval, state: T
   return `/${command.action} by ${approval.by} (${approval.ref})${unverified}: ${outcome}`;
 }
 
-/** Whether the PR's body links exactly one issue, `issue`: only then do its comments speak for that task. */
-const linksOnly = (pr: PrInfo, issue: number): boolean => {
+/**
+ * Whether a comment made at `commentAt` on `pr` speaks for `issue`: the PR's body links exactly that
+ * one issue, and was not edited after the comment (an edit may have re-pointed the PR to this task).
+ */
+const linksOnly = (pr: PrInfo, issue: number, commentAt: string): boolean => {
+  if (prBodyEditedAfter(pr, commentAt)) return false;
   const linked = parsePrBody(pr.body).issues;
   return linked.length === 1 && linked[0] === issue;
 };
 
 /**
  * Step 3: owner commands on the issue and its PRs, oldest first. A command on a PR whose body links
- * more than this one task is ignored.
+ * more than this one task is ignored, and so is one the PR's body was edited after.
  */
 async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void> {
   const { ctx, task } = t;
   const comments: IssueComment[] = [];
-  /** Comments on a PR that links other tasks too: they cannot be told to be meant for this one. */
-  const sharedPr = new Map<IssueComment, number>();
+  /**
+   * Comments on a PR that cannot be told to be meant for this task, with why: its body links other
+   * tasks too, or was edited after the comment.
+   */
+  const refusedPr = new Map<IssueComment, string>();
   for (const thread of [task.issue, ...prs.map(pr => pr.number)]) {
     const read = await trackerStep('listComments', task.issue, () => ctx.tracker.listComments(thread));
     const pr = prs.find(candidate => candidate.number === thread);
-    if (pr && !linksOnly(pr, task.issue)) for (const comment of read) sharedPr.set(comment, pr.number);
+    if (pr) {
+      for (const comment of read) {
+        if (linksOnly(pr, task.issue, comment.createdAt)) continue;
+        refusedPr.set(
+          comment,
+          prBodyEditedAfter(pr, comment.createdAt) ? PR_BODY_EDITED_MESSAGE : `PR #${pr.number} links several tasks`,
+        );
+      }
+    }
     comments.push(...read);
   }
   // In observe mode an agent's command is recorded as unverified, so it is checked like an owner's.
@@ -368,8 +400,8 @@ async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void>
     try {
       // Authorizes `task set-type` only; a recorded one was skipped above.
       if (command.typeId !== undefined) throw new ApprovalRefusedError('type-change approval');
-      const shared = sharedPr.get(comment);
-      if (shared !== undefined) throw new ApprovalRefusedError(`PR #${shared} links several tasks`);
+      const refusal = refusedPr.get(comment);
+      if (refusal !== undefined) throw new ApprovalRefusedError(refusal);
       const state = t.state;
       if (state.status === 'done') throw new TransitionError('the task is already done');
       const pausedOnOwner = state.status === 'paused' && state.waitingOn === 'owner';
@@ -393,6 +425,37 @@ async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void>
     } catch (error) {
       if (!(error instanceof ApprovalRefusedError || error instanceof TransitionError)) throw error;
       ignore(error.message);
+    }
+  }
+}
+
+/** The label a PR carries while its body says `Scope: partial` (spec section 8). */
+const PARTIAL_LABEL = 'sdlc:partial';
+
+/**
+ * Step 3b: mirrors each PR's `Scope:` to the `sdlc:partial` label: added to a PR whose body says
+ * `Scope: partial`, removed from any other (a missing or unrecognised scope counts as final, as
+ * `parsePrBody` has it). The label is found without regard to case, as GitHub compares names, and
+ * removed by the name the PR has. A PR in the right state costs no write. A failed write is an
+ * `error` for that PR alone; the next run tries again.
+ */
+async function applyPartialLabels(t: TaskRun, prs: readonly PrInfo[]): Promise<void> {
+  const { ctx } = t;
+  for (const pr of prs) {
+    if (t.labelled.has(pr.number)) continue;
+    const present = pr.labels.find(label => label.toLowerCase() === PARTIAL_LABEL);
+    const wanted = parsePrBody(pr.body).scope === 'partial';
+    if (wanted === (present !== undefined)) continue;
+    t.labelled.add(pr.number);
+    try {
+      if (!t.dryRun) {
+        await trackerStep('setLabels', pr.number, () =>
+          ctx.tracker.setLabels(pr.number, wanted ? [PARTIAL_LABEL] : [], wanted ? [] : [present ?? PARTIAL_LABEL]),
+        );
+      }
+      t.push('pr_label', `PR #${pr.number}: ${wanted ? '+' : '-'}${PARTIAL_LABEL}`);
+    } catch (error) {
+      t.push('error', `PR #${pr.number}: ${reasonOf(error)}`);
     }
   }
 }

@@ -5,6 +5,8 @@ import { loadConfigFromString, type Config, type Harness } from '../../src/confi
 import type { Change, MdBlockChange } from '../../src/render/changes.js';
 import { parseFrontMatter } from '../../src/render/frontMatter.js';
 import {
+  KIT_PACKAGE,
+  kitCommand,
   renderData,
   renderInstructions,
   type RenderData,
@@ -98,12 +100,49 @@ const ROLES: RenderRole[] = [
   'scout',
 ].map(role => ({ role, description: `Does the ${role} part of the work, and reports back in one line.`, tier: 'standard' }));
 
+const GITHUB_KIT = 'github:SobSoft-s-r-o/agentic-sdlc-kit';
+
+describe('kitCommand', () => {
+  it('names the package', () => {
+    expect(KIT_PACKAGE).toBe('agentic-sdlc-kit');
+  });
+
+  it.each([
+    { ref: 'v0.3.0', source: 'npm', spec: 'agentic-sdlc-kit@0.3.0' },
+    { ref: 'v1.0.0-rc.1', source: 'npm', spec: 'agentic-sdlc-kit@1.0.0-rc.1' },
+    { ref: 'v12.34.56', source: 'npm', spec: 'agentic-sdlc-kit@12.34.56' },
+    { ref: 'v0.4.0-rc.1', source: 'npm', spec: 'agentic-sdlc-kit@0.4.0-rc.1' },
+    { ref: 'v0.10.0', source: 'npm', spec: 'agentic-sdlc-kit@0.10.0' },
+    // v0.1.0 and v0.2.0 are git-only tags, never on npm: they keep the github form. So does a prerelease of v0.3.0, which sorts before it.
+    { ref: 'v0.1.0', source: 'github', spec: `${GITHUB_KIT}#v0.1.0` },
+    { ref: 'v0.2.0', source: 'github', spec: `${GITHUB_KIT}#v0.2.0` },
+    { ref: 'v0.2.99', source: 'github', spec: `${GITHUB_KIT}#v0.2.99` },
+    { ref: 'v0.2.0-rc.1', source: 'github', spec: `${GITHUB_KIT}#v0.2.0-rc.1` },
+    { ref: 'v0.3.0-rc.1', source: 'github', spec: `${GITHUB_KIT}#v0.3.0-rc.1` },
+    { ref: 'main', source: 'github', spec: `${GITHUB_KIT}#main` },
+    { ref: 'release/x', source: 'github', spec: `${GITHUB_KIT}#release/x` },
+    { ref: '0123456789abcdef0123456789abcdef01234567', source: 'github', spec: `${GITHUB_KIT}#0123456789abcdef0123456789abcdef01234567` },
+    { ref: '0.3.0', source: 'github', spec: `${GITHUB_KIT}#0.3.0` },
+    { ref: 'v00.3.0', source: 'github', spec: `${GITHUB_KIT}#v00.3.0` },
+    { ref: 'v0.3', source: 'github', spec: `${GITHUB_KIT}#v0.3` },
+    { ref: 'v0.3.0.1', source: 'github', spec: `${GITHUB_KIT}#v0.3.0.1` },
+    { ref: 'v0.3.0/evil', source: 'github', spec: `${GITHUB_KIT}#v0.3.0/evil` },
+  ] as const)('kitCommand picks the source: $ref is $source', ({ ref, source, spec }) => {
+    expect(kitCommand(ref)).toEqual({ npx: `npx -y ${spec}`, source });
+  });
+});
+
 describe('renderData', () => {
+  it('renders a branch or a commit as the github form of the kit command', () => {
+    const data = renderData(loadConfigFromString(FULL.replace('kit_ref: v1.2.3', 'kit_ref: release/2.0')));
+    expect(data.kit).toEqual({ ref: 'release/2.0', npx: 'npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#release/2.0' });
+  });
+
   it('carries the config, the kit reference and the switches', () => {
     const cfg = full();
     const data = renderData(cfg);
     expect(data.cfg).toBe(cfg);
-    expect(data.kit).toEqual({ ref: 'v1.2.3', npx: 'npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3' });
+    expect(data.kit).toEqual({ ref: 'v1.2.3', npx: 'npx -y agentic-sdlc-kit@1.2.3' });
     expect(data.enforce).toBe(true);
     expect(data.mergeOwnerOnly).toBe(true);
     expect(data.graphify).toBe(true);
@@ -270,7 +309,7 @@ describe('the managed block', () => {
     expect(text).toMatch(/sdlc task new/);
     expect(text).toMatch(/status question/i);
     expect(text).toMatch(/continuation/i);
-    expect(text).toContain('npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3');
+    expect(text).toContain('npx -y agentic-sdlc-kit@1.2.3');
     for (const type of renderData(full()).types) {
       expect(text).toContain(`\`${type.id}\``);
       expect(text).toContain(type.phasesText);
@@ -471,7 +510,7 @@ describe('the skills', () => {
       expect(text).toContain(command);
     }
     expect(text).toMatch(/never paste logs/i);
-    expect(text).toContain('npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3');
+    expect(text).toContain('npx -y agentic-sdlc-kit@1.2.3');
     expect(text).toContain('`shop-owner`');
     expect(text).toContain('`shop-lead`');
   });

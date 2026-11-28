@@ -8,7 +8,7 @@ import { CommandError, runCommand, type CommandContext } from '../../src/command
 import { loadConfig, typeRegistry } from '../../src/config/schema.js';
 import { newTask } from '../../src/core/stateMachine.js';
 import type { TaskState } from '../../src/core/types.js';
-import { GhError } from '../../src/github/gh.js';
+import { GH_TIMEOUT_MS, GhError, ghTimeoutText } from '../../src/github/gh.js';
 import { GAPS_FILE, OUTBOX_FILE as LOG_OUTBOX_FILE, type LoggedGap } from '../../src/hooks/localLog.js';
 import {
   appendRawLines,
@@ -92,6 +92,7 @@ describe('isTransportError', () => {
     'read tcp 10.0.0.1:5555: Connection reset by peer',
     'net/http: request canceled (Client.Timeout exceeded) timed out',
     'operation timeout',
+    'Post "https://api.github.com/graphql": dial tcp 140.82.112.5:443: i/o timeout',
     'connect ETIMEDOUT 140.82.112.5:443',
     'read ECONNRESET',
     'getaddrinfo EAI_AGAIN api.github.com',
@@ -111,6 +112,15 @@ describe('isTransportError', () => {
     '',
   ])('does not treat a gh failure saying "%s" as transport', stderr => {
     expect(isTransportError(ghError(stderr))).toBe(false);
+  });
+
+  it('does not treat a gh that was killed on the sdlc timeout as unreachable: the request may have been applied', () => {
+    for (const timeoutMs of [100, 2_000, GH_TIMEOUT_MS]) {
+      const stderr = ghTimeoutText(timeoutMs);
+      expect(isTransportError(ghError(stderr))).toBe(false);
+      expect(isTransportError(new GhError(['api', 'x'], stderr, `${stderr}: gh api x`))).toBe(false);
+      expect(isTransportError(new CommandError('addComment failed for #5', 'addComment', { cause: ghError(stderr) }))).toBe(false);
+    }
   });
 
   it('finds the gh failure behind the error of a tracker step', () => {

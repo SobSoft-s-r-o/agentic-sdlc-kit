@@ -483,6 +483,12 @@ describe('kit_ref', () => {
     expect(messageOf(withSections('kit_ref: "main; rm -rf ."\n'))).toContain('kit_ref');
     expect(messageOf(withSections('kit_ref: ""\n'))).toContain('kit_ref');
   });
+
+  it('gives an example that exists on npm (v0.1.0 and v0.2.0 never did)', () => {
+    const message = messageOf(withSections('kit_ref: "main; rm -rf ."\n'));
+    expect(message).toContain('e.g. "v0.3.0" or "main"');
+    expect(message).not.toMatch(/v0\.[12]\.0/);
+  });
 });
 
 describe('reconcile section', () => {

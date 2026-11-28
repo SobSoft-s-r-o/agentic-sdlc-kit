@@ -1,0 +1,114 @@
+# Publishes the package to npm when a version tag (v*) is pushed.
+# Trusted publishing (OIDC): npm trusts this workflow file, so no npm token is stored in the repository.
+#
+# Later releases: bump the version in package.json, then push the tag v<version>. The tag must match package.json.
+# A version with a hyphen in it (0.4.0-rc.1) is published under the dist-tag `next`; any other version under the default tag.
+#
+# Bootstrap, once, by the owner: npm needs the package to exist before it can trust a workflow, so the first version
+# is published by hand. `publishConfig.provenance: true` in package.json makes a local `npm publish` fail (provenance
+# needs the OIDC token of a CI run), so the first publish turns it off:
+#   1. Make a clean checkout of the tag: a fresh clone, then `git checkout v<version>`, with no local edits or stray files.
+#   2. npm ci
+#   3. npm publish --provenance=false
+#   4. npm trust github agentic-sdlc-kit --file release.yml --repo SobSoft-s-r-o/agentic-sdlc-kit --allow-publish
+#      (needs npm 11.15.0 or newer)
+#   5. In the package settings on npmjs.com, enable "Require two-factor authentication and disallow tokens".
+#
+# Two jobs: `test` runs the repository's code (dependencies, tests, build, pack smoke) with a read-only token and no OIDC;
+# `publish` is the only job that can ask for an OIDC token, and it installs without running dependency scripts.
+# A version that is already on npm is skipped, so a re-run of a tag is harmless.
+# Actions are pinned to a full commit SHA (the tag in the comment), so a moved tag cannot change what runs.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      # persist-credentials: false: the checkout token is not left in .git/config for the later steps.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No dependency cache in a release build.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Check the tag matches package.json
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "$expected" ]; then
+            echo "::error::The tag ${GITHUB_REF_NAME} does not match package.json, which says $expected"
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm test
+      # The same checks as CI, so a tag cannot publish what CI would have refused.
+      - run: npm run typecheck
+      - run: npm run build
+      # Packs the fresh build, installs the tarball into an empty project and runs the installed `sdlc`.
+      - run: node scripts/pack-smoke.mjs
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Required for trusted publishing: the job asks GitHub for an OIDC token that npm exchanges for a publish credential.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Node 24 ships npm 11, which trusted publishing needs.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Check the npm version
+        run: |
+          npm_version="$(npm --version)"
+          if ! printf '%s\n' 11.5.1 "$npm_version" | sort -V -C; then
+            echo "::error::npm $npm_version is older than 11.5.1, which trusted publishing requires"
+            exit 1
+          fi
+          echo "npm $npm_version"
+      # No dependency install script runs in the job that holds the OIDC permission; the build is explicit.
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - name: Check whether this version is already on npm
+        id: published
+        run: |
+          V="$(node -p "require('./package.json').version")"
+          if output="$(npm view "agentic-sdlc-kit@$V" version 2>&1)"; then
+            echo "agentic-sdlc-kit@$V is already on npm; nothing to publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s\n' "$output" | grep -q 'E404'; then
+            echo "agentic-sdlc-kit@$V is not on npm yet."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$output"
+            echo "::error::Could not tell whether agentic-sdlc-kit@$V is on npm"
+            exit 1
+          fi
+      # publishConfig in package.json sets access public and provenance.
+      # A version with a hyphen is a prerelease: npm 11 refuses to publish it without a tag, and it must not become `latest`.
+      - name: Publish to npm
+        if: steps.published.outputs.skip != 'true'
+        run: |
+          V="$(node -p "require('./package.json').version")"
+          case "$V" in
+            *-*) npm publish --tag next ;;
+            *) npm publish ;;
+          esac

@@ -480,6 +480,25 @@ describe('sdlc worktree finish', () => {
       expect(branches(h)).toEqual([BRANCH]);
     });
 
+    it('names an ignored .env directory (a Python virtualenv) as a directory, next to the files', async () => {
+      const h = setup(merged);
+      ignoreLocalFiles(h);
+      await started(h);
+      mkdirSync(join(h.worktree, '.env'));
+      writeFileSync(join(h.worktree, '.env', 'pyvenv.cfg'), 'home = /usr/bin\n');
+      writeFileSync(join(h.worktree, '.env.local'), 'TOKEN=x\n');
+      expect(h.git(['status', '--porcelain', '--ignored'], h.worktree)).toContain('!! .env/');
+
+      await run(h, 'finish', '5');
+
+      expect(process.exitCode).toBe(1);
+      expect(h.err).toHaveLength(1);
+      expect(h.err[0]).toContain(`${DIR} holds ignored local files or directories (.env.local, .env/)`);
+      expect(h.err[0]).toContain('move them out, then run `sdlc worktree finish 5` again');
+      expect(readFileSync(join(h.worktree, '.env', 'pyvenv.cfg'), 'utf8')).toBe('home = /usr/bin\n');
+      expect(has(h.calls, 'worktree', 'remove')).toBe(false);
+    });
+
     it('finishes once the .env file has been moved out', async () => {
       const h = setup(merged);
       ignoreLocalFiles(h);
@@ -543,7 +562,7 @@ describe('sdlc worktree finish', () => {
       finish!.outputHelp();
 
       expect(help.join('')).toMatch(/ignored files .* are removed together with (it|the worktree)/i);
-      expect(help.join('')).toContain('.env');
+      expect(help.join('')).toContain('an ignored .env file or directory makes finish refuse');
     });
   });
 

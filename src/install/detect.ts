@@ -152,7 +152,7 @@ export function detectConfig(probe: RepoProbe): DetectedConfig {
   if (kitRef !== undefined && isScalar(kitRef.key)) {
     kitRef.key.commentBefore =
       ' The kit version the generated npx commands and the workflow run (a tag or branch of agentic-sdlc-kit).\n' +
-      ' Until a release tag exists, set main or the ref you installed from; "sdlc doctor" checks that it exists.';
+      ' A release tag works once it is published on npm (v0.3.0 and later); until then, set main or the ref you installed from. "sdlc doctor" checks it.';
   }
   visit(document, {
     Seq(_key, node) {

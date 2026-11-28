@@ -4,7 +4,7 @@ import { typeRegistry } from '../config/schema.js';
 import { normalizeCommentUrl, recordedRefs, validateOwnerComment } from '../core/approvals.js';
 import type { Approval, EndsOn, TaskState, TypeChange, WaitingOn } from '../core/types.js';
 import { StateCommentError } from '../core/stateComment.js';
-import { NoStateCommentError } from '../tracker/types.js';
+import { NoStateCommentError, type TrackedTask } from '../tracker/types.js';
 import { findComment } from './approve.js';
 import {
   commit,
@@ -136,7 +136,7 @@ export async function taskSetType(
       source: approval.source,
     });
     if (input.commentUrl !== undefined) {
-      typeChange = record(await requireTypeApproval(ctx, issue, state, type.id, input.commentUrl));
+      typeChange = record(await requireTypeApproval(ctx, issue, task, type.id, input.commentUrl));
     } else if (ctx.cfg.mode === 'enforce') {
       throw new Error(`${change}; pass --comment-url with an owner's "/approve type ${type.id}" comment`);
     } else {
@@ -161,16 +161,27 @@ export async function taskSetType(
 }
 
 /**
- * Checks `url` is an owner's `/approve type <typeId>` on the task (or its PRs), not recorded as any
- * approval before, and newer than the task's last change. Returns the approval to record.
+ * When the task's state was last written, by GitHub's clock: the state comment's `updated_at`. The
+ * state's own `updatedAt` is stamped by the clock of whoever ran the command, so it cannot be
+ * ordered against the GitHub time of a comment when the two clocks differ; it is only the fallback
+ * for a tracker that gives no usable time.
+ */
+const lastChangeOf = (task: TrackedTask): string =>
+  Number.isNaN(Date.parse(task.stateCommentUpdatedAt)) ? task.state.updatedAt : task.stateCommentUpdatedAt;
+
+/**
+ * Checks `url` is an owner's `/approve type <typeId>` on the task (or its PRs, whose body was not
+ * edited after it), not recorded as any approval before, and newer than the task's last change by
+ * GitHub's clock (`lastChangeOf`). Returns the approval to record.
  */
 async function requireTypeApproval(
   ctx: CommandContext,
   issue: number,
-  state: TaskState,
+  task: TrackedTask,
   typeId: string,
   url: string,
 ): Promise<Approval> {
+  const { state } = task;
   if (recordedRefs(state).has(normalizeCommentUrl(url))) {
     throw new Error(`comment ${url} is already recorded as an approval of #${issue}`);
   }
@@ -184,10 +195,11 @@ async function requireTypeApproval(
     cfg: ctx.cfg,
     login: () => trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin()),
   });
+  const lastChange = lastChangeOf(task);
   const at = Date.parse(approval.at);
-  const last = Date.parse(state.updatedAt);
+  const last = Date.parse(lastChange);
   if (Number.isNaN(at) || Number.isNaN(last) || at <= last) {
-    throw new Error(`comment ${url} at ${approval.at} is not newer than the task's last change at ${state.updatedAt}`);
+    throw new Error(`comment ${url} at ${approval.at} is not newer than the task's last change at ${lastChange}`);
   }
   if (approval.source === 'unverified') {
     ctx.err?.(`warning: comment ${url} is recorded as unverified (observe mode)`);

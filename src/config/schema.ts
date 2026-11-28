@@ -43,7 +43,7 @@ const SLUG_MESSAGE = 'must be lowercase kebab-case (a-z, 0-9 and hyphens, e.g. "
 const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 /** A git tag or branch name made of plain characters: it ends up inside generated commands. */
 const KIT_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
-const KIT_REF_MESSAGE = 'must be a git tag or branch name (letters, digits, ".", "_", "-" and "/", e.g. "v0.2.0" or "main")';
+const KIT_REF_MESSAGE = 'must be a git tag or branch name (letters, digits, ".", "_", "-" and "/", e.g. "v0.3.0" or "main")';
 /** Fingerprint of an accepted secret-guard false positive: 16 lowercase hex characters. */
 const SECRET_FINGERPRINT = /^[0-9a-f]{16}$/;
 const SECRET_FINGERPRINT_MESSAGE = 'must be a fingerprint of 16 lowercase hex characters ([0-9a-f]{16})';

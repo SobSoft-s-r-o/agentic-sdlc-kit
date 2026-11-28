@@ -984,18 +984,27 @@ describe('GitHubTracker pull requests', () => {
   const prList = [
     'pr', 'list', '--repo', 'acme/shop', '--state', 'all',
     '--search', '"Related to #12" in:body',
-    '--json', 'number,url,mergedAt,mergeCommit,baseRefName,body', '--limit', '100',
+    '--json', 'id,number,url,mergedAt,mergeCommit,baseRefName,body,labels', '--limit', '100',
   ];
+  /** What the one GraphQL query for `lastEditedAt` answers: the nodes asked for, by node id. */
+  const editTimes = (...nodes: ({ id: string; lastEditedAt: string | null } | null)[]): FakeGhStep =>
+    ok(GRAPHQL, JSON.stringify({ data: { nodes } }));
+  /** The PRs of `pr-list.json` that link #12 (33 and 34 are filtered out), none ever edited. */
+  const neverEdited = editTimes(
+    { id: 'PR_kwDOAcme31', lastEditedAt: null },
+    { id: 'PR_kwDOAcme32', lastEditedAt: null },
+    { id: 'PR_kwDOAcme35', lastEditedAt: null },
+  );
 
   it('listTaskPrs ignores PRs whose body only mentions the issue with a closing keyword', async () => {
-    const { tracker } = trackerFor([fromFixture(prList, 'pr-list.json')]);
+    const { tracker } = trackerFor([fromFixture(prList, 'pr-list.json'), neverEdited]);
     const prs = await tracker.listTaskPrs(12);
     // 33 only says "Closes #12"; 34 relates to #120, not #12.
     expect(prs.map(p => p.number)).toEqual([31, 32, 35]);
   });
 
   it('maps merge data and keeps the body for the caller to read scope and targets from', async () => {
-    const { tracker } = trackerFor([fromFixture(prList, 'pr-list.json')]);
+    const { tracker } = trackerFor([fromFixture(prList, 'pr-list.json'), neverEdited]);
     const [merged, open] = await tracker.listTaskPrs(12);
     expect(merged).toEqual({
       number: 31,
@@ -1005,6 +1014,7 @@ describe('GitHubTracker pull requests', () => {
       mergedAt: '2026-11-21T14:00:00Z',
       baseRef: 'main',
       body: 'Related to #12\nScope: partial\nTargets: web',
+      labels: ['sdlc:partial'],
     });
     expect(open).toEqual({
       number: 32,
@@ -1012,24 +1022,127 @@ describe('GitHubTracker pull requests', () => {
       merged: false,
       baseRef: 'main',
       body: 'Related to #12\nScope: final\nTargets: web, api',
+      labels: [],
     });
   });
 
-  it('getPr reads one PR directly, without the search index', async () => {
-    const view = ['pr', 'view', '35', '--repo', 'acme/shop', '--json', 'number,url,mergedAt,mergeCommit,baseRefName,body'];
+  describe('when the PR body was last edited (GraphQL lastEditedAt)', () => {
+    it('maps lastEditedAt to bodyEditedAt, and null to undefined', async () => {
+      const { tracker } = trackerFor([
+        fromFixture(prList, 'pr-list.json'),
+        editTimes(
+          { id: 'PR_kwDOAcme31', lastEditedAt: '2026-11-21T15:30:00Z' },
+          { id: 'PR_kwDOAcme32', lastEditedAt: null },
+          { id: 'PR_kwDOAcme35', lastEditedAt: '2026-11-23T10:00:00Z' },
+        ),
+      ]);
+      const [first, second, third] = await tracker.listTaskPrs(12);
+      expect(first!.bodyEditedAt).toBe('2026-11-21T15:30:00Z');
+      expect(second).not.toHaveProperty('bodyEditedAt');
+      expect(third!.bodyEditedAt).toBe('2026-11-23T10:00:00Z');
+    });
+
+    it('reads the times of all PRs of one listTaskPrs call in a single query, by node id', async () => {
+      const { run, tracker } = trackerFor([fromFixture(prList, 'pr-list.json'), neverEdited]);
+      await tracker.listTaskPrs(12);
+      expect(run.calls).toHaveLength(2);
+      expect(run.calls[1]).toEqual(GRAPHQL);
+      expect(sent(run, 1).query).toContain('lastEditedAt');
+      expect(sent(run, 1).variables).toEqual({ ids: ['PR_kwDOAcme31', 'PR_kwDOAcme32', 'PR_kwDOAcme35'] });
+    });
+
+    it('matches times to PRs by id, whatever the order or the holes in the answer', async () => {
+      const { tracker } = trackerFor([
+        fromFixture(prList, 'pr-list.json'),
+        editTimes(null, { id: 'PR_kwDOAcme35', lastEditedAt: '2026-11-23T10:00:00Z' }, { id: 'PR_kwDOAcme31', lastEditedAt: null }),
+      ]);
+      const prs = await tracker.listTaskPrs(12);
+      expect(prs.map(p => [p.number, p.bodyEditedAt])).toEqual([
+        [31, undefined],
+        [32, undefined],
+        [35, '2026-11-23T10:00:00Z'],
+      ]);
+    });
+
+    it('asks nothing when no PR links the issue', async () => {
+      const { run, tracker } = trackerFor([ok(prList, '[]')]);
+      expect(await tracker.listTaskPrs(12)).toEqual([]);
+      expect(run.calls).toHaveLength(1);
+    });
+
+    it('leaves bodyEditedAt undefined and warns when the query fails (fails open, as before)', async () => {
+      const warnings: string[] = [];
+      const run = fakeGh([fromFixture(prList, 'pr-list.json'), failing(GRAPHQL, 'HTTP 502: Bad Gateway')]);
+      const tracker = new GitHubTracker(run, cfg, { repoRoot, warn: text => warnings.push(text) });
+      const prs = await tracker.listTaskPrs(12);
+      expect(prs.map(p => p.number)).toEqual([31, 32, 35]);
+      expect(prs.every(p => p.bodyEditedAt === undefined)).toBe(true);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatch(/last edited.*HTTP 502/s);
+    });
+
+    it('leaves bodyEditedAt undefined when GraphQL answers with errors', async () => {
+      const warnings: string[] = [];
+      const run = fakeGh([
+        fromFixture(prList, 'pr-list.json'),
+        ok(GRAPHQL, JSON.stringify({ errors: [{ message: 'Resource not accessible' }], data: null })),
+      ]);
+      const tracker = new GitHubTracker(run, cfg, { repoRoot, warn: text => warnings.push(text) });
+      expect((await tracker.listTaskPrs(12)).every(p => p.bodyEditedAt === undefined)).toBe(true);
+      expect(warnings).toHaveLength(1);
+    });
+
+    it('does not need a warning sink: a failed query still fails open', async () => {
+      const { tracker } = trackerFor([fromFixture(prList, 'pr-list.json'), failing(GRAPHQL, 'boom')]);
+      expect(await tracker.listTaskPrs(12)).toHaveLength(3);
+    });
+  });
+
+  describe('getPr', () => {
+    const view = ['pr', 'view', '35', '--repo', 'acme/shop', '--json', 'id,number,url,mergedAt,mergeCommit,baseRefName,body,labels'];
     const row = {
-      number: 35, url: 'https://github.com/acme/shop/pull/35', mergedAt: '2026-11-22T09:00:00Z',
+      id: 'PR_kwDOAcme35', number: 35, url: 'https://github.com/acme/shop/pull/35', mergedAt: '2026-11-22T09:00:00Z',
       mergeCommit: { oid: 'c'.repeat(40) }, baseRefName: 'main', body: 'Related to #12',
+      labels: [{ id: 'LA_1', name: 'sdlc:partial', description: '', color: 'fbca04' }, { id: 'LA_2', name: 'bug', description: '', color: 'd73a4a' }],
     };
-    const { tracker } = trackerFor([ok(view, JSON.stringify(row))]);
-    expect(await tracker.getPr(35)).toEqual({
-      number: 35,
-      url: 'https://github.com/acme/shop/pull/35',
-      merged: true,
-      mergeSha: 'c'.repeat(40),
-      mergedAt: '2026-11-22T09:00:00Z',
-      baseRef: 'main',
-      body: 'Related to #12',
+
+    it('reads one PR directly, without the search index', async () => {
+      const { tracker } = trackerFor([ok(view, JSON.stringify(row)), editTimes({ id: 'PR_kwDOAcme35', lastEditedAt: null })]);
+      expect(await tracker.getPr(35)).toEqual({
+        number: 35,
+        url: 'https://github.com/acme/shop/pull/35',
+        merged: true,
+        mergeSha: 'c'.repeat(40),
+        mergedAt: '2026-11-22T09:00:00Z',
+        baseRef: 'main',
+        body: 'Related to #12',
+        labels: ['sdlc:partial', 'bug'],
+      });
+    });
+
+    it('reads no labels from an answer without a labels field', async () => {
+      const { labels: _labels, ...withoutLabels } = row;
+      const { tracker } = trackerFor([ok(view, JSON.stringify(withoutLabels)), editTimes({ id: 'PR_kwDOAcme35', lastEditedAt: null })]);
+      expect((await tracker.getPr(35))?.labels).toEqual([]);
+    });
+
+    it('fills bodyEditedAt from lastEditedAt', async () => {
+      const { run, tracker } = trackerFor([
+        ok(view, JSON.stringify(row)),
+        editTimes({ id: 'PR_kwDOAcme35', lastEditedAt: '2026-11-22T10:15:00Z' }),
+      ]);
+      expect((await tracker.getPr(35))?.bodyEditedAt).toBe('2026-11-22T10:15:00Z');
+      expect(sent(run, 1).variables).toEqual({ ids: ['PR_kwDOAcme35'] });
+    });
+
+    it('leaves bodyEditedAt undefined and warns when the query fails', async () => {
+      const warnings: string[] = [];
+      const run = fakeGh([ok(view, JSON.stringify(row)), failing(GRAPHQL, 'HTTP 502: Bad Gateway')]);
+      const tracker = new GitHubTracker(run, cfg, { repoRoot, warn: text => warnings.push(text) });
+      const pr = await tracker.getPr(35);
+      expect(pr).toMatchObject({ number: 35 });
+      expect(pr?.bodyEditedAt).toBeUndefined();
+      expect(warnings).toHaveLength(1);
     });
   });
 
@@ -1044,7 +1157,7 @@ describe('GitHubTracker pull requests', () => {
 
   it('refuses to answer when the PR search may have been cut off', async () => {
     const many = Array.from({ length: 100 }, (_, i) => ({
-      number: i + 1, url: 'u', mergedAt: null, mergeCommit: null, baseRefName: 'main', body: 'Related to #12',
+      id: `PR_${i + 1}`, number: i + 1, url: 'u', mergedAt: null, mergeCommit: null, baseRefName: 'main', body: 'Related to #12',
     }));
     const { tracker } = trackerFor([ok(prList, JSON.stringify(many))]);
     await expect(tracker.listTaskPrs(12)).rejects.toThrow(/100/);

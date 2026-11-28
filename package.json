@@ -1,11 +1,39 @@
 {
   "name": "agentic-sdlc-kit",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Track agentic SDLC tasks on GitHub Issues and Projects.",
   "license": "MIT",
+  "author": "SobSoft s.r.o.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SobSoft-s-r-o/agentic-sdlc-kit.git"
+  },
+  "homepage": "https://github.com/SobSoft-s-r-o/agentic-sdlc-kit#readme",
+  "bugs": {
+    "url": "https://github.com/SobSoft-s-r-o/agentic-sdlc-kit/issues"
+  },
+  "keywords": [
+    "sdlc",
+    "agents",
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "github-projects",
+    "hooks"
+  ],
   "type": "module",
   "bin": {
     "sdlc": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "templates",
+    "INSTALL.md",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "engines": {
     "node": ">=20"
@@ -13,6 +41,7 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "prepare": "tsc"
   },

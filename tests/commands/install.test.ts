@@ -9,7 +9,7 @@ import type { RepoFs } from '../../src/install/repoFs.js';
 import type { Change, JsonKeysChange } from '../../src/render/changes.js';
 import { mergeChanges, renderAll } from '../../src/render/plan.js';
 import { packageVersion } from '../../src/version.js';
-import { fakeGh, type FakeGh, type FakeGhStep } from '../support/fakeGh.js';
+import { fakeGh, labelListStep, type FakeGh, type FakeGhStep } from '../support/fakeGh.js';
 import { memoryFs, type MemoryFs } from '../support/memoryFs.js';
 
 const HEADER = `version: 1
@@ -122,7 +122,7 @@ function provisionedBoard(cfg: Config): FakeGhStep {
 function emptyGithub(cfg: Config, dryRun: boolean): FakeGhStep[] {
   return [
     provisionedBoard(cfg),
-    { match: ['label', 'list'], stdout: '[]' },
+    labelListStep([]),
     ...(dryRun ? [] : LABELS.map((): FakeGhStep => ({ match: ['label', 'create'] }))),
     { match: PROTECTION, code: 1, stderr: 'gh: Branch not protected (HTTP 404)' },
     ...(dryRun ? [] : [{ match: ['PUT'] }]),
@@ -135,7 +135,7 @@ function emptyGithub(cfg: Config, dryRun: boolean): FakeGhStep[] {
 function readyGithub(cfg: Config): FakeGhStep[] {
   return [
     provisionedBoard(cfg),
-    { match: ['label', 'list'], stdout: JSON.stringify(LABELS.map(name => ({ name }))) },
+    labelListStep(LABELS),
     { match: PROTECTION, stdout: '{}' },
     {
       match: ['api', 'repos/acme/shop', '--jq'],
@@ -755,7 +755,7 @@ describe('sdlc init', () => {
         newProject(cfg),
         { match: ['api', '/orgs/acme/projectsV2/12/fields?per_page=100'], stdout: JSON.stringify(Object.values(FIELD_NAMES).map((name, id) => ({ id, name }))) },
         ...VIEWS.map((): FakeGhStep => ({ match: ['api', '-X', 'POST', '/orgs/acme/projectsV2/12/views'] })),
-        { match: ['label', 'list'], stdout: '[]' },
+        labelListStep([]),
         ...LABELS.map((): FakeGhStep => ({ match: ['label', 'create'] })),
         { match: PROTECTION, stdout: '{}' },
         { match: ['api', 'repos/acme/shop', '--jq'], stdout: JSON.stringify({ secret_scanning: { status: 'enabled' }, secret_scanning_push_protection: { status: 'enabled' } }) },
@@ -782,7 +782,7 @@ describe('sdlc init', () => {
         ...created(),
         newProject(cfgOf(NEW_CONFIG)),
         { match: ['api', '/orgs/acme/projectsV2/12/fields?per_page=100'], code: 1, stderr: 'gh: Server Error (HTTP 500)' },
-        { match: ['label', 'list'], stdout: '[]' },
+        labelListStep([]),
         ...LABELS.map((): FakeGhStep => ({ match: ['label', 'create'] })),
         { match: PROTECTION, stdout: '{}' },
         { match: ['api', 'repos/acme/shop', '--jq'], stdout: '{}' },
@@ -880,7 +880,7 @@ describe('sdlc init', () => {
     const h = setup();
     h.useGh([
       provisionedBoard(cfg),
-      { match: ['label', 'list'], code: 1, stderr: 'gh: Bad credentials (HTTP 401)' },
+      { ...labelListStep([]), code: 1, stderr: 'gh: Bad credentials (HTTP 401)' },
       { match: PROTECTION, stdout: '{}' },
       { match: ['api', 'repos/acme/shop', '--jq'], stdout: JSON.stringify({ secret_scanning: { status: 'enabled' }, secret_scanning_push_protection: { status: 'enabled' } }) },
     ]);

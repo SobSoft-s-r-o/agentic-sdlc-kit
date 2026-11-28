@@ -28,7 +28,7 @@ import {
   type PathCheck,
   type Violation,
 } from '../hooks/policy.js';
-import { checkoutOf, mainRootOf, realPathOf, type Checkout } from '../hooks/resolve.js';
+import { cachedCheckoutOf, mainRootOf, realPathOf, type Checkout, type CheckoutCache } from '../hooks/resolve.js';
 import {
   isBareCancel,
   pendingActions,
@@ -81,6 +81,11 @@ export interface HookContext {
   readStdin(): Promise<string>;
   /** The config of the repository whose root is `root`: `undefined` when there is none, a throw when it is invalid. */
   loadConfig(root: string): Config | undefined;
+  /**
+   * The command line named the config file (`--config <path>`): then `loadConfig` answers with that
+   * file for every root, and the mode is not read from the main checkout (see `effectiveMode`).
+   */
+  explicitConfig?: boolean;
   /** Called only when an event needs a task (an edit that is not cached, a session start or an approval prompt). */
   makeTracker(cfg: Config, root: string): Tracker;
   /** Git, run in `cwd`. */
@@ -93,7 +98,10 @@ export interface HookContext {
   err(text: string): void;
   /** Starts `sdlc sync` in the background for the repository at `root` (the session-start event uses it). */
   spawnSync?(root: string): void;
-  /** How long all the task reads of one hook may take in total; defaults to `DEFAULT_DEADLINE_MS`. */
+  /**
+   * How long all the task reads of one hook may take in total; defaults to `DEFAULT_DEADLINE_MS`
+   * before a tool call and to `SLOW_EVENT_DEADLINE_MS` for session start and prompt.
+   */
   deadlineMs?: number;
   /**
    * Ends the process with `code`. Called, after everything is printed, only when a task read was
@@ -113,17 +121,60 @@ export interface HookContext {
 }
 
 /**
- * Longest the hook waits, in all, for GitHub. The rendered `pre-tool` timeout is 15 s, and the git
- * calls come first: the checkout of the cwd and the checkout of an edited file, two calls each, one
- * after the other (`4 * GIT_TIMEOUT_MS + DEFAULT_DEADLINE_MS` stays under it).
+ * Longest the hook waits, in all, for GitHub before a tool call. The rendered `pre-tool` timeout is
+ * 15 s and the git calls come first, one after the other. A checkout takes two calls (`rev-parse`,
+ * then `symbolic-ref`) and each directory is asked once (see `CheckoutCache`). Worst case, the
+ * cwd, the harness's project directory and the first edited file are three directories, six calls:
+ * `(2 + 2 + 2) * GIT_TIMEOUT_MS + DEFAULT_DEADLINE_MS` stays within it. The files of an edit in
+ * further directories are resolved side by side, which adds one more `2 * GIT_TIMEOUT_MS` in
+ * theory; a git that slow means the harness may end the hook, which lets the action through.
  */
-export const DEFAULT_DEADLINE_MS = 6000;
+export const DEFAULT_DEADLINE_MS = 3000;
+/**
+ * The same for session start and prompt, which the harness lets run 30 s (`HOOK_TIMEOUT_S`) and
+ * which have a task to read and an approval to write, not just a verdict to give.
+ */
+export const SLOW_EVENT_DEADLINE_MS = 6000;
 /** Longest one git call of the hook may take; the real context kills a slower git (see `createGitRunner`). */
 export const GIT_TIMEOUT_MS = 2000;
 /** How long a cached task state, read while edits were allowed, is trusted. */
 export const TASK_CACHE_TTL_MS = 10 * 60_000;
 
 const NO_OUTCOME: HookOutcome = { context: [], warnings: [] };
+
+/**
+ * The mode a hook applies: the one of the main checkout's config, so that `sdlc config set mode` in
+ * the main checkout reaches every worktree at once, without a commit. The worktree's own mode counts
+ * when `--config` named the file (`explicitConfig`) or the main checkout has no usable config (none,
+ * or one that does not load: the caller passes `undefined` for it). Nothing else is taken from main.
+ */
+export function effectiveMode(worktreeCfg: Config, mainCfg: Config | undefined, explicitConfig: boolean): Config['mode'] {
+  return explicitConfig || mainCfg === undefined ? worktreeCfg.mode : mainCfg.mode;
+}
+
+/**
+ * The config a hook runs on: the checkout's own, with the mode of the main checkout's (see
+ * `effectiveMode`). A config of the checkout that is missing or invalid is the hook's problem, as
+ * ever (it is skipped); the main checkout's is only an override, so whatever is wrong with it is
+ * ignored.
+ */
+function configFor(ctx: HookContext, checkout: Checkout): Config {
+  const cfg = ctx.loadConfig(checkout.root);
+  if (cfg === undefined) throw new Error(`no sdlc.config.yaml in ${checkout.root}`);
+  const explicit = ctx.explicitConfig === true;
+  const mainRoot = mainRootOf(checkout);
+
+  let mainCfg: Config | undefined;
+  if (!explicit && mainRoot !== checkout.root) {
+    try {
+      mainCfg = ctx.loadConfig(mainRoot);
+    } catch {
+      mainCfg = undefined;
+    }
+  }
+  const mode = effectiveMode(cfg, mainCfg, explicit);
+  return mode === cfg.mode ? cfg : { ...cfg, mode };
+}
 
 /** One line for the stderr skip message: white space collapsed, and not unreasonably long. */
 function reasonOf(error: unknown): string {
@@ -243,6 +294,8 @@ interface HookEnv {
   checkout: Checkout;
   cfg: Config;
   deadline: Deadline;
+  /** The checkouts git was asked about during this hook: one resolution per directory. */
+  checkouts: CheckoutCache;
 }
 
 const posixPath = (path: string): string => path.split(sep).join('/');
@@ -260,16 +313,6 @@ const isInside = (path: string, dir: string): boolean => path === dir || path.st
 async function judgeEdit(env: HookEnv, tool: Extract<ToolCall, { category: 'edit' }>): Promise<Judgement> {
   const { ctx, checkout: root, cfg } = env;
   const reader = new TaskReader(ctx, root, cfg, env.deadline);
-
-  const checkouts = new Map<string, Promise<Checkout | undefined>>();
-  const checkoutOfDir = (dir: string): Promise<Checkout | undefined> => {
-    let found = checkouts.get(dir);
-    if (found === undefined) {
-      found = checkoutOf(dir, ctx.gitFor);
-      checkouts.set(dir, found);
-    }
-    return found;
-  };
 
   const home = realPathOf(homedir());
   const checks = await Promise.all(
@@ -289,7 +332,7 @@ async function judgeEdit(env: HookEnv, tool: Extract<ToolCall, { category: 'edit
           ...(root.branch === undefined ? {} : { branch: root.branch }),
         };
       }
-      const holder = await checkoutOfDir(dirname(real));
+      const holder = await cachedCheckoutOf(env.checkouts, dirname(real), ctx.gitFor);
       if (holder === undefined || holder.commonDir !== root.commonDir) {
         return { path, inProject: false, lookup: 'none' };
       }
@@ -577,20 +620,20 @@ const PROJECT_DIR_VARIABLE: Record<HookHarness, string | undefined> = {
  * both, the checkout of the first edited file in one (each file is still judged in its own checkout).
  * `undefined` when nothing resolves.
  */
-async function anchorCheckout(event: HookEvent, ctx: HookContext): Promise<Checkout | undefined> {
-  const fromCwd = await checkoutOf(event.cwd, ctx.gitFor);
+async function anchorCheckout(event: HookEvent, ctx: HookContext, checkouts: CheckoutCache): Promise<Checkout | undefined> {
+  const fromCwd = await cachedCheckoutOf(checkouts, event.cwd, ctx.gitFor);
   if (fromCwd !== undefined) return fromCwd;
 
   const variable = PROJECT_DIR_VARIABLE[event.harness];
   const projectDir = variable === undefined ? undefined : (ctx.env ?? process.env)[variable];
   if (projectDir !== undefined && projectDir !== '') {
-    const fromProject = await checkoutOf(projectDir, ctx.gitFor);
+    const fromProject = await cachedCheckoutOf(checkouts, projectDir, ctx.gitFor);
     if (fromProject !== undefined) return fromProject;
   }
 
   if (event.tool?.category === 'edit') {
     for (const path of event.tool.paths) {
-      const holder = await checkoutOf(dirname(realPathOf(path)), ctx.gitFor);
+      const holder = await cachedCheckoutOf(checkouts, dirname(realPathOf(path)), ctx.gitFor);
       if (holder !== undefined) return holder;
     }
   }
@@ -605,7 +648,8 @@ async function answer(
   deadline: Deadline,
 ): Promise<string> {
   const event = normalizePayload(harness, eventName, parsePayload(await ctx.readStdin()));
-  const checkout = await anchorCheckout(event, ctx);
+  const checkouts: CheckoutCache = new Map();
+  const checkout = await anchorCheckout(event, ctx, checkouts);
   if (checkout === undefined) {
     const { tool } = event;
     if (tool === undefined || tool.category === 'edit') throw new Error(`${event.cwd} is not inside a git repository`);
@@ -613,10 +657,9 @@ async function answer(
     // others only warn, and there is no main checkout to log a gap in.
     return renderOutput(harness, eventName, decide(otherViolations(tool), 'observe'));
   }
-  const cfg = ctx.loadConfig(checkout.root);
-  if (cfg === undefined) throw new Error(`no sdlc.config.yaml in ${checkout.root}`);
+  const cfg = configFor(ctx, checkout);
 
-  const env: HookEnv = { ctx, event, checkout, cfg, deadline };
+  const env: HookEnv = { ctx, event, checkout, cfg, deadline, checkouts };
   let outcome = NO_OUTCOME;
   let gaps: LoggedGap[] = [];
   if (event.event === 'pre-tool') ({ outcome, gaps } = await preTool(env));
@@ -641,7 +684,7 @@ function skip(ctx: Pick<HookContext, 'out' | 'err'>, harness: HookHarness | unde
 
 /** Runs one hook event: reads the payload, applies the rules and prints the answer. Always resolves to 0. */
 export async function runHook(harness: HookHarness, event: HookEventName, ctx: HookContext): Promise<0> {
-  const deadline = deadlineOf(ctx.deadlineMs ?? DEFAULT_DEADLINE_MS);
+  const deadline = deadlineOf(ctx.deadlineMs ?? (event === 'pre-tool' ? DEFAULT_DEADLINE_MS : SLOW_EVENT_DEADLINE_MS));
   try {
     const text = await answer(harness, event, ctx, deadline);
     if (text !== '') ctx.out(text);

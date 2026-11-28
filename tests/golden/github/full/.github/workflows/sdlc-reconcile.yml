@@ -62,11 +62,11 @@ jobs:
         with:
           node-version: 22
           package-manager-cache: false
-      # Download and build the kit without the token: its install scripts never see SDLC_TOKEN.
+      # Download the kit (a branch or commit is also built from git) without the token: its install scripts never see SDLC_TOKEN.
       # The next step runs the same command from the npx cache.
       - name: Install the kit
-        run: npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3 --version
+        run: npx -y agentic-sdlc-kit@1.2.3 --version
       - name: Reconcile
         env:
           GH_TOKEN: ${{ secrets.SDLC_TOKEN }}
-        run: npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3 reconcile
+        run: npx -y agentic-sdlc-kit@1.2.3 reconcile

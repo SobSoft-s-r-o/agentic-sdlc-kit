@@ -1,10 +1,18 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_DEADLINE_MS, GIT_TIMEOUT_MS, registerHookCommand, runHook, type HookContext } from '../../src/commands/hook.js';
+import {
+  DEFAULT_DEADLINE_MS,
+  effectiveMode,
+  GIT_TIMEOUT_MS,
+  registerHookCommand,
+  runHook,
+  SLOW_EVENT_DEADLINE_MS,
+  type HookContext,
+} from '../../src/commands/hook.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
 import { promptRef } from '../../src/hooks/session.js';
 import { StateCommentError } from '../../src/core/stateComment.js';
@@ -81,6 +89,11 @@ interface Options {
   readStdin?: () => Promise<string>;
   gitFor?: HookContext['gitFor'];
   cfg?: Config | undefined | 'throw';
+  /** Replaces `cfg` with a config by checkout root (the worktree and the main checkout may differ). */
+  loadConfig?: HookContext['loadConfig'];
+  /** The command line named the config file (`--config`). */
+  explicitConfig?: boolean;
+  makeTracker?: HookContext['makeTracker'];
   now?: () => string;
   deadlineMs?: number;
   exit?: (code: number) => void;
@@ -96,12 +109,15 @@ async function run(harness: HookHarness, event: HookEventName, options: Options)
   const ctx: HookContext = {
     cwd: repo.root,
     readStdin: options.readStdin ?? (async () => options.stdin),
-    loadConfig: () => {
-      if (cfg === 'throw') throw new Error('Invalid config:\n  - mode: bad');
-      return cfg;
-    },
-    makeTracker: () => tracker,
+    loadConfig:
+      options.loadConfig ??
+      (() => {
+        if (cfg === 'throw') throw new Error('Invalid config:\n  - mode: bad');
+        return cfg;
+      }),
+    makeTracker: options.makeTracker ?? (() => tracker),
     gitFor: options.gitFor ?? (dir => createGitRunner(dir)),
+    ...(options.explicitConfig === undefined ? {} : { explicitConfig: options.explicitConfig }),
     now: options.now ?? (() => NOW),
     out: text => out.push(text),
     err: text => err.push(text),
@@ -140,14 +156,91 @@ const denyReason = (stdout: string): string => {
   return parsed.hookSpecificOutput.permissionDecisionReason;
 };
 
+/** A `gitFor` that runs the real git and counts every call, by the arguments it was given. */
+function countingGit(): { gitFor: HookContext['gitFor']; calls: string[][] } {
+  const calls: string[][] = [];
+  const gitFor: HookContext['gitFor'] = dir => {
+    const git = createGitRunner(dir);
+    return async args => {
+      calls.push([...args]);
+      return git(args);
+    };
+  };
+  return { gitFor, calls };
+}
+
 describe('the time the hook may take', () => {
   /** The `timeout` the harness settings get for the pre-tool hook. */
   const PRE_TOOL_TIMEOUT_MS = 15_000;
+  const outside = (): string => realpathSync(dirname(repo.root));
 
-  it('fits the pre-tool timeout in the worst case: the checkout of the cwd and of a file (two git calls each), then GitHub', () => {
+  it('fits the pre-tool timeout in the worst case: the cwd, the project directory and one edited file (two git calls each, once), then GitHub', () => {
     expect(GIT_TIMEOUT_MS).toBe(2000);
-    expect(DEFAULT_DEADLINE_MS).toBe(6000);
-    expect(4 * GIT_TIMEOUT_MS + DEFAULT_DEADLINE_MS).toBeLessThan(PRE_TOOL_TIMEOUT_MS);
+    expect((2 + 2 + 2) * GIT_TIMEOUT_MS + DEFAULT_DEADLINE_MS).toBeLessThanOrEqual(PRE_TOOL_TIMEOUT_MS);
+  });
+
+  it('keeps the longer deadline for the events that have the longer harness timeout', () => {
+    expect(SLOW_EVENT_DEADLINE_MS).toBeGreaterThan(DEFAULT_DEADLINE_MS);
+    // session-start and prompt get 30 s from the harness (HOOK_TIMEOUT_S).
+    expect(2 * 2 * GIT_TIMEOUT_MS + SLOW_EVENT_DEADLINE_MS).toBeLessThan(30_000);
+  });
+
+  it('git calls stay bounded: a cwd and a project dir outside any checkout, one edited file in a checkout, at most 4 calls', async () => {
+    const { gitFor, calls } = countingGit();
+    const projectDir = join(outside(), 'plain');
+    mkdirSync(projectDir);
+
+    await claudePreTool(claudeWrite(join(repo.root, 'src', 'a.ts'), outside()), {
+      gitFor,
+      env: { CLAUDE_PROJECT_DIR: projectDir },
+    });
+
+    // cwd: 1 (rev-parse fails), project dir: 1, the edited file's directory: 2 (rev-parse, symbolic-ref), and
+    // judging the edit asks for that directory again from the shared cache, not from git.
+    expect(calls.map(args => args[0])).toEqual(['rev-parse', 'rev-parse', 'rev-parse', 'symbolic-ref']);
+    expect(calls.length).toBeLessThanOrEqual(4);
+  });
+
+  it('asks once when the cwd and the project directory are the same directory outside any checkout', async () => {
+    const { gitFor, calls } = countingGit();
+
+    await claudePreTool(claudeWrite(join(repo.root, 'src', 'a.ts'), outside()), {
+      gitFor,
+      env: { CLAUDE_PROJECT_DIR: outside() },
+    });
+
+    expect(calls).toHaveLength(3); // the outside directory 1, the edited file's directory 2
+  });
+
+  it('resolves each directory once, whatever the number of files in it', async () => {
+    repo.write('src/keep.ts', 'x\n');
+    repo.write('lib/keep.ts', 'x\n');
+    const { gitFor, calls } = countingGit();
+    const files = ['src/a.ts', 'src/b.ts', 'src/c.ts', 'lib/d.ts'].map(file => join(root, file));
+    const patch = `*** Begin Patch\n${files.map(file => `*** Add File: ${file}\n+x`).join('\n')}\n*** End Patch`;
+
+    const result = await run('codex', 'pre-tool', { stdin: payload(outside(), 'apply_patch', { command: patch }), gitFor });
+
+    expect(result.stderr).toEqual([]);
+    // cwd 1 + src 2 + lib 2; the four files of two directories add nothing.
+    expect(calls).toHaveLength(5);
+  });
+
+  it('asks git once for a file in a directory that does not exist yet, below the cwd checkout', async () => {
+    const { gitFor, calls } = countingGit();
+
+    await claudePreTool(claudeWrite(join(repo.root, 'new', 'deep', 'a.ts')), { gitFor });
+
+    // The cwd and the (missing) directory of the file both resolve through the repository root.
+    expect(calls).toHaveLength(2);
+  });
+
+  it('resolves the cwd once at session start', async () => {
+    const { gitFor, calls } = countingGit();
+
+    await run('claude', 'session-start', { stdin: sessionStart(), gitFor });
+
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -348,6 +441,7 @@ describe('runHook pre-tool: edits', () => {
 
   it('counts a git call killed on its time limit as no checkout for that file: the edit is allowed', async () => {
     taskBranch('task/5-x');
+    repo.write('src/keep.ts', 'x\n'); // an existing directory of its own: it is resolved apart from the cwd
     const getTask = vi.spyOn(tracker, 'getTask');
     let calls = 0;
     const gitFor = (dir: string): GitRunner => {
@@ -365,6 +459,7 @@ describe('runHook pre-tool: edits', () => {
 
   it('leaves an edit alone when git is killed before it names the branch of the file: unresolved, not a branch-less checkout', async () => {
     taskBranch('task/5-x');
+    repo.write('src/keep.ts', 'x\n'); // an existing directory of its own: it is resolved apart from the cwd
     const getTask = vi.spyOn(tracker, 'getTask');
     let calls = 0;
     const gitFor = (dir: string): GitRunner => {
@@ -556,6 +651,30 @@ describe('runHook pre-tool: shell and subagent', () => {
     expect(gapLines()).toMatchObject([{ rule: 'admin-merge', blocked: true, issue: 5, harness: 'claude' }]);
   });
 
+  it('denies a merge through gh api in enforce, and only warns in observe (it is no both-modes rule)', async () => {
+    taskBranch('task/5-x');
+    const command = 'gh api -X PUT repos/o/r/pulls/3/merge';
+
+    const denied = await claudePreTool(payload(repo.root, 'Bash', { command }));
+    expect(denyReason(denied.stdout)).toBe('sdlc (enforce): merging through gh api bypasses the merge policy; ask the owner to merge');
+    expect(gapLines()).toMatchObject([{ rule: 'api-merge', blocked: true, issue: 5 }]);
+
+    const warned = await claudePreTool(payload(repo.root, 'Bash', { command }), { cfg: observe });
+    expect(warned.stdout).not.toContain('deny');
+    expect((JSON.parse(warned.stdout) as { systemMessage: string }).systemMessage).toContain('merging through gh api');
+    expect(gapLines().at(-1)).toMatchObject({ rule: 'api-merge', blocked: false });
+  });
+
+  it('reads `node dist/cli.js` as sdlc: a mode change is denied in enforce, spoofing the hook in both modes', async () => {
+    const mode = await claudePreTool(payload(repo.root, 'Bash', { command: 'node dist/cli.js config set mode observe' }));
+    expect(denyReason(mode.stdout)).toContain('only the owner changes sdlc settings');
+
+    const spoof = await claudePreTool(payload(repo.root, 'Bash', { command: 'node ./node_modules/agentic-sdlc-kit/dist/cli.js hook claude prompt' }), {
+      cfg: observe,
+    });
+    expect(denyReason(spoof.stdout)).toContain('sdlc hooks are run by the harness only');
+  });
+
   it('observe: a shell violation warns only', async () => {
     const result = await claudePreTool(payload(repo.root, 'Bash', { command: 'git push --force origin x' }), {
       cfg: observe,
@@ -624,7 +743,124 @@ describe('runHook pre-tool: shell and subagent', () => {
       err: text => out.push(text),
     });
 
+    // The worktree's own config first, then the main checkout's, for the mode only.
+    expect(seen).toEqual([join(root, '.worktrees', '7-y'), root]);
+  });
+});
+
+describe('runHook: the mode comes from the main checkout', () => {
+  const worktreeDir = (): string => join(repo.root, '.worktrees', '7-y');
+  /** An edit outside any task, from a worktree on a branch that names none. */
+  const editFromWorktree = (): string => claudeWrite(join(worktreeDir(), 'src', 'a.ts'), worktreeDir());
+  const byRoot =
+    (worktree: Config | undefined | 'throw', main: Config | undefined | 'throw'): HookContext['loadConfig'] =>
+    dir => {
+      const cfg = dir === root ? main : worktree;
+      if (cfg === 'throw') throw new Error('Invalid config:\n  - mode: bad');
+      return cfg;
+    };
+
+  beforeEach(() => {
+    repo.git('worktree', 'add', '-q', '-b', 'topic/y', '.worktrees/7-y');
+  });
+
+  it('mode comes from the main checkout: a worktree config on observe is enforced when main says enforce', async () => {
+    const result = await claudePreTool(editFromWorktree(), { loadConfig: byRoot(observe, enforce) });
+
+    expect(result.stderr).toEqual([]);
+    expect(denyReason(result.stdout)).toMatch(/^sdlc \(enforce\): editing src\/a\.ts outside a task/);
+    expect(gapLines()).toMatchObject([{ rule: 'no-task', blocked: true }]);
+  });
+
+  it('and the other way round: main on observe only warns, whatever the worktree config says', async () => {
+    const result = await claudePreTool(editFromWorktree(), { loadConfig: byRoot(enforce, observe) });
+
+    expect(result.stdout).not.toContain('deny');
+    expect((JSON.parse(result.stdout) as { systemMessage: string }).systemMessage).toMatch(/^sdlc \(observe\): editing src\/a\.ts/);
+    expect(gapLines()).toMatchObject([{ rule: 'no-task', blocked: false }]);
+  });
+
+  it('takes nothing but the mode from main: the worktree keeps its own owners and the rest', async () => {
+    repo.git('worktree', 'add', '-q', '-b', 'task/8-z', '.worktrees/8-z');
+    tracker.seedTask(feature(8, true));
+    const seen: Config[] = [];
+    const worktree = { ...observe, owners: ['worktree-owner'] };
+
+    const result = await run('claude', 'session-start', {
+      stdin: sessionStart({}, join(repo.root, '.worktrees', '8-z')),
+      loadConfig: byRoot(worktree, { ...enforce, owners: ['main-owner'] }),
+      makeTracker: cfg => {
+        seen.push(cfg);
+        return tracker;
+      },
+    });
+
+    expect(result.stderr).toEqual([]);
+    expect(seen).toMatchObject([{ mode: 'enforce', owners: ['worktree-owner'] }]);
+  });
+
+  it.each([
+    ['is missing', undefined],
+    ['holds invalid YAML', 'throw'],
+  ] as const)('mode falls back to the worktree config when the main config %s: no throw, exit 0', async (_name, main) => {
+    const denied = await claudePreTool(editFromWorktree(), { loadConfig: byRoot(enforce, main) });
+    expect(denied.code).toBe(0);
+    expect(denied.stderr).toEqual([]);
+    expect(denyReason(denied.stdout)).toMatch(/^sdlc \(enforce\):/);
+
+    const warned = await claudePreTool(editFromWorktree(), { loadConfig: byRoot(observe, main) });
+    expect(warned.code).toBe(0);
+    expect(warned.stderr).toEqual([]);
+    expect(warned.stdout).not.toContain('deny');
+    expect((JSON.parse(warned.stdout) as { systemMessage: string }).systemMessage).toMatch(/^sdlc \(observe\):/);
+  });
+
+  it('--config wins over both: the explicit file decides, and main is not asked', async () => {
+    const seen: string[] = [];
+    const result = await claudePreTool(editFromWorktree(), {
+      explicitConfig: true,
+      loadConfig: dir => {
+        seen.push(dir);
+        return dir === root ? enforce : observe;
+      },
+    });
+
+    expect(result.stdout).not.toContain('deny');
+    expect(result.stdout).toContain('sdlc (observe)');
     expect(seen).toEqual([join(root, '.worktrees', '7-y')]);
+  });
+
+  it('asks the config once when the event is in the main checkout itself', async () => {
+    const seen: string[] = [];
+    await claudePreTool(claudeWrite(join(repo.root, 'src', 'a.ts')), {
+      loadConfig: dir => {
+        seen.push(dir);
+        return enforce;
+      },
+    });
+
+    expect(seen).toEqual([root]);
+  });
+
+  it('applies to session start as well: the line for the agent names the main checkout mode', async () => {
+    const result = await run('claude', 'session-start', {
+      stdin: JSON.stringify({ session_id: 's1', cwd: worktreeDir(), source: 'startup' }),
+      loadConfig: byRoot(observe, enforce),
+    });
+
+    expect(result.stderr).toEqual([]);
+    expect(result.stdout).toMatch(/enforce/);
+    expect(result.stdout).not.toMatch(/observe/);
+  });
+});
+
+describe('effectiveMode', () => {
+  it('is the main checkout mode, unless the config was named explicitly or main has none', () => {
+    expect(effectiveMode(observe, enforce, false)).toBe('enforce');
+    expect(effectiveMode(enforce, observe, false)).toBe('observe');
+    expect(effectiveMode(observe, enforce, true)).toBe('observe');
+    expect(effectiveMode(enforce, undefined, false)).toBe('enforce');
+    expect(effectiveMode(observe, undefined, true)).toBe('observe');
   });
 });
 

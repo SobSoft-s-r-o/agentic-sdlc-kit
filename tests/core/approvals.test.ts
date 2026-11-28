@@ -223,6 +223,7 @@ describe('finalMergeTime', () => {
       merged: true,
       baseRef: 'main',
       body: '',
+      labels: [],
       ...(mergedAt && { mergedAt }),
     });
     expect(finalMergeTime(state, [pr(5, '2026-05-01T00:00:00.000Z'), pr(6, PUBLISHED)])).toBe(PUBLISHED);

@@ -36,13 +36,19 @@ async function readSummary(file: string): Promise<string> {
  * another comment by that login came after does not count, and neither does one by anybody else.
  * Without a known login nothing can be matched, so the comment is posted.
  */
-async function alreadyPosted(ctx: CommandContext, issue: number, body: string): Promise<PostedComment | undefined> {
+async function alreadyPosted(
+  ctx: CommandContext,
+  issue: number,
+  body: string,
+): Promise<(PostedComment & { url: string }) | undefined> {
   const hint = 'the state was not changed';
   const login = await trackerStep('authenticatedLogin', issue, () => ctx.tracker.authenticatedLogin(), hint);
   if (login === undefined) return undefined;
   const comments = await trackerStep('listComments', issue, () => ctx.tracker.listComments(issue), hint);
   const newest = comments.filter(c => c.author.toLowerCase() === login.toLowerCase()).at(-1);
-  return newest && newest.body.trim() === body.trim() ? { id: newest.id, createdAt: newest.createdAt } : undefined;
+  return newest && newest.body.trim() === body.trim()
+    ? { id: newest.id, createdAt: newest.createdAt, url: newest.url }
+    : undefined;
 }
 
 /**
@@ -69,8 +75,11 @@ export async function stagePublish(
     markdown,
     needsApproval: input.needsApproval,
   });
+  const earlier = await alreadyPosted(ctx, issue, body);
+  // The result is the plain task state, so the reuse is told on stderr: no second comment was posted.
+  if (earlier) ctx.err?.(`stage publish: reused the stage summary already posted (${earlier.url})`);
   const posted =
-    (await alreadyPosted(ctx, issue, body)) ??
+    earlier ??
     (await trackerStep('postComment', issue, () => ctx.tracker.postComment(issue, body), 'the state was not changed'));
   const next = applyEvent(loaded.task.state, event, loaded.type, posted.createdAt);
   return persist(ctx, loaded, next, { writeHint: 'the stage summary was posted; the state was not changed' });

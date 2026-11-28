@@ -3,7 +3,7 @@ import { accessSync, constants, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { typeRegistry, type Config } from '../config/schema.js';
 import { ConfigError } from '../core/taskTypes.js';
-import { GhError, ghJson, type GhRunner } from '../github/gh.js';
+import { GhError, ghJson, ghText, type GhRunner } from '../github/gh.js';
 import { GIT_HOOKS } from '../render/github.js';
 
 /**
@@ -77,10 +77,14 @@ export async function ensureLabels(
 ): Promise<{ created: string[]; existing: string[] }> {
   const repo = cfg.github.repo;
   const specs = labelSpecs(cfg);
-  const listed = await ghJson<Array<{ name: string }> | undefined>(run, [
-    'label', 'list', '--repo', repo, '--json', 'name', '--limit', '500',
-  ]);
-  const have = new Set((listed ?? []).map(label => label.name.toLowerCase()));
+  // `--jq` runs per page, so the output is every label name, one per line, however many pages there are.
+  const listed = await ghText(run, ['api', `repos/${repo}/labels?per_page=100`, '--paginate', '--jq', '.[].name']);
+  const have = new Set(
+    listed
+      .split('\n')
+      .map(name => name.trim().toLowerCase())
+      .filter(name => name !== ''),
+  );
 
   const created: string[] = [];
   const existing: string[] = [];
@@ -95,7 +99,7 @@ export async function ensureLabels(
       ];
       const result = await run(args);
       if (result.code !== 0) {
-        // Past the 500 listed labels, or created by someone else meanwhile: it exists, which is the goal.
+        // Created by someone else since the listing: it exists, which is the goal.
         if (/already exists/i.test(result.stderr)) {
           existing.push(spec.name);
           continue;

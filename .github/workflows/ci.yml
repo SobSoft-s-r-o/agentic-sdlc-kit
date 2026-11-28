@@ -1,0 +1,47 @@
+# Typecheck, test, build and smoke-test the npm tarball on every push to main and every pull request.
+# Actions are pinned to a full commit SHA (the tag in the comment), so a moved tag cannot change what runs.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request replaces the run in progress; runs on main always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node: [20, 22, 24]
+        include:
+          # One macOS run: the tests skip the POSIX-only parts on Windows, which CI does not cover.
+          - os: macos-latest
+            node: 22
+    steps:
+      # persist-credentials: false: the checkout token is not left in .git/config for the later steps.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No dependency cache: a cache is one more input to what the tests ran against.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      # Packs the fresh build, installs the tarball into an empty project and runs the installed `sdlc`.
+      - run: node scripts/pack-smoke.mjs

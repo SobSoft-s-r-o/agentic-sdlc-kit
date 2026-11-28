@@ -1,0 +1,24 @@
+# agentic-sdlc-kit installed in its own repository (dogfood). See docs/notes/dogfood.md for the follow-ups the owner still has to run.
+
+version: 1
+harnesses: [claude]
+mode: observe
+# main until the first npm release exists; set v0.3.0 (or later) once it is published. "sdlc doctor" checks it.
+kit_ref: main
+github:
+  repo: SobSoft-s-r-o/agentic-sdlc-kit
+  default_branch: main
+  project: {owner: SobSoft-s-r-o, owner_type: org}
+owners: [lubo08]
+agents: []
+merge_policy: owner_only
+quality_gate: [npm run typecheck, npm test, npm run build]
+# actions: the reconcile workflow needs the SDLC_TOKEN secret; switch this to true after the owner adds it.
+# graphify: false because this repository ships no graphify-out/ knowledge graph.
+stack:
+  graphify: false
+  actions: false
+task_types:
+  enabled: [tooling, analysis, production-data, artifact, spike]
+  custom: []
+targets: []

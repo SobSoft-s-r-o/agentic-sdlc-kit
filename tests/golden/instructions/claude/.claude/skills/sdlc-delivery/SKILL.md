@@ -5,7 +5,7 @@ description: "Use when a tracked task is ready for review, merge or deployment, 
 
 # Delivery
 
-The path of a task to Done: review, merge (owner) and, for a type that ends on a deployment, deploy (explicit owner confirmation), record the deployment, reconcile, Done. Which steps a task needs depends on how its type ends (instruction block). `sdlc` means `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3` unless `sdlc` is on PATH.
+The path of a task to Done: review, merge (owner) and, for a type that ends on a deployment, deploy (explicit owner confirmation), record the deployment, reconcile, Done. Which steps a task needs depends on how its type ends (instruction block). `sdlc` means `npx -y agentic-sdlc-kit@1.2.3` unless `sdlc` is on PATH.
 
 ## 1. Review
 

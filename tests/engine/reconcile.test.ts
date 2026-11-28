@@ -662,6 +662,7 @@ describe('approvals', () => {
       merged: false,
       baseRef: 'main',
       body: 'Related to #1, #2\nScope: partial',
+      labels: ['sdlc:partial'], // already labelled: this test is about the command, not the label
     });
     const url = comment(h, 51, '/approve', AFTER);
     const result = await reconcile(h.ctx, {});
@@ -669,6 +670,117 @@ describe('approvals', () => {
       { issue: 1, kind: 'ignored_approval', detail: `/approve (${url}): PR #51 links several tasks` },
     ]);
     expect((await stateOf(h, 1)).status).toBe('paused');
+  });
+
+  it('trusts no state comment of an unknown login: with none, only the Actions bot, owners and agents vouch', async () => {
+    const h = setup();
+    h.tracker.seedTask(inReview(1, 'tooling'));
+    h.tracker.seedTask(inReview(2, 'tooling'));
+    h.tracker.login = undefined;
+    h.tracker.comments.find(c => c.issue === 1)!.author = 'github-actions[bot]';
+    mergedPr(h, 1, 51);
+    mergedPr(h, 2, 52);
+
+    const result = await reconcile(h.ctx, {});
+
+    // #2's state comment is by the login the tool no longer knows: it is not a state comment now.
+    expect(result.actions.filter(a => a.issue === 2).map(a => a.kind)).toEqual(['untracked']);
+    expect(result.actions.filter(a => a.issue === 1).map(a => a.kind)).toContain('pr_merged');
+    expect((await stateOf(h, 1)).status).toBe('done');
+  });
+
+  describe('a PR whose body was edited (I1: re-pointing a PR to another task)', () => {
+    const EDIT_REFUSED = 'PR body was edited after the comment';
+    /** Task 1 paused on the owner, and PR 51, which links only it, with `extra` fields. */
+    const withPr = (extra: object): Harness => {
+      const h = setup();
+      h.tracker.seedTask(pausedOn(1));
+      h.tracker.prs.push({
+        issue: 1,
+        number: 51,
+        url: 'https://github.test/pull/51',
+        merged: false,
+        baseRef: 'main',
+        body: 'Related to #1\nScope: partial',
+        labels: ['sdlc:partial'], // already labelled: these tests are about the comment, not the label
+        ...extra,
+      });
+      return h;
+    };
+
+    it('PR comment ignored after a body re-point', async () => {
+      const h = withPr({ bodyEditedAt: '2026-03-20T00:01:00.000Z' });
+      const url = comment(h, 51, '/approve', AFTER);
+
+      const result = await reconcile(h.ctx, {});
+
+      expect(result.actions).toEqual([
+        { issue: 1, kind: 'ignored_approval', detail: `/approve (${url}): ${EDIT_REFUSED}` },
+      ]);
+      expect(await stateOf(h, 1)).toMatchObject({ status: 'paused', waitingOn: 'owner' });
+      expect((await stateOf(h, 1)).stages.brainstorming?.approval).toBeUndefined();
+    });
+
+    it('PR comment counts when the body was edited before it', async () => {
+      const h = withPr({ bodyEditedAt: PUBLISHED });
+      const url = comment(h, 51, '/approve', AFTER);
+
+      const result = await reconcile(h.ctx, {});
+
+      expect(result.actions.filter(a => a.kind === 'ignored_approval')).toEqual([]);
+      expect(result.actions).toContainEqual(expect.objectContaining({ issue: 1, kind: 'approval' }));
+      expect((await stateOf(h, 1)).stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: url });
+    });
+
+    it('counts a comment made in the same instant as the edit (nothing shows the edit came later)', async () => {
+      const h = withPr({ bodyEditedAt: AFTER });
+      comment(h, 51, '/approve', AFTER);
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions).toContainEqual(expect.objectContaining({ kind: 'approval' }));
+    });
+
+    it('compares the instants, not the strings: GitHub writes whole seconds, the comment may carry milliseconds', async () => {
+      // 00:00:00Z is the same instant as 00:00:00.000Z but sorts after it as text.
+      const h = withPr({ bodyEditedAt: '2026-03-20T00:00:00Z' });
+      comment(h, 51, '/approve', '2026-03-20T00:00:00.000Z');
+      expect(await reconcile(h.ctx, {})).toMatchObject({ actions: expect.arrayContaining([expect.objectContaining({ kind: 'approval' })]) });
+    });
+
+    it('voids a comment made half a second before the edit although the text sorts the other way', async () => {
+      // As text '…00Z' sorts after '…00.500Z', so a string comparison would let this comment count.
+      const h = withPr({ bodyEditedAt: '2026-03-20T00:00:00.500Z' });
+      const url = comment(h, 51, '/approve', '2026-03-20T00:00:00Z');
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions).toEqual([{ issue: 1, kind: 'ignored_approval', detail: `/approve (${url}): ${EDIT_REFUSED}` }]);
+    });
+
+    it('treats an unreadable edit time as an edit after the comment', async () => {
+      const h = withPr({ bodyEditedAt: 'yesterday' });
+      const url = comment(h, 51, '/approve', AFTER);
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions).toEqual([{ issue: 1, kind: 'ignored_approval', detail: `/approve (${url}): ${EDIT_REFUSED}` }]);
+    });
+
+    it('voids only the comments older than the edit', async () => {
+      const h = withPr({ bodyEditedAt: '2026-03-20T00:00:00.000Z' });
+      const old = comment(h, 51, '/approve', '2026-03-19T00:00:00.000Z');
+      const fresh = comment(h, 51, '/approve', '2026-03-21T00:00:00.000Z');
+
+      const result = await reconcile(h.ctx, {});
+
+      expect(result.actions.filter(a => a.kind === 'ignored_approval')).toEqual([
+        { issue: 1, kind: 'ignored_approval', detail: `/approve (${old}): ${EDIT_REFUSED}` },
+      ]);
+      expect((await stateOf(h, 1)).stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: fresh });
+    });
+
+    it('does not touch comments on the task issue itself', async () => {
+      const h = withPr({ bodyEditedAt: '2026-03-25T00:00:00.000Z' });
+      const url = comment(h, 1, '/approve', AFTER);
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions.filter(a => a.kind === 'ignored_approval')).toEqual([]);
+      expect((await stateOf(h, 1)).stages.brainstorming?.approval).toMatchObject({ ref: url });
+    });
   });
 
   describe('agent logins (`agents` in the config)', () => {
@@ -1116,6 +1228,164 @@ describe('deployRecord', () => {
       'issue_closed',
     ]);
     expect((await stateOf(h, 1)).status).toBe('done');
+  });
+});
+
+describe('the sdlc:partial label on PRs', () => {
+  const PARTIAL = 'sdlc:partial';
+
+  /** Task 1 in review and its open PR 51, whose body carries `scope` (and `extra` fields). */
+  const withPr = (scope: 'partial' | 'final', extra: object = {}): Harness => {
+    const h = setup();
+    h.tracker.seedTask(inReview(1, 'feature', { prs: [{ number: 51, scope }] }));
+    h.tracker.prs.push({
+      issue: 1,
+      number: 51,
+      url: 'https://github.test/pull/51',
+      merged: false,
+      baseRef: 'main',
+      body: `Related to #1\nScope: ${scope}`,
+      ...extra,
+    });
+    return h;
+  };
+  const labelsOf = (h: Harness, number: number): string[] | undefined =>
+    h.tracker.prs.find(pr => pr.number === number)?.labels;
+
+  it('partial PR gets sdlc:partial', async () => {
+    const h = withPr('partial');
+    const setLabels = vi.spyOn(h.tracker, 'setLabels');
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(result.errors).toBe(0);
+    expect(result.actions).toEqual([{ issue: 1, kind: 'pr_label', detail: 'PR #51: +sdlc:partial' }]);
+    expect(setLabels.mock.calls).toEqual([[51, [PARTIAL], []]]);
+    expect(labelsOf(h, 51)).toEqual([PARTIAL]);
+  });
+
+  it('keeps the labels the PR has when it adds sdlc:partial', async () => {
+    const h = withPr('partial', { labels: ['bug'] });
+    await reconcile(h.ctx, {});
+    expect(labelsOf(h, 51)).toEqual(['bug', PARTIAL]);
+  });
+
+  it('final PR loses sdlc:partial', async () => {
+    const h = withPr('final', { labels: [PARTIAL, 'bug'] });
+    const setLabels = vi.spyOn(h.tracker, 'setLabels');
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(result.actions).toEqual([{ issue: 1, kind: 'pr_label', detail: 'PR #51: -sdlc:partial' }]);
+    expect(setLabels.mock.calls).toEqual([[51, [], [PARTIAL]]]);
+    expect(labelsOf(h, 51)).toEqual(['bug']);
+  });
+
+  it('removes the label from a PR whose body says no scope (final is the default)', async () => {
+    const h = withPr('final', { body: 'Related to #1', labels: [PARTIAL] });
+    const result = await reconcile(h.ctx, {});
+    expect(result.actions).toEqual([{ issue: 1, kind: 'pr_label', detail: 'PR #51: -sdlc:partial' }]);
+  });
+
+  it('makes no write for a PR in the right state', async () => {
+    const partial = withPr('partial', { labels: [PARTIAL] });
+    const final = withPr('final', { labels: ['bug'] });
+    for (const h of [partial, final]) {
+      const setLabels = vi.spyOn(h.tracker, 'setLabels');
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions).toEqual([]);
+      expect(setLabels).not.toHaveBeenCalled();
+    }
+  });
+
+  it('matches the label without regard to case, as GitHub does, and removes it by the name the PR has', async () => {
+    const present = withPr('partial', { labels: ['SDLC:Partial'] });
+    expect((await reconcile(present.ctx, {})).actions).toEqual([]);
+
+    const stale = withPr('final', { labels: ['SDLC:Partial'] });
+    const setLabels = vi.spyOn(stale.tracker, 'setLabels');
+    await reconcile(stale.ctx, {});
+    expect(setLabels.mock.calls).toEqual([[51, [], ['SDLC:Partial']]]);
+  });
+
+  it('labels a merged partial PR as well, and several PRs of one task independently', async () => {
+    const h = setup();
+    h.tracker.seedTask(inReview(1, 'feature', { prs: [{ number: 51, scope: 'partial' }, { number: 52, scope: 'final' }] }));
+    mergedPr(h, 1, 51, { body: 'Related to #1\nScope: partial', mergeSha: B });
+    h.tracker.prs.push({
+      issue: 1, number: 52, url: 'https://github.test/pull/52', merged: false, baseRef: 'main',
+      body: 'Related to #1\nScope: final', labels: [PARTIAL],
+    });
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(result.actions.filter(a => a.kind === 'pr_label').map(a => a.detail)).toEqual([
+      'PR #51: +sdlc:partial',
+      'PR #52: -sdlc:partial',
+    ]);
+    expect(labelsOf(h, 51)).toEqual([PARTIAL]);
+    expect(labelsOf(h, 52)).toEqual([]);
+  });
+
+  it('reports the action on a dry run and writes nothing', async () => {
+    const h = withPr('partial');
+    const setLabels = vi.spyOn(h.tracker, 'setLabels');
+
+    const result = await reconcile(h.ctx, { dryRun: true });
+
+    expect(result.errors).toBe(0);
+    expect(result.actions).toEqual([{ issue: 1, kind: 'pr_label', detail: 'PR #51: +sdlc:partial' }]);
+    expect(setLabels).not.toHaveBeenCalled();
+    expect(h.tracker.writes).toBe(0);
+    expect(labelsOf(h, 51)).toBeUndefined();
+  });
+
+  it('does not touch the PRs of a done task, nor run in a deployments-only reconcile', async () => {
+    const done = setup();
+    done.tracker.seedTask(task(1, 'feature', { phase: 'delivery', status: 'done', waitingOn: 'none', outcome: 'completed' }), { open: false });
+    done.tracker.prs.push({
+      issue: 1, number: 51, url: 'u', merged: true, mergeSha: A, mergedAt: MERGED, baseRef: 'main', body: 'Related to #1\nScope: partial',
+    });
+    expect(kinds((await reconcile(done.ctx, {})).actions)).not.toContain('pr_label');
+
+    const h = withPr('partial');
+    expect(kinds((await reconcile(h.ctx, { only: 'deployments' })).actions)).not.toContain('pr_label');
+    expect(labelsOf(h, 51)).toBeUndefined();
+  });
+
+  it('labels a PR that links several tasks once, not once per task', async () => {
+    const h = setup();
+    h.tracker.seedTask(inReview(1, 'feature'));
+    h.tracker.seedTask(inReview(2, 'feature'));
+    for (const issue of [1, 2]) {
+      h.tracker.prs.push({
+        issue, number: 60, url: 'https://github.test/pull/60', merged: false, baseRef: 'main',
+        body: 'Related to #1, #2\nScope: partial',
+      });
+    }
+    const setLabels = vi.spyOn(h.tracker, 'setLabels');
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(result.actions.filter(a => a.kind === 'pr_label')).toEqual([
+      { issue: 1, kind: 'pr_label', detail: 'PR #60: +sdlc:partial' },
+    ]);
+    expect(setLabels).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a failed label write as an error, and the next run converges', async () => {
+    const h = withPr('partial');
+    h.tracker.failNext('setLabels');
+
+    const result = await reconcile(h.ctx, {});
+
+    expect(result.errors).toBe(1);
+    expect(result.actions).toEqual([{ issue: 1, kind: 'error', detail: expect.stringMatching(/^PR #51: setLabels failed for #51:/) }]);
+    expect(labelsOf(h, 51)).toBeUndefined();
+
+    const again = await reconcile(h.ctx, {});
+    expect(again.actions).toEqual([{ issue: 1, kind: 'pr_label', detail: 'PR #51: +sdlc:partial' }]);
+    expect(labelsOf(h, 51)).toEqual([PARTIAL]);
   });
 });
 

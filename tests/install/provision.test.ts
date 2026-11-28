@@ -17,7 +17,7 @@ import {
   setHooksPath,
   type GitRunner,
 } from '../../src/install/provision.js';
-import { fakeGh } from '../support/fakeGh.js';
+import { fakeGh, labelListArgs, labelListStep } from '../support/fakeGh.js';
 
 const HEADER = `
 version: 1
@@ -44,14 +44,14 @@ const PROTECTION_BODY = {
 };
 
 describe('ensureLabels', () => {
-  const LIST = ['label', 'list', '--repo', 'acme/shop', '--json', 'name', '--limit', '500'];
+  const LIST = labelListArgs();
   const create = (name: string, color: string, description: string): string[] => [
     'label', 'create', name, '--repo', 'acme/shop', '--color', color, '--description', description,
   ];
 
   it('creates sdlc:task, sdlc:partial and one type:<id> label per enabled type, with these exact arguments', async () => {
     const run = fakeGh([
-      { match: ['label', 'list'], stdout: '[]' },
+      labelListStep([]),
       { match: ['label', 'create'] },
       { match: ['label', 'create'] },
       { match: ['label', 'create'] },
@@ -80,21 +80,21 @@ describe('ensureLabels', () => {
       phases: [intake, planning, implementation, review, delivery]
       ends_on: merge
 `);
-    const run = fakeGh([{ match: ['label', 'list'], stdout: '[]' }, ...Array.from({ length: 4 }, () => ({ match: ['label', 'create'] }))]);
+    const run = fakeGh([labelListStep([]), ...Array.from({ length: 4 }, () => ({ match: ['label', 'create'] }))]);
     const { created } = await ensureLabels(run, cfg, { dryRun: false });
     expect(created).toEqual(['sdlc:task', 'sdlc:partial', 'type:tooling', 'type:infra-change']);
   });
 
   it('creates only the missing labels and never edits an existing one', async () => {
     const run = fakeGh([
-      { match: ['label', 'list'], stdout: JSON.stringify([{ name: 'bug' }, { name: 'sdlc:task' }, { name: 'type:tooling' }]) },
+      labelListStep(['bug', 'sdlc:task', 'type:tooling']),
       { match: ['label', 'create'] },
       { match: ['label', 'create'] },
     ]);
     const result = await ensureLabels(run, cfgOf(), { dryRun: false });
     expect(result).toEqual({ created: ['sdlc:partial', 'type:analysis'], existing: ['sdlc:task', 'type:tooling'] });
     expect(run.calls.map(args => args.slice(0, 3))).toEqual([
-      ['label', 'list', '--repo'],
+      ['api', 'repos/acme/shop/labels?per_page=100', '--paginate'],
       ['label', 'create', 'sdlc:partial'],
       ['label', 'create', 'type:analysis'],
     ]);
@@ -107,10 +107,7 @@ describe('ensureLabels', () => {
 
   it('matches label names the way GitHub does, ignoring case', async () => {
     const run = fakeGh([
-      {
-        match: ['label', 'list'],
-        stdout: JSON.stringify([{ name: 'SDLC:Task' }, { name: 'sdlc:partial' }, { name: 'Type:Tooling' }, { name: 'type:analysis' }]),
-      },
+      labelListStep(['SDLC:Task', 'sdlc:partial', 'Type:Tooling', 'type:analysis']),
     ]);
     const result = await ensureLabels(run, cfgOf(), { dryRun: false });
     expect(result.created).toEqual([]);
@@ -119,15 +116,41 @@ describe('ensureLabels', () => {
   });
 
   it('on a dry run reads the labels, reports what it would create and creates nothing', async () => {
-    const run = fakeGh([{ match: ['label', 'list'], stdout: JSON.stringify([{ name: 'sdlc:task' }]) }]);
+    const run = fakeGh([labelListStep(['sdlc:task'])]);
     const result = await ensureLabels(run, cfgOf(), { dryRun: true });
     expect(result).toEqual({ created: ['sdlc:partial', 'type:tooling', 'type:analysis'], existing: ['sdlc:task'] });
     expect(run.calls).toEqual([LIST]);
   });
 
+  it('reads every label of the repository through the paginated API, not a first page of 500', async () => {
+    const run = fakeGh([labelListStep([])]);
+    await ensureLabels(run, cfgOf(), { dryRun: true });
+    expect(run.calls).toEqual([['api', 'repos/acme/shop/labels?per_page=100', '--paginate', '--jq', '.[].name']]);
+  });
+
+  it('labels beyond 500 are seen', async () => {
+    const others = Array.from({ length: 596 }, (_, i) => `label-${i + 1}`);
+    // The kit's labels sit past the 500th, where `gh label list --limit 500` stopped reading.
+    const all = [...others, 'sdlc:task', 'sdlc:partial', 'type:tooling', 'type:analysis'];
+    expect(all).toHaveLength(600);
+    const run = fakeGh([labelListStep(all)]);
+    const result = await ensureLabels(run, cfgOf(), { dryRun: true });
+    expect(result.created).toEqual([]);
+    expect(result.existing).toEqual(['sdlc:task', 'sdlc:partial', 'type:tooling', 'type:analysis']);
+    expect(run.calls).toHaveLength(1);
+  });
+
+  it('ignores blank lines and Windows line ends in the listing', async () => {
+    const run = fakeGh([
+      { match: ['api', 'repos/acme/shop/labels?per_page=100'], stdout: '\nsdlc:task\r\n\r\nsdlc:partial\r\ntype:tooling\n type:analysis \n' },
+    ]);
+    const result = await ensureLabels(run, cfgOf(), { dryRun: true });
+    expect(result.created).toEqual([]);
+  });
+
   it('treats a label that appeared since the listing as existing, and fails on any other error', async () => {
     const raced = fakeGh([
-      { match: ['label', 'list'], stdout: '[]' },
+      labelListStep([]),
       { match: ['label', 'create'], code: 1, stderr: 'label with name "sdlc:task" already exists; use `--force` to update its color and description' },
       { match: ['label', 'create'] },
       { match: ['label', 'create'] },
@@ -138,7 +161,7 @@ describe('ensureLabels', () => {
     expect(result.created).toEqual(['sdlc:partial', 'type:tooling', 'type:analysis']);
 
     const broken = fakeGh([
-      { match: ['label', 'list'], stdout: '[]' },
+      labelListStep([]),
       { match: ['label', 'create'], code: 1, stderr: 'HTTP 403: Resource not accessible' },
     ]);
     await expect(ensureLabels(broken, cfgOf(), { dryRun: false })).rejects.toBeInstanceOf(GhError);
@@ -169,13 +192,13 @@ describe('ensureLabels', () => {
 
   it('accepts a type id whose label is exactly 50 characters', async () => {
     const id = `a${'b'.repeat(44)}`; // "type:" + 45 characters = 50
-    const run = fakeGh([{ match: ['label', 'list'], stdout: '[]' }, ...Array.from({ length: 4 }, () => ({ match: ['label', 'create'] }))]);
+    const run = fakeGh([labelListStep([]), ...Array.from({ length: 4 }, () => ({ match: ['label', 'create'] }))]);
     const { created } = await ensureLabels(run, customType(id), { dryRun: false });
     expect(created).toContain(`type:${id}`);
   });
 
   it('fails when the labels cannot be listed', async () => {
-    const run = fakeGh([{ match: ['label', 'list'], code: 1, stderr: 'gh: Not Found (HTTP 404)' }]);
+    const run = fakeGh([{ ...labelListStep([]), code: 1, stderr: 'gh: Not Found (HTTP 404)' }]);
     await expect(ensureLabels(run, cfgOf(), { dryRun: false })).rejects.toThrow(/404/);
   });
 });

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createGitRunner, type GitRunner } from '../../src/install/provision.js';
-import { checkoutOf, mainRootOf, realPathOf } from '../../src/hooks/resolve.js';
+import { cachedCheckoutOf, checkoutOf, mainRootOf, realPathOf, type CheckoutCache } from '../../src/hooks/resolve.js';
 import { CASE_INSENSITIVE_FS, recased } from '../support/caseFs.js';
 import { createTestRepo, type TestRepo } from '../support/gitRepo.js';
 
@@ -169,5 +169,80 @@ describe('mainRootOf', () => {
 
   it('falls back to the checkout root when the common directory is not a `.git` directory (a bare repository)', () => {
     expect(mainRootOf({ root: '/work/wt', commonDir: '/srv/shop.git' })).toBe('/work/wt');
+  });
+});
+
+describe('cachedCheckoutOf', () => {
+  /** The real git, counting its calls. */
+  function counting(): { gitFor: (cwd: string) => GitRunner; calls: () => number } {
+    let calls = 0;
+    return {
+      gitFor: cwd => {
+        const git = createGitRunner(cwd);
+        return args => {
+          calls += 1;
+          return git(args);
+        };
+      },
+      calls: () => calls,
+    };
+  }
+
+  it('resolves a directory once for any number of askers, concurrent or later', async () => {
+    const { gitFor, calls } = counting();
+    const cache: CheckoutCache = new Map();
+
+    const [a, b] = await Promise.all([cachedCheckoutOf(cache, repo.root, gitFor), cachedCheckoutOf(cache, repo.root, gitFor)]);
+    const c = await cachedCheckoutOf(cache, repo.root, gitFor);
+
+    expect(calls()).toBe(2); // one resolution: `rev-parse` and `symbolic-ref`, not three of them
+    expect(b).toBe(a);
+    expect(c).toBe(a);
+    expect(a).toEqual(await checkoutOf(repo.root, gitFor));
+  });
+
+  it('gives the same answer as checkoutOf, for a worktree too', async () => {
+    repo.git('worktree', 'add', '-q', '-b', 'task/7-x', '.worktrees/7-x');
+    const cache: CheckoutCache = new Map();
+
+    const cached = await cachedCheckoutOf(cache, join(repo.root, '.worktrees', '7-x', 'src'), gitFor);
+
+    expect(cached).toEqual(await checkoutOf(join(repo.root, '.worktrees', '7-x', 'src'), gitFor));
+    expect(cached?.issue).toBe(7);
+  });
+
+  it('remembers that a directory is in no checkout', async () => {
+    plain = mkdtempSync(join(tmpdir(), 'sdlc-plain-'));
+    const { gitFor, calls } = counting();
+    const cache: CheckoutCache = new Map();
+
+    expect(await cachedCheckoutOf(cache, plain, gitFor)).toBeUndefined();
+    expect(await cachedCheckoutOf(cache, plain, gitFor)).toBeUndefined();
+
+    expect(calls()).toBe(1);
+  });
+
+  it('shares the answer between directories that git would resolve through the same existing ancestor', async () => {
+    const { gitFor, calls } = counting();
+    const cache: CheckoutCache = new Map();
+
+    const first = await cachedCheckoutOf(cache, join(repo.root, 'src', 'a', 'b'), gitFor);
+    const second = await cachedCheckoutOf(cache, join(repo.root, 'src', 'c'), gitFor);
+    const third = await cachedCheckoutOf(cache, join(repo.root, 'README.md', 'x'), gitFor);
+
+    expect(second).toBe(first);
+    expect(third?.root).toBe(first?.root);
+    expect(calls()).toBe(2);
+  });
+
+  it('keeps different checkouts apart', async () => {
+    repo.git('worktree', 'add', '-q', '-b', 'task/7-x', '.worktrees/7-x');
+    const cache: CheckoutCache = new Map();
+
+    const main = await cachedCheckoutOf(cache, repo.root, gitFor);
+    const worktree = await cachedCheckoutOf(cache, join(repo.root, '.worktrees', '7-x'), gitFor);
+
+    expect(main?.branch).toBe('main');
+    expect(worktree?.branch).toBe('task/7-x');
   });
 });

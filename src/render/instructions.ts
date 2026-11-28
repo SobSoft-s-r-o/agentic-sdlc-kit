@@ -57,9 +57,50 @@ export type RenderData = {
   roles: RenderRole[];
 };
 
+/** The kit's name on the npm registry. */
+export const KIT_PACKAGE = 'agentic-sdlc-kit';
 const KIT_REPOSITORY = 'github:SobSoft-s-r-o/agentic-sdlc-kit';
-/** The kit's git repository, where `kit_ref` must exist (`doctor` checks it with `git ls-remote`). */
+/** The kit's git repository, where a branch or commit `kit_ref` must exist (`doctor` checks it with `git ls-remote`). */
 export const KIT_GIT_URL = 'https://github.com/SobSoft-s-r-o/agentic-sdlc-kit.git';
+
+/** `v1.2.3` or `v1.2.3-rc.1`: a release tag. */
+const RELEASE_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$/;
+
+/** The first version on the npm registry; `v0.1.0` and `v0.2.0` are git-only tags. */
+const FIRST_NPM_VERSION: readonly [number, number, number] = [0, 3, 0];
+
+/**
+ * The npm version a release-tag `kit_ref` names (`v1.2.3` is `1.2.3`); `undefined` for a branch, a commit, anything
+ * else, and a release tag below `v0.3.0`, which was never published (a prerelease sorts below its release, so
+ * `v0.3.0-rc.1` is below it, and `v0.4.0-rc.1` is not).
+ */
+export function releaseVersion(ref: string): string | undefined {
+  const match = RELEASE_TAG.exec(ref);
+  if (match === null) return undefined;
+  const core = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const prerelease = match[4] !== undefined;
+  for (const [index, first] of FIRST_NPM_VERSION.entries()) {
+    const part = core[index] ?? 0;
+    if (part !== first) return part > first ? ref.slice(1) : undefined;
+  }
+  return prerelease ? undefined : ref.slice(1);
+}
+
+/** A release tag from before the registry (`v0.1.0`, `v0.2.0`): a version, but one that only exists as a git tag. */
+export function isGitOnlyReleaseTag(ref: string): boolean {
+  return RELEASE_TAG.test(ref) && releaseVersion(ref) === undefined;
+}
+
+/**
+ * How the kit is run and installed for `kit_ref`. A release tag from `v0.3.0` on uses the registry (`agentic-sdlc-kit@1.2.3`),
+ * so the install needs no build from git; a branch, a commit and the git-only tags (`v0.1.0`, `v0.2.0`) use the repository
+ * (`github:...#<ref>`).
+ */
+export function kitCommand(ref: string): { npx: string; source: 'npm' | 'github' } {
+  const version = releaseVersion(ref);
+  const spec = version === undefined ? `${KIT_REPOSITORY}#${ref}` : `${KIT_PACKAGE}@${version}`;
+  return { npx: `npx -y ${spec}`, source: version === undefined ? 'github' : 'npm' };
+}
 
 /** How each end condition reads after "Ends when". */
 function endsOnText(endsOn: EndsOn, defaultBranch: string): string {
@@ -124,7 +165,7 @@ export function renderData(cfg: Config, roles: readonly RenderRole[] = builtinRo
   );
   return {
     cfg,
-    kit: { ref: cfg.kitRef, npx: `npx -y ${KIT_REPOSITORY}#${cfg.kitRef}` },
+    kit: { ref: cfg.kitRef, npx: kitCommand(cfg.kitRef).npx },
     enforce: cfg.mode === 'enforce',
     mergeOwnerOnly: cfg.mergePolicy === 'owner_only',
     defaultBranch: cfg.github.defaultBranch,

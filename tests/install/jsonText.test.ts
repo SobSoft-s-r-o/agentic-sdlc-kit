@@ -76,6 +76,31 @@ describe('appendEntry and removeEntry', () => {
     expect(out).toBe('{\n    "a": 1,\n    "b": 2,\n    "c":4\n}');
   });
 
+  // The array under "k" of `{"k": <array>}`.
+  const arrayOf = (array: string): { text: string; node: ArrayNode } => {
+    const text = `{"k": ${array}}`;
+    return { text, node: locate(scanJsonObject(text), ['k']).leaf?.value as ArrayNode };
+  };
+  const json = (value: unknown) => (multiline: boolean, indent: string) =>
+    multiline ? JSON.stringify(value, null, 2).split('\n').join(`\n${indent}`) : JSON.stringify(value);
+
+  it('keeps a new entry on one line when the existing entries are each on one line', () => {
+    const { text, node } = arrayOf('[\n  {"a":1},\n  {"b":2}\n]');
+    const out = applySplice(text, appendEntry(text, node, LF, true, json({ c: [3] })));
+    expect(out).toBe('{"k": [\n  {"a":1},\n  {"b":2},\n  {"c":[3]}\n]}');
+  });
+
+  it('spreads a new entry over lines when an existing one is spread over lines', () => {
+    const { text, node } = arrayOf('[\n  {"a":1},\n  {\n    "b": 2\n  }\n]');
+    const out = applySplice(text, appendEntry(text, node, LF, true, json({ c: 3 })));
+    expect(out).toBe('{"k": [\n  {"a":1},\n  {\n    "b": 2\n  },\n  {\n    "c": 3\n  }\n]}');
+  });
+
+  it('keeps a new entry on one line in a one-line array', () => {
+    const { text, node } = arrayOf('[{"a":1}]');
+    expect(applySplice(text, appendEntry(text, node, LF, true, json({ b: 2 })))).toBe('{"k": [{"a":1}, {"b":2}]}');
+  });
+
   it('appends on the same line when the entries share one', () => {
     const text = '{"a":1, "b":2}';
     const root = scanJsonObject(text);

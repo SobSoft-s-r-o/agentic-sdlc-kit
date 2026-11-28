@@ -35,6 +35,63 @@ describe('FakeTracker.authenticatedLogin', () => {
   });
 });
 
+describe('FakeTracker with an undefined login', () => {
+  const marker = `${STATE_MARKER}\n\`\`\`json\n{}\n\`\`\``;
+
+  it('answers undefined, as the Actions GITHUB_TOKEN does', async () => {
+    const tracker = new FakeTracker();
+    tracker.login = undefined;
+    await expect(tracker.authenticatedLogin()).resolves.toBeUndefined();
+  });
+
+  it('state comments of an undefined login are not trusted', async () => {
+    const tracker = new FakeTracker();
+    tracker.seedTask(task(40), { labels: ['sdlc:task'] });
+    const own = tracker.comments.find(c => c.issue === 40)!;
+    expect(own.author).toBe('sdlc-bot');
+    await expect(tracker.getTask(40)).resolves.toMatchObject({ issue: 40 });
+
+    // The same comment, once the tool no longer knows who it writes as: nobody vouches for it.
+    tracker.login = undefined;
+    await expect(tracker.getTask(40)).rejects.toThrow(/no state comment/);
+    expect(await tracker.listTrackedTasks()).toEqual([]);
+    expect(await tracker.listUntracked()).toEqual([{ issue: 40, title: 'Do the thing', reason: 'missing state comment' }]);
+  });
+
+  it('still trusts the state comment of an owner or an agent, and of the Actions bot', async () => {
+    const tracker = new FakeTracker();
+    tracker.owners = ['shop-owner'];
+    tracker.agents = ['agent-bot'];
+    tracker.login = undefined;
+    for (const [issue, author] of [[41, 'shop-owner'], [42, 'Agent-Bot'], [43, 'github-actions[bot]']] as const) {
+      tracker.seedTask(task(issue), { labels: ['sdlc:task'] });
+      tracker.comments.find(c => c.issue === issue)!.author = author;
+    }
+    expect((await tracker.listTrackedTasks()).map(t => t.issue)).toEqual([41, 42, 43]);
+  });
+
+  it('comments as the Actions bot, whose state comment it then reads back', async () => {
+    const tracker = new FakeTracker();
+    tracker.login = undefined;
+    const { number } = await tracker.createIssue('T', '', ['sdlc:task']);
+    await tracker.writeState(number, task(number));
+    const posted = await tracker.postComment(number, 'hello');
+    expect(tracker.comments.map(c => c.author)).toEqual(['github-actions[bot]', 'github-actions[bot]']);
+    expect(tracker.comments.find(c => c.id === posted.id)!.author).toBe('github-actions[bot]');
+    await expect(tracker.getTask(number)).resolves.toMatchObject({ issue: number });
+    tracker.seedTask(task(50), { labels: ['sdlc:task'] });
+    expect(tracker.comments.find(c => c.issue === 50)!.author).toBe('github-actions[bot]');
+  });
+
+  it('does not trust a forged state comment either', async () => {
+    const tracker = new FakeTracker();
+    tracker.login = undefined;
+    const { number } = await tracker.createIssue('T', '', ['sdlc:task']);
+    tracker.seedComment(number, { body: marker, author: 'intruder' });
+    await expect(tracker.getTask(number)).rejects.toThrow(/no state comment/);
+  });
+});
+
 describe('FakeTracker.failNext', () => {
   it('rejects exactly one call', async () => {
     const tracker = new FakeTracker();
@@ -289,7 +346,7 @@ describe('FakeTracker state', () => {
       tracker.seedTask(task(31), { labels: ['sdlc:task'] });
       tracker.seedTask(task(32), { labels: ['sdlc:task'] });
       tracker.comments.find(c => c.issue === 30)!.author = 'SHOP-OWNER';
-      tracker.comments.find(c => c.issue === 31)!.author = tracker.login.toUpperCase();
+      tracker.comments.find(c => c.issue === 31)!.author = tracker.login!.toUpperCase();
       tracker.comments.find(c => c.issue === 32)!.author = 'GitHub-Actions[bot]';
       expect((await tracker.listTrackedTasks()).map(t => t.issue)).toEqual([30, 31, 32]);
     });
@@ -322,7 +379,7 @@ describe('FakeTracker state', () => {
       const tracker = new FakeTracker();
       tracker.seedTask(task(30), { labels: ['sdlc:task'] });
       const older = tracker.comments.find(c => c.issue === 30)!;
-      const newer = tracker.seedComment(30, { body: older.body, author: tracker.login });
+      const newer = tracker.seedComment(30, { body: older.body, author: tracker.login! });
       // `older` is created first but updated last.
       older.updatedAt = '2030-01-01T00:00:00.000Z';
       expect((await tracker.getTask(30)).stateCommentId).toBe(older.id);
@@ -465,9 +522,39 @@ describe('FakeTracker PRs and deployments', () => {
     );
     const prs = await tracker.listTaskPrs(1);
     expect(prs).toEqual([
-      { number: 10, url: 'u10', merged: true, mergeSha: 'abc', mergedAt: NOW, baseRef: 'main', body: 'Related to #1' },
+      { number: 10, url: 'u10', merged: true, mergeSha: 'abc', mergedAt: NOW, baseRef: 'main', body: 'Related to #1', labels: [] },
     ]);
     expect(await tracker.listTaskPrs(404)).toEqual([]);
+  });
+
+  it('carries the labels of a PR, and setLabels changes them by the PR number (PRs share the issue label API)', async () => {
+    const tracker = new FakeTracker();
+    tracker.prs.push(
+      { issue: 1, number: 10, url: 'u10', merged: false, baseRef: 'main', body: 'Related to #1', labels: ['bug'] },
+      { issue: 1, number: 11, url: 'u11', merged: false, baseRef: 'main', body: 'Related to #1' },
+    );
+    expect((await tracker.getPr(10))?.labels).toEqual(['bug']);
+    expect((await tracker.getPr(11))?.labels).toEqual([]);
+
+    await tracker.setLabels(10, ['sdlc:partial'], ['bug']);
+    await tracker.setLabels(11, ['sdlc:partial'], []);
+    expect((await tracker.listTaskPrs(1)).map(pr => pr.labels)).toEqual([['sdlc:partial'], ['sdlc:partial']]);
+    expect(tracker.writes).toBe(2);
+
+    await expect(tracker.setLabels(99, ['x'], [])).rejects.toThrow(/#99/);
+  });
+
+  it('carries bodyEditedAt of a PR, in a list and in a direct read, and leaves it out when unset', async () => {
+    const tracker = new FakeTracker();
+    tracker.prs.push(
+      { issue: 1, number: 10, url: 'u10', merged: false, baseRef: 'main', body: 'Related to #1', bodyEditedAt: NOW },
+      { issue: 1, number: 11, url: 'u11', merged: false, baseRef: 'main', body: 'Related to #1' },
+    );
+    const [edited, plain] = await tracker.listTaskPrs(1);
+    expect(edited!.bodyEditedAt).toBe(NOW);
+    expect(plain).not.toHaveProperty('bodyEditedAt');
+    expect((await tracker.getPr(10))?.bodyEditedAt).toBe(NOW);
+    expect(await tracker.getPr(11)).not.toHaveProperty('bodyEditedAt');
   });
 
   it('creates deployments with incrementing ids and a fake clock, newest first when listed', async () => {

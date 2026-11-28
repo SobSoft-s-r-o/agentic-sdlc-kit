@@ -165,7 +165,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
     ((): CommandContext => {
       const { cfg, repoRoot, mainRoot } = environment();
       return {
-        tracker: new GitHubTracker(defaultGhRunner, cfg, { repoRoot }),
+        tracker: new GitHubTracker(defaultGhRunner, cfg, { repoRoot, warn: text => err(`warning: ${text}`) }),
         cfg,
         now: () => new Date().toISOString(),
         out: data => out(typeof data === 'string' ? data : JSON.stringify(data, null, 2)),
@@ -213,7 +213,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
         makeCommandContext: async (): Promise<CommandContext> => {
           const { cfg } = environment();
           return {
-            tracker: new GitHubTracker(defaultGhRunner, cfg, { repoRoot: roots.mainRoot }),
+            tracker: new GitHubTracker(defaultGhRunner, cfg, { repoRoot: roots.mainRoot, warn: text => err(`warning: ${text}`) }),
             cfg,
             now,
             out: data => out(typeof data === 'string' ? data : JSON.stringify(data, null, 2)),
@@ -324,7 +324,10 @@ export function buildProgram(deps: CliDeps = {}): Command {
           const path = configOption === undefined ? join(root, CONFIG_FILE) : resolve(cwd, configOption);
           return existsSync(path) ? loadConfig(path) : undefined;
         },
-        makeTracker: (cfg, root) => new GitHubTracker(defaultGhRunner, cfg, { repoRoot: root }),
+        // With `--config` the one file decides, for every root; without it the mode comes from the main checkout.
+        explicitConfig: configOption !== undefined,
+        // A skipped read is a warning on stderr, as in the command contexts: the hook's stdout is its answer to the harness.
+        makeTracker: (cfg, root) => new GitHubTracker(defaultGhRunner, cfg, { repoRoot: root, warn: text => err(`warning: ${text}`) }),
         gitFor: dir => createGitRunner(dir, { timeoutMs: GIT_TIMEOUT_MS }),
         now: () => new Date().toISOString(),
         spawnSync: root => {

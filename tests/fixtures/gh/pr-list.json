@@ -1,5 +1,6 @@
 [
   {
+    "id": "PR_kwDOAcme31",
     "number": 31,
     "url": "https://github.com/acme/shop/pull/31",
     "mergedAt": "2026-11-21T14:00:00Z",
@@ -7,17 +8,28 @@
       "oid": "1111111111111111111111111111111111111111"
     },
     "baseRefName": "main",
-    "body": "Related to #12\nScope: partial\nTargets: web"
+    "body": "Related to #12\nScope: partial\nTargets: web",
+    "labels": [
+      {
+        "id": "LA_kwDOAcme01",
+        "name": "sdlc:partial",
+        "description": "A partial PR landed; the task stays open",
+        "color": "fbca04"
+      }
+    ]
   },
   {
+    "id": "PR_kwDOAcme32",
     "number": 32,
     "url": "https://github.com/acme/shop/pull/32",
     "mergedAt": null,
     "mergeCommit": null,
     "baseRefName": "main",
-    "body": "Related to #12\nScope: final\nTargets: web, api"
+    "body": "Related to #12\nScope: final\nTargets: web, api",
+    "labels": []
   },
   {
+    "id": "PR_kwDOAcme33",
     "number": 33,
     "url": "https://github.com/acme/shop/pull/33",
     "mergedAt": "2026-11-22T09:00:00Z",
@@ -25,17 +37,21 @@
       "oid": "3333333333333333333333333333333333333333"
     },
     "baseRefName": "main",
-    "body": "Closes #12\n\nThis only mentions the issue with a closing keyword."
+    "body": "Closes #12\n\nThis only mentions the issue with a closing keyword.",
+    "labels": []
   },
   {
+    "id": "PR_kwDOAcme34",
     "number": 34,
     "url": "https://github.com/acme/shop/pull/34",
     "mergedAt": null,
     "mergeCommit": null,
     "baseRefName": "main",
-    "body": "Follow-up to the work in Related to #120.\nRelated to #120"
+    "body": "Follow-up to the work in Related to #120.\nRelated to #120",
+    "labels": []
   },
   {
+    "id": "PR_kwDOAcme35",
     "number": 35,
     "url": "https://github.com/acme/shop/pull/35",
     "mergedAt": "2026-11-23T08:30:00Z",
@@ -43,6 +59,20 @@
       "oid": "5555555555555555555555555555555555555555"
     },
     "baseRefName": "main",
-    "body": "Related to #12, #14\nScope: final"
+    "body": "Related to #12, #14\nScope: final",
+    "labels": [
+      {
+        "id": "LA_kwDOAcme02",
+        "name": "bug",
+        "description": "Something isn't working",
+        "color": "d73a4a"
+      },
+      {
+        "id": "LA_kwDOAcme03",
+        "name": "sdlc:task",
+        "description": "Tracked by agentic-sdlc-kit",
+        "color": "0e8a16"
+      }
+    ]
   }
 ]

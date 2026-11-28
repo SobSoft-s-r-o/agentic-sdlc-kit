@@ -3,3 +3,13 @@ dist/
 .sdlc/cache/
 .worktrees/
 .superpowers/
+
+# sdlc:begin
+.sdlc/cache/
+.worktrees/
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+# sdlc:end

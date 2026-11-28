@@ -16,7 +16,7 @@ import type { GitRunner } from '../../src/install/provision.js';
 import { graphifyInstall, superpowersInstall } from '../../src/install/stack.js';
 import { renderAll } from '../../src/render/plan.js';
 import { scanFileName } from '../../src/secrets/scan.js';
-import { fakeGh, type FakeGh, type FakeGhStep } from '../support/fakeGh.js';
+import { fakeGh, labelListStep, type FakeGh, type FakeGhStep } from '../support/fakeGh.js';
 import { memoryFs, type MemoryFs } from '../support/memoryFs.js';
 import { githubToken } from '../support/secrets.js';
 import { NoStateCommentError, type TrackedTask, type Tracker } from '../../src/tracker/types.js';
@@ -124,7 +124,7 @@ function ghScript(cfg: Config, over: Partial<Record<GhSlot, FakeGhStep | null>> 
     over.repo ?? { match: ['repo', 'view'], stdout: JSON.stringify({ nameWithOwner: 'acme/shop', defaultBranchRef: { name: 'main' } }) },
     // `null`: a config without a board number, which a dry run does not query.
     ...(over.board === null ? [] : [over.board ?? boardOf(cfg)]),
-    over.labels ?? { match: ['label', 'list'], stdout: JSON.stringify(LABELS.map(name => ({ name }))) },
+    over.labels ?? labelListStep(LABELS),
     ...(cfg.stack.actions ? [over.secrets ?? { match: ['secret', 'list'], stdout: JSON.stringify([{ name: 'SDLC_TOKEN' }, { name: 'OTHER' }]) }] : []),
     over.security ?? { match: ['api', 'repos/acme/shop', '--jq'], stdout: SECURITY_ON },
   ];
@@ -218,11 +218,12 @@ interface EnvOptions {
   /** The commands `which` finds. */
   installed?: string[];
   /**
-   * What `exec` answers per command; a thrown value rejects. `git` is `git ls-remote` of kit.ref (found by default), `claude`
-   * is `claude mcp list`. The others are the list commands of the stack and MCP checks, each answering what a healthy machine does.
+   * What `exec` answers per command; a thrown value rejects. `git` is `git ls-remote` of kit.ref for a branch (found by default),
+   * `npm` is `npm view` of kit.ref for a release tag (published by default), `claude` is `claude mcp list`. The others are the list commands of the stack and MCP checks, each answering what a healthy machine does.
    */
   exec?: {
     npx?: ExecResult | Error;
+    npm?: ExecResult | Error;
     claude?: ExecResult | Error;
     git?: ExecResult | Error;
     claudePlugins?: ExecResult | Error;
@@ -317,9 +318,11 @@ function harness(options: EnvOptions = {}): Harness {
                 ? (answers.graphify ?? stdoutOf('graphify 0.9.122\n'))
                 : cmd === 'npx'
                   ? (answers.npx ?? { stdout: '', code: 1, stderr: 'npx: not found' })
-                  : cmd === 'git'
-                    ? (answers.git ?? { stdout: 'abc123\trefs/tags/v0.1.0\n', code: 0, stderr: '' })
-                    : undefined;
+                  : cmd === 'npm'
+                    ? (answers.npm ?? { stdout: `${JSON.stringify(args[1]?.replace(/^.*@/, ''))}\n`, code: 0, stderr: '' })
+                    : cmd === 'git'
+                      ? (answers.git ?? { stdout: 'abc123\trefs/tags/v0.1.0\n', code: 0, stderr: '' })
+                      : undefined;
       if (answer === undefined) throw new Error(`unexpected exec: ${cmd}`);
       if (answer instanceof Error) throw answer;
       return answer;
@@ -657,7 +660,7 @@ describe('runDoctor', () => {
     expect(notOk(checks)).toEqual([]);
     // read-only: the board is only planned (dry run) and nothing is written to GitHub
     expect(mutations(h.gh)).toEqual([]);
-    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'label', 'secret', 'api']);
+    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'api', 'secret', 'api']);
   });
 
   it('never prints the value of an environment variable', async () => {
@@ -833,7 +836,15 @@ describe('runDoctor', () => {
   });
 
   describe('kit.ref', () => {
-    it('is ok when git ls-remote finds the ref in the kit repository, asked without a prompt and with a timeout', async () => {
+    const NPM_E404 = {
+      stdout: '{\n  "error": {\n    "code": "E404",\n    "summary": "No match found for version 0.3.0"\n  }\n}\n',
+      code: 1,
+      stderr: "npm error code E404\nnpm error 404 No match found for version 0.3.0\n",
+    };
+    const npmCalls = (h: Harness): Array<[string, string[]]> => h.execCalls.filter(([command]) => command === 'npm');
+    const gitCalls = (h: Harness): Array<[string, string[]]> => h.execCalls.filter(([command]) => command === 'git');
+
+    it('is ok when git ls-remote finds a branch in the kit repository, asked without a prompt and with a timeout', async () => {
       const h = harness({ cfg: cfgOf(`${CONFIG}kit_ref: main\n`) });
       const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
       expect(check).toEqual({ id: 'kit.ref', status: 'ok', message: "kit_ref main exists in the kit's repository" });
@@ -841,29 +852,31 @@ describe('runDoctor', () => {
       expect(h.execCalls[index]).toEqual(['git', ['ls-remote', '--exit-code', 'https://github.com/SobSoft-s-r-o/agentic-sdlc-kit.git', 'main']]);
       expect(h.execEnvs[index]?.GIT_TERMINAL_PROMPT).toBe('0');
       expect(h.execEnvs[index]?.GIT_SSH_COMMAND).toBe('ssh -o BatchMode=yes');
+      expect(npmCalls(h)).toEqual([]);
     });
 
     it('keeps a GIT_SSH_COMMAND the owner set', async () => {
-      const h = harness({ env: { GIT_SSH_COMMAND: 'ssh -i ~/.ssh/other' } });
+      const h = harness({ cfg: cfgOf(`${CONFIG}kit_ref: main\n`), env: { GIT_SSH_COMMAND: 'ssh -i ~/.ssh/other' } });
       await runDoctor(h.env, h.cfg);
       const index = h.execCalls.findIndex(([command]) => command === 'git');
       expect(h.execEnvs[index]?.GIT_SSH_COMMAND).toBe('ssh -i ~/.ssh/other');
     });
 
-    it('warns when the ref does not exist, and says how to fix it', async () => {
-      const h = harness({ exec: { git: { stdout: '', code: 2, stderr: '' } } });
+    it('warns when a branch does not exist, and says how to fix it', async () => {
+      const h = harness({ cfg: cfgOf(`${CONFIG}kit_ref: release/9\n`), exec: { git: { stdout: '', code: 2, stderr: '' } } });
       const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
       expect(check.status).toBe('warn');
-      expect(check.message).toMatch(/^kit_ref v\d+\.\d+\.\d+\S* does not exist in https:\/\/github\.com\/SobSoft-s-r-o\/agentic-sdlc-kit\.git/);
-      expect(check.fix).toContain('main until a release tag exists');
+      expect(check.message).toMatch(/^kit_ref release\/9 does not exist in https:\/\/github\.com\/SobSoft-s-r-o\/agentic-sdlc-kit\.git/);
+      expect(check.fix).toContain('main');
+      expect(check.fix).toContain('v0.3.0 or later');
     });
 
-    it('warns "cannot verify" on a network failure or a timeout, never fails', async () => {
+    it('warns "cannot verify" on a network failure or a timeout of a branch lookup, never fails', async () => {
       for (const git of [
         { stdout: '', code: 128, stderr: 'fatal: unable to access: Could not resolve host: github.com\n' },
         new Error('git timed out after 15s'),
       ]) {
-        const check = byId(await runDoctor(harness({ exec: { git } }).env, cfgOf(CONFIG)), 'kit.ref');
+        const check = byId(await runDoctor(harness({ cfg: cfgOf(`${CONFIG}kit_ref: main\n`), exec: { git } }).env, cfgOf(`${CONFIG}kit_ref: main\n`)), 'kit.ref');
         expect(check.status).toBe('warn');
         expect(check.message).toMatch(/^cannot verify kit_ref /);
       }
@@ -872,7 +885,95 @@ describe('runDoctor', () => {
     it('does not look up a commit sha', async () => {
       const h = harness({ cfg: cfgOf(`${CONFIG}kit_ref: 0123abcd\n`) });
       expect(byId(await runDoctor(h.env, h.cfg), 'kit.ref').status).toBe('ok');
-      expect(h.execCalls.some(([command]) => command === 'git')).toBe(false);
+      expect(gitCalls(h)).toEqual([]);
+      expect(npmCalls(h)).toEqual([]);
+    });
+
+    describe('a release tag below v0.3.0 (git-only, never on npm)', () => {
+      it.each(['v0.1.0', 'v0.2.0', 'v0.3.0-rc.1'])('%s is looked up in git, never npm, and does not fail; it says to move to v0.3.0 or later', async ref => {
+        const cfg = cfgOf(`${CONFIG}kit_ref: ${ref}\n`);
+        const h = harness({ cfg });
+        const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
+        expect(check.status).toBe('ok');
+        expect(check.message).toContain(`kit_ref ${ref} exists in the kit's repository`);
+        expect(check.message).toContain('v0.3.0 or later');
+        expect(gitCalls(h)).toEqual([['git', ['ls-remote', '--exit-code', 'https://github.com/SobSoft-s-r-o/agentic-sdlc-kit.git', ref]]]);
+        expect(npmCalls(h)).toEqual([]);
+      });
+
+      it('warns, and never fails, when the tag is not in the repository', async () => {
+        const cfg = cfgOf(`${CONFIG}kit_ref: v0.2.0\n`);
+        const h = harness({ cfg, exec: { git: { stdout: '', code: 2, stderr: '' } } });
+        const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
+        expect(check.status).toBe('warn');
+        expect(npmCalls(h)).toEqual([]);
+      });
+    });
+
+    describe('a release tag is checked against the npm registry', () => {
+      const release = (ref = 'v0.3.0'): Config => cfgOf(`${CONFIG}kit_ref: ${ref}\n`);
+
+      it('asks npm view for exactly that version, with a timeout, and never git ls-remote', async () => {
+        const h = harness({ cfg: release(), exec: { npm: { stdout: '"0.3.0"\n', code: 0, stderr: '' } } });
+        const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
+        expect(check).toEqual({ id: 'kit.ref', status: 'ok', message: 'kit_ref v0.3.0 is published on npm' });
+        expect(npmCalls(h)).toEqual([['npm', ['view', 'agentic-sdlc-kit@0.3.0', 'version', '--json']]]);
+        const index = h.execCalls.findIndex(([command]) => command === 'npm');
+        expect(h.execOptions[index]?.timeoutMs).toBeGreaterThan(0);
+        expect(gitCalls(h)).toEqual([]);
+      });
+
+      it('takes the version of a pre-release tag whole', async () => {
+        const h = harness({ cfg: release('v1.0.0-rc.1'), exec: { npm: { stdout: '"1.0.0-rc.1"\n', code: 0, stderr: '' } } });
+        expect(byId(await runDoctor(h.env, h.cfg), 'kit.ref').status).toBe('ok');
+        expect(npmCalls(h)).toEqual([['npm', ['view', 'agentic-sdlc-kit@1.0.0-rc.1', 'version', '--json']]]);
+      });
+
+      it('fails on E404, and says how to fix it', async () => {
+        const h = harness({ cfg: release(), exec: { npm: NPM_E404 } });
+        const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
+        expect(check).toEqual({
+          id: 'kit.ref',
+          status: 'fail',
+          message: 'kit_ref v0.3.0 is not published on npm',
+          fix: 'set kit_ref to a published version (v0.3.0 or later) or main',
+        });
+        expect(gitCalls(h)).toEqual([]);
+      });
+
+      it('recognises E404 on stderr alone', async () => {
+        const h = harness({ cfg: release(), exec: { npm: { stdout: '', code: 1, stderr: 'npm ERR! code E404\nnpm ERR! 404 Not Found\n' } } });
+        expect(byId(await runDoctor(h.env, h.cfg), 'kit.ref').status).toBe('fail');
+      });
+
+      it('warns "cannot verify" on any other failure: a network error, a timeout, a missing npm', async () => {
+        for (const npm of [
+          { stdout: '', code: 1, stderr: 'npm error code ENOTFOUND\nnpm error network request to https://registry.npmjs.org failed\n' },
+          { stdout: '', code: 1, stderr: '' },
+          new Error('npm timed out after 15s'),
+          new Error('spawn npm ENOENT'),
+        ]) {
+          const h = harness({ cfg: release(), exec: { npm } });
+          const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
+          expect(check.status).toBe('warn');
+          expect(check.message).toMatch(/^cannot verify kit_ref v0\.3\.0: /);
+        }
+      });
+
+      it('warns "cannot verify" when npm answers something else than the version', async () => {
+        for (const stdout of ['', 'not json', '"9.9.9"\n']) {
+          const h = harness({ cfg: release(), exec: { npm: { stdout, code: 0, stderr: '' } } });
+          const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
+          expect(check.status).toBe('warn');
+          expect(check.message).toMatch(/^cannot verify kit_ref v0\.3\.0: /);
+        }
+      });
+
+      it('shows nothing the registry said beyond the failure line', async () => {
+        const h = harness({ cfg: release(), exec: { npm: { stdout: 'token=secret-value-123', code: 1, stderr: 'npm error code ECONNRESET\n' } } });
+        const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
+        expect(JSON.stringify(check)).not.toContain('secret-value-123');
+      });
     });
   });
 
@@ -910,7 +1011,7 @@ describe('runDoctor', () => {
       const check = byId(await runDoctor(h.env, h.cfg), 'sdlc.onPath');
       expect(check.status).toBe('ok');
       expect(check.message).toContain('npx');
-      expect(h.execCalls.filter(([command]) => command !== 'git')).toEqual([['npx', ['--no-install', 'sdlc', '--version']]]);
+      expect(h.execCalls.filter(([command]) => command !== 'git' && command !== 'npm')).toEqual([['npx', ['--no-install', 'sdlc', '--version']]]);
     });
 
     it('warns when neither finds sdlc: the git hooks skip', async () => {
@@ -930,7 +1031,7 @@ describe('runDoctor', () => {
     it('does not run npx when it is not installed', async () => {
       const h = harness({ installed: ['git', 'gh'] });
       await runDoctor(h.env, h.cfg);
-      expect(h.execCalls.filter(([command]) => command !== 'git')).toEqual([]);
+      expect(h.execCalls.filter(([command]) => command !== 'git' && command !== 'npm')).toEqual([]);
     });
   });
 
@@ -1022,7 +1123,7 @@ describe('runDoctor', () => {
   describe('labels', () => {
     it('fails and names the missing labels, with sdlc init as the fix', async () => {
       const cfg = cfgOf(CONFIG);
-      const h = harness({ gh: ghScript(cfg, { labels: { match: ['label', 'list'], stdout: JSON.stringify([{ name: 'sdlc:task' }, { name: 'type:tooling' }]) } }) });
+      const h = harness({ gh: ghScript(cfg, { labels: labelListStep(['sdlc:task', 'type:tooling']) }) });
       const check = byId(await runDoctor(h.env, cfg), 'labels');
 
       expect(check.status).toBe('fail');
@@ -1035,7 +1136,7 @@ describe('runDoctor', () => {
 
     it('matches names without regard to case, as GitHub does', async () => {
       const cfg = cfgOf(CONFIG);
-      const h = harness({ gh: ghScript(cfg, { labels: { match: ['label', 'list'], stdout: JSON.stringify(LABELS.map(name => ({ name: name.toUpperCase() }))) } }) });
+      const h = harness({ gh: ghScript(cfg, { labels: labelListStep(LABELS.map(name => name.toUpperCase())) }) });
       expect(byId(await runDoctor(h.env, cfg), 'labels').status).toBe('ok');
     });
   });
@@ -1400,7 +1501,7 @@ describe('runDoctor', () => {
   describe('isolation', () => {
     it('keeps every other check when one throws', async () => {
       const cfg = cfgOf(CONFIG);
-      const h = harness({ gh: ghScript(cfg, { labels: { match: ['label', 'list'], stdout: '{{{' } }) });
+      const h = harness({ gh: ghScript(cfg, { labels: { ...labelListStep([]), code: 1, stderr: 'gh: Bad Gateway (HTTP 502)' } }) });
       const checks = await runDoctor(h.env, cfg);
 
       expect(checks.map(c => c.id)).toEqual([...PREFLIGHT_IDS, ...INSTALL_IDS]);
@@ -1994,6 +2095,13 @@ describe('hooks.switches', () => {
     '# mine\n[features]\n  hooks=false # off\n',
     '[features]\ncodex_hooks = false\n',
     'features.hooks = false\n',
+    'features = { hooks = false }\n',
+    'features = { other = 1, codex_hooks = false } # x\n',
+    'features={hooks=false}# x\n',
+    '"features" = { "hooks" = false }\n',
+    "'features' = { 'codex_hooks' = false }\n",
+    'features = { note = "a } # b", hooks = false }\n',
+    '[ "features" ]\n"hooks" = false\n',
   ])('fails in enforce when .codex/config.toml has %j', async toml => {
     const h = allThree({ cfg: enforceThree() });
     // Before the kit's tables: a top-level key after a table header would belong to that table.
@@ -2007,6 +2115,73 @@ describe('hooks.switches', () => {
     const h = allThree({ cfg: enforceThree() });
     h.fs.write('.codex/config.toml', '[features]\nhooks = true\n[other]\nhooks = false\n');
     expect(byId(await runDoctor(h.env, h.cfg), 'hooks.switches').status).toBe('ok');
+  });
+
+  it.each([
+    ['features = { hooks = false }\n', 'features.hooks is false'],
+    ['features = { other = 1, codex_hooks = false } # x\n', 'features.codex_hooks is false'],
+  ])('names the inline-table switch of %j', async (toml, message) => {
+    const h = allThree({ cfg: enforceThree() });
+    h.fs.write('.codex/config.toml', toml);
+    const check = byId(await runDoctor(h.env, h.cfg), 'hooks.switches');
+    expect(check.status).toBe('fail');
+    expect(check.message).toContain(`.codex/config.toml: ${message}`);
+  });
+
+  it.each([
+    'features = { hooks = true }\n',
+    '[profile]\nfeatures = { hooks = false }\n',
+    'features = { other = { hooks = false }, hooks = true }\n',
+    'features = { "a.hooks" = false }\n',
+    'features = { note = "hooks = false" }\n',
+    'other = { hooks = false }\n',
+    '# features = { hooks = false }\n',
+    '[features]\n[[x.y]]\nhooks = false\n',
+    // Malformed lines: no switch, and the reader does not throw.
+    'features = { hooks = "false\n',
+    'features = { hooks = false\n',
+    'features = {\n',
+    'features = }\n',
+    '[\n',
+    '[[\n',
+    ']\n',
+    '[]\n',
+    '[features\nhooks = false\n',
+    '=\n',
+    '= false\n',
+    'hooks =\n',
+    '"features = { hooks = false }\n',
+    "'features.hooks' = false\n",
+  ])('does not take %j for a Codex switch', async toml => {
+    const h = allThree({ cfg: enforceThree() });
+    h.fs.write('.codex/config.toml', toml);
+    expect(byId(await runDoctor(h.env, h.cfg), 'hooks.switches').status).toBe('ok');
+  });
+
+  /** The doctor on `toml` as the project's Codex config, with the time it took. */
+  async function timedCodexCheck(toml: string): Promise<{ check: Check; ms: number }> {
+    const h = allThree({ cfg: enforceThree() });
+    h.fs.write('.codex/config.toml', toml);
+    const started = performance.now();
+    const check = byId(await runDoctor(h.env, h.cfg), 'hooks.switches');
+    return { check, ms: performance.now() - started };
+  }
+
+  it('reads a very deeply nested inline table without overflowing the stack or taking long', async () => {
+    const depth = 10_000;
+    const { check, ms } = await timedCodexCheck(`features = ${'{ a = '.repeat(depth)}false${' }'.repeat(depth)}\n`);
+    expect(check.status).toBe('ok');
+    expect(ms).toBeLessThan(2000);
+  });
+
+  it.each([
+    ['a header with a long run of blanks', `[${' '.repeat(20_000)}x]\nhooks = false\n`],
+    // Not a header (it does not end in `]`): a backtracking header pattern takes cubic time on it.
+    ['a line that looks like a header and is not one', `[${' '.repeat(20_000)}x${' '.repeat(20_000)}y\nhooks = false\n`],
+  ])('reads %s in time', async (_name, toml) => {
+    const { check, ms } = await timedCodexCheck(toml);
+    expect(check.status).toBe('ok');
+    expect(ms).toBeLessThan(2000);
   });
 
   it('only warns, in enforce too, for a switch in the user-level settings', async () => {
@@ -2082,7 +2257,7 @@ describe('hooks.roundtrip', () => {
 
     expect(byId(checks, 'hooks.roundtrip').status).toBe('ok');
     expect(mutations(h.gh)).toEqual([]);
-    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'label', 'secret', 'api']);
+    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'api', 'secret', 'api']);
     expect(h.fs.log).toHaveLength(before);
     // The round trip needs no git of the repository either: it answers for a repository of its own.
     expect(h.git.calls.filter(call => call[0] === 'symbolic-ref' || call.includes('--show-toplevel'))).toEqual([]);
@@ -2367,7 +2542,7 @@ describe('worktrees.orphans', () => {
     const check = byId(await runDoctor(h.env, h.cfg), 'worktrees.orphans');
     expect(check.status).toBe('ok');
     expect(check.message).toMatch(/no orphan/);
-    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'label', 'secret', 'api']);
+    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'api', 'secret', 'api']);
   });
 
   it('is ok for worktrees of live tasks and for ones that are none of the kit (a branch of your own, outside .worktrees)', async () => {
@@ -2447,8 +2622,12 @@ describe('worktrees.orphans', () => {
       const done = runDoctor(h.env, h.cfg).finally(() => {
         settled = true;
       });
-      // The deadline starts when the lookup does, after real file reads: advance until the run is over.
-      for (let step = 0; step < 100 && !settled; step += 1) await vi.advanceTimersByTimeAsync(1_000);
+      // The deadline starts when the lookup does, after real file reads: advance until the run is over, yielding to
+      // real I/O between steps (setImmediate is not faked) so a slow runner cannot use up the steps before the reads end.
+      for (let step = 0; step < 400 && !settled; step += 1) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
       const check = byId(await done, 'worktrees.orphans');
 
       expect(check.status).toBe('warn');
@@ -2456,7 +2635,7 @@ describe('worktrees.orphans', () => {
     } finally {
       vi.useRealTimers();
     }
-  });
+  }, 20_000);
 
   it('makes no GitHub mutation, and asks only about the issues of worktrees no task was found for', async () => {
     const { tracker, asked } = trackerWith({ 5: 'in_progress', 6: 'done' });

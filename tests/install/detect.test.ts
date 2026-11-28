@@ -199,7 +199,7 @@ describe('detectConfig', () => {
     it('writes kit_ref explicitly, v<version> by default, with a comment on when to change it', () => {
       const { yaml, parsed } = detect();
       expect(parsed.kit_ref).toBe(`v${packageVersion()}`);
-      expect(yaml).toMatch(/\n# Until a release tag exists, set main or the ref you installed from[^\n]*\nkit_ref: v\d/);
+      expect(yaml).toMatch(/\n# A release tag works once it is published on npm \(v0\.3\.0 and later\); until then, set main or the ref you installed from[^\n]*\nkit_ref: v\d/);
       expect(loadConfigFromString(yaml).kitRef).toBe(`v${packageVersion()}`);
     });
   });

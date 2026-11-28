@@ -1,11 +1,29 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../../src/commands/context.js';
 import {
+  acquireLock,
   describeSync,
   LOCK_STALE_MS,
   registerSyncCommand,
@@ -736,6 +754,291 @@ describe('syncAll: the lock', () => {
     expect(second.replayed).toEqual([]);
     expect(result).toMatchObject({ replayed: 1 });
     expect(existsSync(lockPath())).toBe(false);
+  });
+
+  describe('acquireLock', () => {
+    const lockFiles = (): string[] => readdirSync(dirname(lockPath())).sort();
+    const tokenOf = (path: string): string => (JSON.parse(readFileSync(path, 'utf8')) as { token: string }).token;
+    const freshLock = (token: string): string => JSON.stringify({ pid: 4242, at: NOW, token });
+
+    it('lets exactly one of two syncs that judge the same lock stale at once take it over', async () => {
+      // The second sync starts a few event-loop turns after the first, so the two interleave at every step.
+      const later = async (turns: number): Promise<string | undefined> => {
+        for (let turn = 0; turn < turns; turn += 1) await new Promise(resolve => setImmediate(resolve));
+        return acquireLock(setup().ctx);
+      };
+      for (let turns = 0; turns < 20; turns += 1) {
+        for (let round = 0; round < 3; round += 1) {
+          writeLock(LOCK_STALE_MS + MINUTE);
+
+          const tokens = await Promise.all([acquireLock(setup().ctx), later(turns)]);
+
+          const label = `${turns} turns, round ${round}`;
+          const winners = tokens.filter((token): token is string => token !== undefined);
+          expect(winners, label).toHaveLength(1);
+          expect(lockFiles(), label).toEqual(['sync.lock']);
+          expect(tokenOf(lockPath()), label).toBe(winners[0]);
+          unlinkSync(lockPath());
+        }
+      }
+    });
+
+    it('leaves a fresh lock alone that another sync created after this one judged the old lock stale', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const h = setup();
+      let calls = 0;
+      h.ctx.now = () => {
+        calls += 1;
+        // The first judgement is made; then another sync takes over the stale lock.
+        if (calls === 1) writeFileSync(lockPath(), freshLock('someone-else'));
+        return NOW;
+      };
+
+      expect(await acquireLock(h.ctx)).toBeUndefined();
+
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe('someone-else');
+    });
+
+    it('gives back a fresh lock it renamed in the belief that it was the stale one', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const h = setup();
+      let calls = 0;
+      h.ctx.now = () => {
+        calls += 1;
+        // The second judgement, under the claim, is made; then the stale lock is replaced, just before the rename.
+        if (calls === 2) writeFileSync(lockPath(), freshLock('someone-else'));
+        return NOW;
+      };
+
+      expect(await acquireLock(h.ctx)).toBeUndefined();
+
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe('someone-else');
+    });
+
+    it('does not put a fresh lock back over one created in the meantime', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const h = setup();
+      let calls = 0;
+      h.ctx.now = () => {
+        calls += 1;
+        if (calls === 2) writeFileSync(lockPath(), freshLock('first'));
+        // The judgement of the renamed file: a third sync has created a lock in the gap.
+        if (calls === 3) writeFileSync(lockPath(), freshLock('third'));
+        return NOW;
+      };
+
+      expect(await acquireLock(h.ctx)).toBeUndefined();
+
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe('third');
+    });
+
+    it('leaves the live lock untouched when giving the renamed one back fails because another sync created a lock meanwhile', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const h = setup();
+      let calls = 0;
+      let live: { ino: number; mtimeMs: number } | undefined;
+      h.ctx.now = () => {
+        calls += 1;
+        // The second judgement, under the claim, is made; then the stale lock is replaced, just before the rename.
+        if (calls === 2) writeFileSync(lockPath(), freshLock('first'));
+        // The judgement of the renamed (fresh) file: the lock is gone from its path, and another sync creates its own there,
+        // so the link back (which never overwrites) fails with EEXIST.
+        if (calls === 3) {
+          expect(lockFiles().some(name => name.includes('.stale-'))).toBe(true);
+          writeFileSync(lockPath(), freshLock('live'), { flag: 'wx' });
+          const { ino, mtimeMs } = statSync(lockPath());
+          live = { ino, mtimeMs };
+        }
+        return NOW;
+      };
+
+      // Held: it is reported as such, never taken.
+      expect(await acquireLock(h.ctx)).toBeUndefined();
+
+      // The live lock is the very file its sync created, unchanged; only the file this sync renamed is gone.
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(readFileSync(lockPath(), 'utf8')).toBe(freshLock('live'));
+      const now = statSync(lockPath());
+      expect({ ino: now.ino, mtimeMs: now.mtimeMs }).toEqual(live);
+      // The sync that holds it can still refresh and release it.
+      expect(tokenOf(lockPath())).toBe('live');
+    });
+
+    it('reports the lock as held while another sync is taking it over, and leaves both files alone', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const before = readFileSync(lockPath(), 'utf8');
+      writeFileSync(`${lockPath()}.takeover`, '');
+
+      expect(await acquireLock(setup().ctx)).toBeUndefined();
+
+      expect(lockFiles()).toEqual(['sync.lock', 'sync.lock.takeover']);
+      expect(readFileSync(lockPath(), 'utf8')).toBe(before);
+    });
+
+    it('breaks a takeover claim that a sync that died left behind', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const claim = `${lockPath()}.takeover`;
+      writeFileSync(claim, '');
+      // Ten minutes before the time of the sync's clock (`ctx.now()`, the one the lock's age is judged by).
+      const old = new Date(Date.parse(NOW) - 10 * MINUTE);
+      utimesSync(claim, old, old);
+
+      const token = await acquireLock(setup().ctx);
+
+      expect(token).toEqual(expect.any(String));
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe(token);
+    });
+
+    it('judges the age of a takeover claim by the sync clock, as it does the lock, not by the wall clock', async () => {
+      const claim = `${lockPath()}.takeover`;
+      const stamp = (at: Date): void => utimesSync(claim, at, at);
+
+      // Old by the wall clock, but the sync's clock (NOW, months back) says the claim is not yet written: held.
+      writeLock(LOCK_STALE_MS + MINUTE);
+      writeFileSync(claim, '');
+      stamp(new Date(Date.now() - 10 * MINUTE));
+      expect(await acquireLock(setup().ctx)).toBeUndefined();
+      expect(lockFiles()).toEqual(['sync.lock', 'sync.lock.takeover']);
+
+      // Fresh by the wall clock, but the sync's clock is ten minutes on: the claim is dead, and is broken.
+      const h = setup();
+      h.clock.now = new Date(Date.now() + 10 * MINUTE).toISOString();
+      writeFileSync(lockPath(), JSON.stringify({ pid: 999999, at: new Date(Date.parse(h.clock.now) - LOCK_STALE_MS - MINUTE).toISOString() }));
+      stamp(new Date());
+      const token = await acquireLock(h.ctx);
+      expect(token).toEqual(expect.any(String));
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe(token);
+    });
+
+    // A dangling symlink is a claim that exists for `wx` (EEXIST) and cannot be read by `stat`: the state
+    // of a claim that was released between the two calls. Its age is unknown, so it is not judged dead.
+    it.skipIf(process.platform === 'win32')('does not break a takeover claim whose age cannot be read', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const claim = `${lockPath()}.takeover`;
+      symlinkSync(join(root, 'gone'), claim);
+
+      expect(await acquireLock(setup().ctx)).toBeUndefined();
+
+      expect(lstatSync(claim).isSymbolicLink()).toBe(true);
+      expect(lockFiles()).toEqual(['sync.lock', 'sync.lock.takeover']);
+    });
+
+    it('leaves no .stale file after taking over', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+
+      const token = await acquireLock(setup().ctx);
+
+      expect(token).toEqual(expect.any(String));
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe(token);
+    });
+
+    it('removes the lock file it created when writing it failed', async () => {
+      const h = setup();
+      h.ctx.now = () => {
+        throw new Error('clock failed');
+      };
+
+      await expect(acquireLock(h.ctx)).rejects.toThrow('clock failed');
+
+      expect(lockFiles()).toEqual([]);
+    });
+
+    it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+      'releases an orphan lock: the read-back misses, so the file this call created is removed',
+      async () => {
+        const h = setup();
+        // The file is made unreadable after it was created: the read-back cannot show the token.
+        h.ctx.now = () => {
+          chmodSync(lockPath(), 0o000);
+          return NOW;
+        };
+
+        expect(await acquireLock(h.ctx)).toBeUndefined();
+
+        expect(lockFiles()).toEqual([]);
+      },
+    );
+
+    it('leaves the lock of another sync alone when the read-back shows its token', async () => {
+      const h = setup();
+      h.ctx.now = () => {
+        // Another sync replaced the file this call created, before the read-back.
+        const other = `${lockPath()}.other`;
+        writeFileSync(other, freshLock('someone-else'));
+        renameSync(other, lockPath());
+        return NOW;
+      };
+
+      expect(await acquireLock(h.ctx)).toBeUndefined();
+
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe('someone-else');
+    });
+  });
+
+  // Real processes: the in-process tests above interleave at every await, but only separate processes
+  // race on the file system the way two `sdlc sync` runs do.
+  describe.skipIf(process.platform === 'win32')('acquireLock across processes', () => {
+    const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+    const PROCESSES = 8;
+    let build: string;
+    let script: string;
+
+    beforeAll(() => {
+      // A private build, inside node_modules so that the packages resolve, and not `dist`, which other tests rebuild.
+      build = mkdtempSync(join(repo, 'node_modules', '.sdlc-sync-race-'));
+      execFileSync(process.execPath, [join(repo, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', repo, '--outDir', build, '--noCheck'], {
+        cwd: repo,
+        stdio: 'pipe',
+      });
+      script = join(build, 'acquire.mjs');
+      writeFileSync(
+        script,
+        [
+          "import { acquireLock } from './commands/sync.js';",
+          'const [root, startAt] = process.argv.slice(2);',
+          'while (Date.now() < Number(startAt)) {}',
+          'const token = await acquireLock({ repoRoot: root, now: () => new Date().toISOString() });',
+          "process.stdout.write((token ?? 'none') + '\\n');",
+        ].join('\n'),
+      );
+    }, 60_000);
+    afterAll(() => {
+      rmSync(build, { recursive: true, force: true });
+    });
+
+    const acquireInChild = (startAt: number): Promise<string> =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [script, root, String(startAt)], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', chunk => (stdout += chunk));
+        child.stderr.on('data', chunk => (stderr += chunk));
+        child.on('error', reject);
+        child.on('close', code => (code === 0 ? resolve(stdout.trim()) : reject(new Error(`exit ${code}: ${stderr}`))));
+      });
+
+    it('lets exactly one of several syncs take over a stale lock, and leaves no .stale or .takeover file', async () => {
+      for (let round = 0; round < 3; round += 1) {
+        writeLock(LOCK_STALE_MS + MINUTE);
+
+        // All start at the same instant; one that starts late finds the winner's fresh lock, which is also right.
+        const startAt = Date.now() + 500;
+        const results = await Promise.all(Array.from({ length: PROCESSES }, () => acquireInChild(startAt)));
+
+        const winners = results.filter(result => result !== 'none');
+        expect(winners, `round ${round}: ${results.join(', ')}`).toHaveLength(1);
+        expect(readdirSync(dirname(lockPath())).sort(), `round ${round}`).toEqual(['sync.lock']);
+        expect((JSON.parse(readFileSync(lockPath(), 'utf8')) as { token: string }).token, `round ${round}`).toBe(winners[0]);
+        unlinkSync(lockPath());
+      }
+    }, 30_000);
   });
 
   it('writes the time into the lock again after each command, so a long sync is not taken over', async () => {

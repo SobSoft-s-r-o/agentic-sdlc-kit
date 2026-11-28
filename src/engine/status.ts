@@ -56,7 +56,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * that is not enabled, an untracked issue, which `untracked` already lists); every other kind is
  * drift a reconcile would fix, or a problem.
  */
-const QUIET_KINDS: ReadonlySet<ReconcileAction['kind']> = new Set([
+export const QUIET_KINDS: ReadonlySet<ReconcileAction['kind']> = new Set([
   'ignored_approval',
   'skipped_unknown_type',
   'untracked',

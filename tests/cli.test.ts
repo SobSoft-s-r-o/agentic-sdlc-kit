@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { formatCliError, runCli } from '../src/cli.js';
 import type { CommandContext } from '../src/commands/context.js';
 import { loadConfig, typeRegistry } from '../src/config/schema.js';
@@ -21,13 +21,7 @@ const validConfig = join(root, 'tests', 'fixtures', 'config', 'valid.yaml');
 const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'sync', 'board', 'config', 'githook', 'hook', 'init', 'upgrade', 'uninstall', 'doctor'];
 
 let dir: string;
-beforeAll(() => {
-  // The spawned CLI is the built one, so build it here instead of trusting a stale `dist`.
-  execFileSync(process.execPath, [join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', root], {
-    cwd: root,
-    stdio: 'pipe',
-  });
-}, 120_000);
+// The spawned CLI is the built `dist/cli.js`; `tests/support/globalBuild.ts` builds it once before the run.
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'sdlc-cli-'));
 });

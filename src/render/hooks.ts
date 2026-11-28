@@ -40,22 +40,22 @@ export function hookCommand(harness: HookHarness, event: HookEventName): string 
   return `"$(${root})/${HOOK_LAUNCHER}" ${harness} ${event}`;
 }
 
-/** Every command the kit renders, for any harness and event. */
-const RENDERED_COMMANDS: ReadonlySet<string> = new Set(
-  HOOK_HARNESSES.flatMap(harness => HOOK_EVENTS.map(event => hookCommand(harness, event))),
-);
+/** Every command the kit renders now, for any harness and event. */
+const CURRENT_COMMANDS: readonly string[] = HOOK_HARNESSES.flatMap(harness => HOOK_EVENTS.map(event => hookCommand(harness, event)));
 
 /**
- * The shape of a command an earlier version of the kit rendered: the quoted launcher path under a
- * computed root, then the harness and the event, and nothing else (no `;`, `&`, `|` or `#` that
- * would run or hide something more).
+ * The commands an earlier version of the kit rendered, which an install made then still holds: the
+ * launcher under the git root of the working directory, for every harness (commit 448e5a7; Claude
+ * Code's command has since moved to its project directory, Codex's and Gemini's has not). An exact
+ * list, so that a user hook that only looks alike (`"$(my-tool)/.sdlc/hooks/run.sh" claude prompt`,
+ * another project's launcher) is never taken for the kit's.
  */
-const RENDERED_SHAPE = new RegExp(
-  `^"[^"#;&|\\n]*(?:"[^"#;&|\\n]*"[^"#;&|\\n]*)*/${HOOK_LAUNCHER.replace(/\./g, '\\.')}" (?:${HOOK_HARNESSES.join('|')}) (?:${HOOK_EVENTS.join('|')})$`,
+const LEGACY_COMMANDS: readonly string[] = HOOK_HARNESSES.flatMap(harness =>
+  HOOK_EVENTS.map(event => `"$(git rev-parse --show-toplevel)/${HOOK_LAUNCHER}" ${harness} ${event}`),
 );
 
-/** Whether a hook command is one the kit rendered: exactly this version's, or one of the earlier shape. */
-const isKitCommand = (command: string): boolean => RENDERED_COMMANDS.has(command) || RENDERED_SHAPE.test(command);
+/** Every command the kit owns: this version's and the earlier version's. */
+const RENDERED_COMMANDS: ReadonlySet<string> = new Set([...CURRENT_COMMANDS, ...LEGACY_COMMANDS]);
 
 /**
  * Whether an element of a harness's hook array (a matcher group) is the kit's: one of its handlers
@@ -68,7 +68,7 @@ export function isKitHookItem(element: unknown): boolean {
     Array.isArray(hooks) &&
     hooks.some(handler => {
       const command = typeof handler === 'object' && handler !== null ? (handler as { command?: unknown }).command : undefined;
-      return typeof command === 'string' && isKitCommand(command);
+      return typeof command === 'string' && RENDERED_COMMANDS.has(command);
     })
   );
 }

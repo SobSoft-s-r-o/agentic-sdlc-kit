@@ -214,7 +214,8 @@ const entriesOf = (container: ObjectNode | ArrayNode): Array<{ start: number; en
 /**
  * Adds one entry (an object member or an array element) after the last one. `render(multiline, indent)`
  * gives its text. The layout follows the container: when an entry already sits first on its line, the
- * new one goes on its own line with that indentation; when all entries share a line, it is added on
+ * new one goes on its own line with that indentation, and a new array element is spread over lines only
+ * if an existing element is (`multiline`); when all entries share a line, it is added on
  * that line; an empty container is spread over lines (one more level than the line its bracket is on)
  * when `multilineWhenEmpty`, else it stays on one line.
  */
@@ -234,9 +235,12 @@ export function appendEntry(
     const indent = base + layout.indent;
     return { ...inner, text: `${layout.eol}${indent}${render(true, indent)}${layout.eol}${base}` };
   }
+  // A new member is spread over lines; a new array element only when an existing one is, so a list of
+  // one-line elements (hook entries, say) stays one line each.
+  const multiline = container.kind === 'object' || entries.some(entry => text.slice(entry.start, entry.end).includes('\n'));
   for (let i = entries.length - 1; i >= 0; i--) {
     const indent = ownLineIndent(text, (entries[i] as { start: number }).start);
-    if (indent !== undefined) return { start: last.end, end: last.end, text: `,${layout.eol}${indent}${render(true, indent)}` };
+    if (indent !== undefined) return { start: last.end, end: last.end, text: `,${layout.eol}${indent}${render(multiline, indent)}` };
   }
   return { start: last.end, end: last.end, text: `, ${render(false, '')}` };
 }

@@ -1,7 +1,8 @@
 import { execFile, type ExecFileException } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { Command } from 'commander';
 import { StateCommentError } from '../core/stateComment.js';
 import { TransitionError } from '../core/stateMachine.js';
@@ -116,31 +117,159 @@ async function lockTime(path: string): Promise<number | undefined> {
   }
 }
 
+/** Identifies the file a lock was created as, to tell it from a file another sync created later at the same path. */
+interface FileId {
+  dev: number;
+  ino: number;
+}
+
+const LOCK_ATTEMPTS = 4;
+/** The read-back is repeated once after this long when it does not show our token. */
+const READ_BACK_RETRY_MS = 25;
+/** A takeover claim older than this was left by a sync that died. */
+const TAKEOVER_STALE_MS = 30_000;
+
+const isStale = (ctx: SyncContext, written: number): boolean => Date.parse(ctx.now()) - written > LOCK_STALE_MS;
+
+/** Removes the file at `path` when it is the very file `mine` describes (the lock this call created), and only then. */
+async function removeIfMine(path: string, mine: FileId | undefined): Promise<void> {
+  if (mine === undefined) return;
+  try {
+    const found = await stat(path);
+    if (found.dev === mine.dev && found.ino === mine.ino) await unlink(path);
+  } catch {
+    // Gone already, or not ours to touch.
+  }
+}
+
 /**
- * Takes the lock and returns the token that proves it is ours: the file is created with `wx`, so only
- * one sync gets it, and read back to confirm the token (a sync that took over the same stale lock
- * meanwhile would have replaced it). A lock older than `LOCK_STALE_MS` is taken over. `undefined`
- * when another sync holds it.
+ * Creates the lock file with `wx`, so only one sync gets it; `undefined` when the file exists. A file this call
+ * created but could not fill is removed again: nobody else would, until it went stale.
  */
-async function acquireLock(ctx: SyncContext): Promise<string | undefined> {
-  const path = lockPathOf(ctx);
-  await mkdir(dirname(path), { recursive: true });
-  const token = randomUUID();
+async function createLock(ctx: SyncContext, path: string, token: string): Promise<FileId | undefined> {
+  let handle;
+  try {
+    handle = await open(path, 'wx');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return undefined;
+    throw error;
+  }
+  let mine: FileId | undefined;
+  try {
+    try {
+      const created = await handle.stat();
+      mine = { dev: created.dev, ino: created.ino };
+      await handle.writeFile(lockContent(ctx, token));
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    await removeIfMine(path, mine);
+    throw error;
+  }
+  return mine;
+}
+
+/** Whether the lock at `path` shows `token`: asked twice when it cannot be read (or has no token), never when it shows another one. */
+async function readBackShows(path: string, token: string): Promise<boolean> {
+  for (const wait of [0, READ_BACK_RETRY_MS]) {
+    if (wait > 0) await sleep(wait);
+    const shown = (await readLock(path))?.token;
+    if (shown === token) return true;
+    if (shown !== undefined) return false;
+  }
+  return false;
+}
+
+/**
+ * Takes the right to take over a stale lock: one sync at a time moves it aside, so none of them can
+ * move aside a fresh lock another one created after judging the old lock stale. `undefined` when
+ * another sync holds that right; a claim left by a sync that died is broken after `TAKEOVER_STALE_MS`, by the sync's
+ * clock (`ctx.now()`), the one the age of the lock itself is judged by.
+ */
+async function claimTakeover(ctx: SyncContext, path: string): Promise<string | undefined> {
+  const claim = `${path}.takeover`;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const handle = await open(path, 'wx');
-      try {
-        await handle.writeFile(lockContent(ctx, token));
-      } finally {
-        await handle.close();
-      }
-      return (await readLock(path))?.token === token ? token : undefined;
+      await (await open(claim, 'wx')).close();
+      return claim;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
+    const age = await stat(claim).then(
+      found => Date.parse(ctx.now()) - found.mtimeMs,
+      () => undefined,
+    );
+    // No age: the claim was released between the two calls, or cannot be read. Try to create it again; never
+    // unlink what was not seen to be old, it may be a claim another sync has just made.
+    if (age === undefined) continue;
+    if (age <= TAKEOVER_STALE_MS) return undefined;
+    await unlink(claim).catch(() => undefined);
+  }
+  return undefined;
+}
+
+/**
+ * Moves the stale lock to `<lock>.stale-<token>` and removes it. `false` when there is a fresh lock
+ * instead: another sync replaced the stale one meanwhile, and the renamed file, which is then that
+ * fresh lock, is given back (`link` never overwrites: when yet another sync has created a lock at the path meanwhile,
+ * that lock stays untouched and only the renamed file is removed). Only `<lock>.stale-<token>` is ever unlinked here.
+ */
+async function removeStale(ctx: SyncContext, path: string, token: string): Promise<boolean> {
+  const written = await lockTime(path);
+  if (written === undefined) return true; // released meanwhile
+  if (!isStale(ctx, written)) return false;
+  const stalePath = `${path}.stale-${token}`;
+  try {
+    await rename(path, stalePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true; // released meanwhile
+    throw error;
+  }
+  try {
+    const renamed = await lockTime(stalePath);
+    if (renamed === undefined || isStale(ctx, renamed)) return true;
+    await link(stalePath, path).catch(() => undefined);
+    return false;
+  } finally {
+    await unlink(stalePath).catch(() => undefined);
+  }
+}
+
+/**
+ * Takes the lock and returns the token that proves it is ours: the file is created with `wx`, so only
+ * one sync gets it, and read back to confirm the token. `undefined` when another sync holds it.
+ *
+ * A lock older than `LOCK_STALE_MS` is taken over by renaming it to `<lock>.stale-<token>`. Of the syncs
+ * that judge the same lock stale, one gets the takeover claim and the rest report the lock as held; the
+ * claimant judges the lock again, renames it, judges the renamed file once more and removes it, whatever
+ * came of it. The lock is then created like any other, so exactly one of the syncs gets it. A lock that was
+ * created here but cannot be read back is removed again when it is still ours, so no sync leaves a lock
+ * behind that nobody runs under.
+ */
+export async function acquireLock(ctx: SyncContext): Promise<string | undefined> {
+  const path = lockPathOf(ctx);
+  await mkdir(dirname(path), { recursive: true });
+  const token = randomUUID();
+  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
+    const mine = await createLock(ctx, path, token);
+    if (mine !== undefined) {
+      if (await readBackShows(path, token)) return token;
+      await removeIfMine(path, mine);
+      return undefined;
+    }
     const written = await lockTime(path);
-    if (written !== undefined && Date.parse(ctx.now()) - written <= LOCK_STALE_MS) return undefined;
-    await unlink(path).catch(() => undefined);
+    if (written === undefined) continue; // released meanwhile: create it again
+    if (!isStale(ctx, written)) return undefined;
+    const claim = await claimTakeover(ctx, path);
+    if (claim === undefined) return undefined;
+    let free: boolean;
+    try {
+      free = await removeStale(ctx, path, token);
+    } finally {
+      await unlink(claim).catch(() => undefined);
+    }
+    if (!free) return undefined;
   }
   return undefined;
 }

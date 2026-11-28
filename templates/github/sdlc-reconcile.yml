@@ -62,7 +62,7 @@ jobs:
         with:
           node-version: 22
           package-manager-cache: false
-      # Download and build the kit without the token: its install scripts never see SDLC_TOKEN.
+      # Download the kit (a branch or commit is also built from git) without the token: its install scripts never see SDLC_TOKEN.
       # The next step runs the same command from the npx cache.
       - name: Install the kit
         run: {{kit.npx}} --version

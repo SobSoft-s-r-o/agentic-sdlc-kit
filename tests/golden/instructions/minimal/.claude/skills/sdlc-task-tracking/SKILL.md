@@ -7,7 +7,7 @@ description: "Use when starting, continuing, pausing or handing over tracked wor
 
 Every task is a GitHub issue on a Projects board, plus one hidden state comment that `sdlc` edits in place. Never edit that comment or the board fields by hand: run the commands below.
 
-`sdlc` means `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3` unless `sdlc` is on PATH. Commands read `sdlc.config.yaml` at the git root, accept `--json` for machine-readable output and exit non-zero on failure. `<issue>` is the issue number.
+`sdlc` means `npx -y agentic-sdlc-kit@1.2.3` unless `sdlc` is on PATH. Commands read `sdlc.config.yaml` at the git root, accept `--json` for machine-readable output and exit non-zero on failure. `<issue>` is the issue number.
 
 ## Which case is this?
 
