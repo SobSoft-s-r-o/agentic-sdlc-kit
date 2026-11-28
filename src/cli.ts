@@ -140,10 +140,13 @@ export function buildProgram(deps: CliDeps = {}): Command {
       const cwd = process.cwd();
       const repoRoot = gitRoot(cwd) ?? cwd;
       const configOption = program.opts<{ config?: string }>().config;
+      const configPath = configOption === undefined ? join(repoRoot, CONFIG_FILE) : resolve(cwd, configOption);
       return {
         run: defaultGhRunner,
         repoRoot,
-        configPath: configOption === undefined ? join(repoRoot, CONFIG_FILE) : resolve(cwd, configOption),
+        configPath,
+        // Loads the config only when asked, which `config set` does after it has checked the config.
+        login: () => new GitHubTracker(defaultGhRunner, loadConfig(configPath), { repoRoot }).authenticatedLogin(),
         out,
         err,
       };
