@@ -99,6 +99,10 @@ async function suggest(
 
 const SETTABLE_MODES: readonly ConfigMode[] = ['observe', 'enforce'];
 
+/** Each checkout reads the mode from its own copy of the config, so a change reaches a task worktree only through git. */
+const PER_CHECKOUT_NOTE =
+  'Commit and push sdlc.config.yaml: existing task worktrees and new ones read the mode from their own checkout.';
+
 /**
  * `sdlc config set mode <observe|enforce> [--dry-run]`: owners only. Edits the one line in
  * `sdlc.config.yaml`, so its comments and layout stay. A config that does not load is refused with
@@ -128,12 +132,17 @@ async function setMode(
 
   const dryRun = options.dryRun === true;
   const changed = cfg.mode !== mode;
-  if (changed && !dryRun) {
+  const written = changed && !dryRun;
+  if (written) {
     writeFileSync(ctx.configPath, setConfigMode(readFileSync(ctx.configPath, 'utf8'), mode).text);
   }
   if (options.json) {
     ctx.out(
-      JSON.stringify({ mode, previous: cfg.mode, changed: changed && !dryRun, dryRun, path: ctx.configPath }, null, 2),
+      JSON.stringify(
+        { mode, previous: cfg.mode, changed: written, dryRun, path: ctx.configPath, ...(written ? { note: PER_CHECKOUT_NOTE } : {}) },
+        null,
+        2,
+      ),
     );
   } else if (!changed) {
     ctx.out(`mode is already ${mode}`);
@@ -141,6 +150,7 @@ async function setMode(
     ctx.out(`mode: ${cfg.mode} -> ${mode} (dry run: nothing written)`);
   } else {
     ctx.out(`mode: ${cfg.mode} -> ${mode}. Run \`sdlc upgrade\` so the instructions and hooks match.`);
+    ctx.out(PER_CHECKOUT_NOTE);
   }
 }
 
@@ -162,7 +172,8 @@ export function registerConfigCommand(program: Command, makeContext: ConfigConte
     .option('--json', 'print machine-readable JSON')
     .action((options: { write?: boolean; dryRun?: boolean; json?: boolean }) =>
       runConfigAction(makeContext, options, ctx => suggest(ctx, options)),
-    );  config
+    );
+  config
     .command('set')
     .description('Set a config value (owners only; only "mode" can be set): sdlc config set mode <observe|enforce>')
     .argument('<key>', 'the setting to change; only "mode"')

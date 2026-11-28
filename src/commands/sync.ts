@@ -405,7 +405,11 @@ export async function syncAll(ctx: SyncContext, opts: { dryRun?: boolean } = {})
   }
 }
 
-/** The replay of the real `sdlc sync`: the program at `entry` run by this Node, in `cwd`, with queueing turned off. */
+/**
+ * The replay of the real `sdlc sync`: the program at `entry` run by this Node, in `cwd`, with queueing turned off.
+ * `cwd` is the main checkout, where the outbox is: a command queued from a task worktree replays from
+ * there, with the main checkout's config (its mode and owners), not the worktree's.
+ */
 export function spawnReplay(entry: string, cwd: string, timeoutMs = REPLAY_TIMEOUT_MS): SyncContext['replay'] {
   return argv =>
     new Promise((resolve, reject) => {

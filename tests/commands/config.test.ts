@@ -35,12 +35,12 @@ afterEach(() => {
 });
 
 /** `login`: who the tool runs as (`null`: GitHub cannot say). */
-function harness(options: { script?: FakeGhStep[]; configPath?: string; login?: string | null } = {}) {
+function harness(options: { script?: FakeGhStep[]; configPath?: string; login?: string | null | Error } = {}) {
   const run = fakeGh(options.script ?? [repoView, apiUser]);
   const out: string[] = [];
   const err: string[] = [];
   const configPath = options.configPath ?? join(dir, 'sdlc.config.yaml');
-  const login = options.login === null ? undefined : (options.login ?? 'shop-owner');
+  const login = options.login === null || options.login instanceof Error ? undefined : (options.login ?? 'shop-owner');
   const logins: string[] = [];
   const context: ConfigCommandContext = {
     run,
@@ -48,7 +48,7 @@ function harness(options: { script?: FakeGhStep[]; configPath?: string; login?: 
     configPath,
     login: () => {
       logins.push('asked');
-      return Promise.resolve(login);
+      return options.login instanceof Error ? Promise.reject(options.login) : Promise.resolve(login);
     },
     out: t => out.push(t),
     err: t => err.push(t),
@@ -252,7 +252,10 @@ ${readFileSync(validConfig, 'utf8').replace('mode: observe', '# owner notes: enf
 
     await h.go(['set', 'mode', 'enforce']);
 
-    expect(h.out).toEqual(['mode: observe -> enforce. Run `sdlc upgrade` so the instructions and hooks match.']);
+    expect(h.out).toEqual([
+      'mode: observe -> enforce. Run `sdlc upgrade` so the instructions and hooks match.',
+      'Commit and push sdlc.config.yaml: existing task worktrees and new ones read the mode from their own checkout.',
+    ]);
     expect(h.err).toEqual([]);
     expect(readFileSync(h.configPath, 'utf8')).toBe(
       COMMENTED.replace('mode: observe  # warn only', 'mode: enforce  # warn only'),
@@ -267,7 +270,10 @@ ${readFileSync(validConfig, 'utf8').replace('mode: observe', '# owner notes: enf
 
     await h.go(['set', 'mode', 'observe']);
 
-    expect(h.out).toEqual(['mode: enforce -> observe. Run `sdlc upgrade` so the instructions and hooks match.']);
+    expect(h.out).toEqual([
+      'mode: enforce -> observe. Run `sdlc upgrade` so the instructions and hooks match.',
+      'Commit and push sdlc.config.yaml: existing task worktrees and new ones read the mode from their own checkout.',
+    ]);
     expect(loadConfigFromString(readFileSync(h.configPath, 'utf8')).mode).toBe('observe');
   });
 
@@ -301,6 +307,19 @@ ${readFileSync(validConfig, 'utf8').replace('mode: observe', '# owner notes: enf
     await h.go(['set', 'mode', 'enforce']);
 
     expect(h.err).toEqual(["cannot confirm the owner's GitHub login; run gh auth login"]);
+    expect(readFileSync(h.configPath, 'utf8')).toBe(COMMENTED);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('refuses, and writes nothing, when asking GitHub for the login fails', async () => {
+    const h = harness({ login: new Error('gh: could not reach api.github.com') });
+    seed(h.configPath);
+
+    await h.go(['set', 'mode', 'enforce']);
+
+    expect(h.logins).toEqual(['asked']);
+    expect(h.out).toEqual([]);
+    expect(h.err.join('\n')).toContain('could not reach api.github.com');
     expect(readFileSync(h.configPath, 'utf8')).toBe(COMMENTED);
     expect(process.exitCode).toBe(1);
   });
@@ -390,6 +409,7 @@ ${readFileSync(validConfig, 'utf8').replace('mode: observe', '# owner notes: enf
       changed: true,
       dryRun: false,
       path: h.configPath,
+      note: 'Commit and push sdlc.config.yaml: existing task worktrees and new ones read the mode from their own checkout.',
     });
   });
 
@@ -398,6 +418,7 @@ ${readFileSync(validConfig, 'utf8').replace('mode: observe', '# owner notes: enf
     seed(dry.configPath);
     await dry.go(['set', 'mode', 'enforce', '--dry-run', '--json']);
     expect(JSON.parse(dry.out[0])).toMatchObject({ changed: false, dryRun: true, mode: 'enforce', previous: 'observe' });
+    expect(JSON.parse(dry.out[0])).not.toHaveProperty('note');
     expect(readFileSync(dry.configPath, 'utf8')).toBe(COMMENTED);
 
     const same = harness();
