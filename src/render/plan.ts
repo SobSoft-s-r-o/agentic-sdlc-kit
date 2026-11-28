@@ -1,6 +1,7 @@
 import type { Config } from '../config/schema.js';
 import { canonicalJson } from '../install/merge.js';
 import type { RepoFs } from '../install/repoFs.js';
+import { graphifyInstall, superpowersInstall } from '../install/stack.js';
 import { loadRoles, renderAgents } from './agents.js';
 import type { Change, JsonKeysChange, TomlBlockChange } from './changes.js';
 import { renderGitHooks, renderGithub } from './github.js';
@@ -14,7 +15,9 @@ const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
  * Everything `sdlc init` and `sdlc upgrade` apply: the instructions, skills and agents of every
  * harness, the MCP wiring, the harness hooks and their launcher, the GitHub files and the git hooks,
  * as one list of changes with each path at most once, sorted by path. `userCommands` are the steps
- * the owner runs themselves (MCP servers in user scope); `notes` say what is left to do or what was
+ * the owner runs themselves: the MCP servers in user scope, then the install commands of the stack
+ * (`stack.superpowers`: one per harness that has plugins; `stack.graphify`: the tool, then its skill
+ * for each harness); `notes` say what is left to do or what was
  * decided for them (custom roles that replace built-in ones, variables to export, harness trust).
  * Pure: it reads only through `fs`, for the custom roles.
  */
@@ -29,6 +32,13 @@ export function renderAll(cfg: Config, fs: RepoFs): { changes: Change[]; userCom
     changes.push(...mcp.changes, ...renderHooks(cfg, harness));
     userCommands.push(...mcp.userCommands);
   }
+  // After the harness loop, so the order of the MCP commands does not change with the stack.
+  if (cfg.stack.superpowers) {
+    for (const harness of cfg.harnesses) {
+      if (harness !== 'agents-md') userCommands.push(superpowersInstall(harness));
+    }
+  }
+  if (cfg.stack.graphify) userCommands.push(...graphifyInstall(cfg.harnesses));
   changes.push(...renderHookLauncher(cfg), ...renderGithub(cfg, data), ...renderGitHooks());
   return { changes: mergeChanges(changes), userCommands, notes: [...notices, ...mcpNotes(cfg), ...hookNotes(cfg)] };
 }

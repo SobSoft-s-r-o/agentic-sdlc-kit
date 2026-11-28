@@ -151,4 +151,10 @@ describe('execProgram', () => {
       'timed out',
     );
   });
+
+  it('calls a program that handles the kill signal and exits with a code a timeout, not a failure', async () => {
+    // `claude mcp list` does this: killed at the deadline, it exits 143 on its own.
+    const slow = 'process.on("SIGTERM", () => process.exit(143)); setTimeout(() => {}, 5000)';
+    await expect(execProgram(process.cwd(), 300)(node, ['-e', slow])).rejects.toThrow('timed out after 0.3s');
+  });
 });

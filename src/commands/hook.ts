@@ -99,6 +99,11 @@ export interface HookContext {
    * harness, waiting. Without it the process ends by itself.
    */
   exit?(code: number): void;
+  /**
+   * Answers without leaving a trace: no gap, prompt record or task cache is written and no sync is
+   * started. `sdlc doctor`'s round trip sets it, so that checking the hooks never adds to the real logs.
+   */
+  readOnly?: boolean;
 }
 
 /**
@@ -164,7 +169,7 @@ class TaskReader {
 
   /** Writes what was learned from the tracker (only allowed states) to the cache; never fails. */
   async remember(): Promise<void> {
-    if (this.learned.size === 0) return;
+    if (this.learned.size === 0 || this.ctx.readOnly === true) return;
     try {
       const at = this.ctx.now();
       const entries = { ...(await this.cached()) };
@@ -391,7 +396,7 @@ async function sessionStart(env: HookEnv): Promise<HookOutcome> {
   const queued = await queuedCounts(mainRoot);
   // Only a sync that was started is said to be running; otherwise the agent is told to run it.
   let syncRunning = false;
-  if (queued.outbox + queued.gaps > 0 && ctx.spawnSync !== undefined) {
+  if (queued.outbox + queued.gaps > 0 && ctx.spawnSync !== undefined && ctx.readOnly !== true) {
     try {
       ctx.spawnSync(mainRoot);
       syncRunning = true;
@@ -436,6 +441,7 @@ async function sessionStart(env: HookEnv): Promise<HookOutcome> {
 /** Appends the prompt's hash, never its text, to the prompt record; a record that cannot be written is skipped. */
 async function recordPrompt(env: HookEnv, prompt: string): Promise<void> {
   const { event, checkout } = env;
+  if (env.ctx.readOnly === true) return;
   const record: LoggedPrompt = {
     at: env.ctx.now(),
     harness: event.harness,
@@ -559,7 +565,7 @@ async function answer(
 
   try {
     // In order, so a reader sees the lines as the rules found them.
-    for (const gap of gaps) await appendJsonLine(mainRootOf(checkout), GAPS_FILE, gap);
+    if (ctx.readOnly !== true) for (const gap of gaps) await appendJsonLine(mainRootOf(checkout), GAPS_FILE, gap);
   } catch {
     // A log that cannot be written must not turn a block into an allow.
   }

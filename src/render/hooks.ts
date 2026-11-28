@@ -34,14 +34,15 @@ export function hookCommand(harness: HookHarness, event: HookEventName): string 
   return `"$(git rev-parse --show-toplevel)/${HOOK_LAUNCHER}" ${harness} ${event}`;
 }
 
-const SETTINGS_FILE: Record<HookHarness, string> = {
+/** The file each harness reads its hooks from, relative to the repository root. */
+export const SETTINGS_FILE: Record<HookHarness, string> = {
   claude: '.claude/settings.json',
   codex: '.codex/hooks.json',
   gemini: '.gemini/settings.json',
 };
 
-/** What each harness calls the three events. */
-const NATIVE_EVENT: Record<HookHarness, Record<HookEventName, string>> = {
+/** What each harness calls the three events (the keys under `hooks` in its settings file). */
+export const NATIVE_EVENT: Record<HookHarness, Record<HookEventName, string>> = {
   claude: { 'session-start': 'SessionStart', prompt: 'UserPromptSubmit', 'pre-tool': 'PreToolUse' },
   codex: { 'session-start': 'SessionStart', prompt: 'UserPromptSubmit', 'pre-tool': 'PreToolUse' },
   gemini: { 'session-start': 'SessionStart', prompt: 'BeforeAgent', 'pre-tool': 'BeforeTool' },

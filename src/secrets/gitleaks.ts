@@ -86,9 +86,11 @@ export function execProgram(cwd: string, timeoutMs = 120_000, env?: NodeJS.Proce
           return;
         }
         const failure = error as ExecFileException;
-        if (typeof failure.code === 'number') resolve({ code: failure.code, stdout, stderr });
-        else if (failure.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') reject(new Error(`${command} wrote too much output`));
+        // `killed` first: a program that handles the kill signal and exits with a code of its own (as the
+        // Claude CLI does, 143) was still stopped by the deadline, and that is not a failure of the program.
+        if (failure.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') reject(new Error(`${command} wrote too much output`));
         else if (failure.killed) reject(new Error(`${command} timed out after ${timeoutMs / 1000}s`));
+        else if (typeof failure.code === 'number') resolve({ code: failure.code, stdout, stderr });
         else reject(new Error(`could not run ${command}: ${failure.message}`));
       });
       // The program may exit before it reads stdin; that must not surface as an unhandled stream error.

@@ -260,6 +260,8 @@ async function installed(files: Record<string, string> = {}, config = CONFIG): P
 
 // --- renderAll ------------------------------------------------------------------------------------
 
+const STACK_OFF = 'stack: { superpowers: false, graphify: false }';
+
 describe('renderAll', () => {
   const all = (text: string, fs: RepoFs = memoryFs()) => renderAll(cfgOf(text), fs);
 
@@ -313,10 +315,52 @@ describe('renderAll', () => {
     expect(all(configWith('', '[claude]')).notes.filter(note => note.includes('hooks'))).toEqual([]);
   });
 
+  describe('the stack commands', () => {
+    const SUPERPOWERS_CLAUDE = 'claude plugin install superpowers@claude-plugins-official';
+    const SUPERPOWERS_GEMINI = 'gemini extensions install https://github.com/obra/superpowers --consent';
+
+    it('puts the Superpowers command of each hook harness, then the graphify commands, in userCommands', () => {
+      const { userCommands } = all(configWith('stack: { superpowers: true, graphify: true }', '[claude, gemini]'));
+      expect(userCommands).toEqual([
+        SUPERPOWERS_CLAUDE,
+        SUPERPOWERS_GEMINI,
+        'uv tool install graphifyy',
+        'graphify install',
+        'graphify install --platform gemini',
+      ]);
+    });
+
+    it('follows the commands of the MCP servers, and each stack part has its own switch', () => {
+      const mcp = all(configWith(`mcp: { scope: user }\n${STACK_OFF}`, '[claude, codex]')).userCommands;
+      expect(mcp).toHaveLength(2);
+
+      const both = all(configWith('mcp: { scope: user }', '[claude, codex]')).userCommands;
+      expect(both.slice(0, 2)).toEqual(mcp);
+      expect(both.slice(2)).toEqual([
+        SUPERPOWERS_CLAUDE,
+        'codex plugin add superpowers@openai-curated',
+        'uv tool install graphifyy',
+        'graphify install',
+        'graphify install --platform codex',
+      ]);
+
+      expect(all(configWith('stack: { graphify: false }', '[claude]')).userCommands).toEqual([SUPERPOWERS_CLAUDE]);
+      expect(all(configWith('stack: { superpowers: false }', '[claude]')).userCommands).toEqual([
+        'uv tool install graphifyy',
+        'graphify install',
+      ]);
+      expect(all(configWith(STACK_OFF, '[claude, codex, gemini]')).userCommands).toEqual([]);
+    });
+
+    it('has no plugin for AGENTS.md alone, which still gets the graphify tool', () => {
+      expect(all(configWith('', '[agents-md]')).userCommands).toEqual(['uv tool install graphifyy']);
+    });
+  });
+
   it('returns the user-scope commands and the notes, with the notices of custom roles first', () => {
     const custom = '---\nrole: developer\ndescription: Ours.\ntier: standard\ncan_edit: true\nreturns: a report\nescalate_when: unsure\n---\nYou build.\n';
     const fs = memoryFs({ '.sdlc/agents/custom/developer.md': custom });
-    const { userCommands, notes, changes } = all(configWith('mcp: { scope: user }'), fs);
+    const { userCommands, notes, changes } = all(configWith(`mcp: { scope: user }\n${STACK_OFF}`), fs);
     expect(userCommands).toHaveLength(2);
     expect(userCommands[0]).toMatch(/^claude mcp add /);
     expect(userCommands[1]).toMatch(/^codex mcp add /);
@@ -487,7 +531,7 @@ describe('sdlc init', () => {
   });
 
   it('prints the commands the owner runs themselves for user-scope MCP servers, in the report and the JSON', async () => {
-    const config = configWith('stack: { actions: true }\nmcp: { scope: user }');
+    const config = configWith(`stack: { actions: true, superpowers: false, graphify: false }\nmcp: { scope: user }`);
     const { userCommands } = renderAll(cfgOf(config), memoryFs());
     expect(userCommands).toHaveLength(2);
     const h = setup({ config });
@@ -505,6 +549,19 @@ describe('sdlc init', () => {
     await json.go(['init', '--json']);
     const next = json.report().steps.find(step => step.name === 'next steps');
     expect(next?.details.filter(line => line.startsWith('run yourself: '))).toEqual(userCommands.map(c => `run yourself: ${c}`));
+  });
+
+  it('lists the stack install commands among the steps the owner runs themselves', async () => {
+    const config = configWith('stack: { actions: true }');
+    const h = setup({ config });
+    h.useGh(emptyGithub(cfgOf(config), false));
+
+    await h.go(['init']);
+
+    expect(h.text()).toContain('  run yourself: claude plugin install superpowers@claude-plugins-official');
+    expect(h.text()).toContain('  run yourself: codex plugin add superpowers@openai-curated');
+    expect(h.text()).toContain('  run yourself: uv tool install graphifyy');
+    expect(h.text()).toContain('  run yourself: graphify install --platform codex');
   });
 
   it('leaves out the SDLC_TOKEN step when Actions are off', async () => {

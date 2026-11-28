@@ -1,11 +1,22 @@
-import { loadConfigFromString, type Config } from '../config/schema.js';
+import { join } from 'node:path';
+import { deadlineOf, isNoTaskError, taskIssueOf } from '../commands/githook.js';
+import { runHook, type HookContext } from '../commands/hook.js';
+import { loadConfigFromString, type Config, type Harness } from '../config/schema.js';
+import type { Status } from '../core/types.js';
+import { listWorktrees, orphanWorktrees, type OrphanWorktree, type Worktree } from '../git/worktrees.js';
 import { ensureBoard } from '../github/board.js';
 import { GhError, ghJson, type GhRunner } from '../github/gh.js';
+import { GitHubTracker } from '../github/githubTracker.js';
+import { readJsonLines } from '../hooks/localLog.js';
+import { HOOK_EVENTS, HOOK_HARNESSES, type HookEventName, type HookHarness } from '../hooks/types.js';
+import { OUTBOX_FAILED_FILE, queuedCounts } from '../outbox/outbox.js';
 import { WORKFLOW_PATH } from '../render/github.js';
+import { HOOK_LAUNCHER, HOOK_MARKER, NATIVE_EVENT, SETTINGS_FILE } from '../render/hooks.js';
 import { KIT_GIT_URL } from '../render/instructions.js';
 import { mcpEnvVars } from '../render/mcp.js';
 import { envKey, pathDelimiter } from '../secrets/gitleaks.js';
 import { scanFileName } from '../secrets/scan.js';
+import type { Tracker } from '../tracker/types.js';
 import { MANIFEST_PATH, entryDiskHash, readManifest, type Manifest, type ManifestEntry } from './manifest.js';
 import {
   HOOKS_PATH,
@@ -18,6 +29,7 @@ import {
   type HookProbe,
 } from './provision.js';
 import type { RepoFs } from './repoFs.js';
+import { mcpListArgs, mcpNames, superpowersInstall, superpowersInstalled, superpowersListArgs, graphifyInstall } from './stack.js';
 
 /**
  * `sdlc doctor`: read-only checks of the machine (the preflight, which needs no config) and of an
@@ -56,6 +68,15 @@ export interface DoctorEnv {
   nodeVersion: string;
   /** The config file: its name for messages, and its text (`undefined` when there is no such file; throws when it cannot be read). */
   config: { path: string; read(): string | undefined };
+  /**
+   * Runs one hook event in process, for `hooks.roundtrip`; defaults to the real `runHook`. A seam for
+   * tests, which swap in a runner whose answer is wrong.
+   */
+  hookRunner?: (harness: HookHarness, event: HookEventName, ctx: HookContext) => Promise<unknown>;
+  /** The tracker `worktrees.orphans` asks for tasks, read only; defaults to GitHub through `run`. */
+  makeTracker?: (cfg: Config) => Tracker;
+  /** `process.platform` (the hooks of Gemini CLI cannot run under PowerShell, which it uses on Windows). */
+  platform?: NodeJS.Platform;
 }
 
 export interface ExecOptions {
@@ -336,6 +357,23 @@ function checkManagedFiles(fs: RepoFs, manifest: Manifest | undefined): Check {
   return warn(id, parts.join('; '), 'keep your edits, or replace the entries with sdlc init --overwrite-modified');
 }
 
+/** `git worktree`, `rev-parse --path-format=absolute` (the hooks) and the launcher lookup need git 2.31. */
+const MIN_GIT = { major: 2, minor: 31 };
+
+async function checkGitVersion(env: DoctorEnv): Promise<Check> {
+  const id = 'git.version';
+  const result = await env.git(['--version']);
+  if (result.code !== 0) return warn(id, `could not read the git version: git --version ${failure(result.code, result.stderr)}`);
+  const match = /git version ((\d+)\.(\d+)[^\r\n]*)/.exec(result.stdout);
+  if (match === null) return warn(id, `could not read the git version from "${describeError(result.stdout)}"`);
+  const [, version = '', major = '0', minor = '0'] = match;
+  const recent = Number(major) > MIN_GIT.major || (Number(major) === MIN_GIT.major && Number(minor) >= MIN_GIT.minor);
+  const wanted = `${MIN_GIT.major}.${MIN_GIT.minor}`;
+  return recent
+    ? ok(id, `git ${printable(version)}`)
+    : warn(id, `git ${printable(version)} is older than ${wanted}, which the sdlc hooks and worktrees need`, `upgrade git to ${wanted} or later`);
+}
+
 function checkHooksPath(hooks: Hooks): Check {
   const id = 'git.hooksPath';
   if ('error' in hooks) throw hooks.error;
@@ -543,37 +581,114 @@ function checkMcpToken(env: DoctorEnv, cfg: Config): Check {
   );
 }
 
-async function checkMcpClaude(env: DoctorEnv, cfg: Config): Promise<Check> {
-  const id = 'mcp.claude';
-  if (!cfg.harnesses.includes('claude')) return ok(id, 'claude is not a configured harness; skipped');
-  if (!(await env.which('claude'))) return ok(id, 'claude CLI not found; skipped');
+// --- the harness CLIs: MCP servers, Superpowers and graphify -------------------------------------
+
+/** Longest one of the list commands below may take: a hung CLI must not stall the whole run. */
+const CLI_TIMEOUT_MS = 15_000;
+
+/** Runs `cmd` in the repository root, in the environment a hook sees, with a time limit. */
+function runCli(env: DoctorEnv, cmd: string, args: string[]): ReturnType<DoctorEnv['exec']> {
+  return env.exec(cmd, args, { env: hookEnvironment(env.env).env, timeoutMs: CLI_TIMEOUT_MS });
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** The harnesses of `cfg` that have hooks, plugins and an `mcp list` of their own (all but `agents-md`), in configured order. */
+const cliHarnesses = (cfg: Config): HookHarness[] => cfg.harnesses.filter((harness: Harness): harness is HookHarness => harness !== 'agents-md');
+
+const MCP_FIX: Record<HookHarness, string> = {
+  claude: 'approve the server in Claude Code or run the printed claude mcp add command',
+  codex: 'trust the project in Codex (it loads .codex/config.toml only for trusted projects) or run the printed codex mcp add command',
+  gemini: 'trust the folder in Gemini CLI (it loads project settings only for trusted folders) or run the printed gemini mcp add command',
+};
+
+/** Whether the MCP servers of the config show up in `<harness> mcp list`; the same contract for every harness. */
+async function checkMcpHarness(env: DoctorEnv, cfg: Config, harness: HookHarness): Promise<Check> {
+  const id = `mcp.${harness}`;
+  if (!cfg.harnesses.includes(harness)) return ok(id, `${harness} is not a configured harness; skipped`);
+  if (!(await env.which(harness))) return ok(id, `${harness} CLI not found; skipped`);
   const wanted = cfg.mcp.servers;
   if (wanted.length === 0) return ok(id, 'no MCP servers are configured');
 
+  const shown = `${harness} mcp list`;
   let result: Awaited<ReturnType<DoctorEnv['exec']>>;
   try {
-    result = await env.exec('claude', ['mcp', 'list']);
+    result = await runCli(env, harness, mcpListArgs(harness));
   } catch (error) {
-    return warn(id, `could not run claude mcp list: ${describeError(error)}`);
+    return warn(id, `could not run ${shown}: ${describeError(error)}`);
   }
   if (result.code !== 0) {
     // Only the exit code and the first line of stderr: stdout can list other servers with their credentials.
-    return warn(id, `claude mcp list ${failure(result.code, result.stderr)}`);
+    return warn(id, `${shown} ${failure(result.code, result.stderr)}`);
   }
-  // `<id>: <command or url> - <status>` per server; an id counts only when it is the whole name.
-  const listed = new Set(
-    `${result.stdout}\n${result.stderr}`.split('\n').flatMap(line => {
-      const at = line.indexOf(': ');
-      return at > 0 ? [line.slice(0, at).trim()] : [];
-    }),
-  );
+  let listed: Set<string>;
+  try {
+    // Codex answers in JSON on stdout; the others print a line per server, a name counting only as the whole word.
+    listed = mcpNames(harness, harness === 'codex' ? result.stdout : `${result.stdout}\n${result.stderr}`);
+  } catch (error) {
+    return warn(id, `could not read ${shown}: ${describeError(error)}`);
+  }
   const missing = wanted.filter(server => !listed.has(server));
-  if (missing.length === 0) return ok(id, `claude mcp list shows ${wanted.join(', ')}`);
-  return warn(
-    id,
-    `claude mcp list does not show: ${missing.join(', ')}`,
-    'approve the server in Claude Code or run the printed claude mcp add command',
-  );
+  if (missing.length === 0) return ok(id, `${shown} shows ${wanted.join(', ')}`);
+  return warn(id, `${shown} does not show: ${missing.join(', ')}`, MCP_FIX[harness]);
+}
+
+/**
+ * Superpowers in each configured harness, from its plugin list in JSON. A harness whose CLI is not
+ * on the PATH is "not checked", never a warning; a list that cannot be read is a warning that does
+ * not say how to install it, because it is not known to be missing.
+ */
+async function checkSuperpowers(env: DoctorEnv, cfg: Config): Promise<Check> {
+  const id = 'stack.superpowers';
+  if (!cfg.stack.superpowers) return ok(id, 'stack.superpowers is off; skipped');
+  const harnesses = cliHarnesses(cfg);
+  if (harnesses.length === 0) return ok(id, 'no configured harness has plugins; skipped');
+
+  const installed: HookHarness[] = [];
+  const missing: HookHarness[] = [];
+  const unreadable: string[] = [];
+  const notes: string[] = [];
+  for (const harness of harnesses) {
+    if (!(await env.which(harness))) {
+      notes.push(`${harness}: not checked (${harness} not on PATH)`);
+      continue;
+    }
+    const shown = `${harness} plugin list`;
+    try {
+      const result = await runCli(env, harness, superpowersListArgs(harness));
+      if (result.code !== 0) {
+        unreadable.push(`could not read ${shown}: command ${failure(result.code, result.stderr)}`);
+      } else {
+        (superpowersInstalled(harness, result.stdout) ? installed : missing).push(harness);
+      }
+    } catch (error) {
+      unreadable.push(`could not read ${shown}: ${describeError(error)}`);
+    }
+  }
+
+  const problems = [...(missing.length > 0 ? [`superpowers is not installed for ${missing.join(', ')}`] : []), ...unreadable];
+  if (problems.length > 0) {
+    return warn(id, [...problems, ...notes].join('; '), missing.length > 0 ? missing.map(harness => superpowersInstall(harness)).join(' && ') : undefined);
+  }
+  return ok(id, [...(installed.length > 0 ? [`superpowers is installed for ${installed.join(', ')}`] : []), ...notes].join('; '));
+}
+
+/** graphify on the PATH and answering `--version`; the fix is what `sdlc init` lists to install it. */
+async function checkGraphify(env: DoctorEnv, cfg: Config): Promise<Check> {
+  const id = 'stack.graphify';
+  if (!cfg.stack.graphify) return ok(id, 'stack.graphify is off; skipped');
+  const fix = graphifyInstall(cfg.harnesses).join(' && ');
+  if (!(await env.which('graphify'))) return warn(id, 'graphify is not installed (not on the PATH)', fix);
+  let result: Awaited<ReturnType<DoctorEnv['exec']>>;
+  try {
+    result = await runCli(env, 'graphify', ['--version']);
+  } catch (error) {
+    return warn(id, `could not run graphify --version: ${describeError(error)}`, fix);
+  }
+  if (result.code !== 0) return warn(id, `graphify --version ${failure(result.code, result.stderr)}`, fix);
+  const version = /\d+\.\d+(?:\.\d+)*\S*/.exec(result.stdout)?.[0];
+  return ok(id, version === undefined ? 'graphify is installed' : `graphify ${printable(version)}`);
 }
 
 /** Inactive when the hooks path is wrong or `sdlc` is missing; failing to read the hooks path is "cannot verify" (still a fail), not a wrong path. */
@@ -649,11 +764,307 @@ function checkApprovalTrust(cfg: Config): Check {
   return ok(id, 'the approval trust settings are consistent');
 }
 
+// --- the harness hooks ------------------------------------------------------------------------
+
+const CODEX_TRUST = ' (Codex runs it only after you trust the project and approve it in /hooks)';
+
+/** Whether the launcher is in `HEAD`, asked of git at most once per run; `undefined` when git cannot say. */
+function launcherCommitted(git: GitRunner): () => Promise<boolean | undefined> {
+  let known: Promise<boolean | undefined> | undefined;
+  return () => (known ??= git(['cat-file', '-e', `HEAD:${HOOK_LAUNCHER}`]).then(result => result.code === 0, () => undefined));
+}
+
+/** The native event names of `harness` that have no array element calling the launcher (the same test the merge applies: the marker is in the element's JSON). */
+function eventsWithoutHook(settings: unknown, harness: HookHarness): string[] {
+  const hooks = isRecord(settings) ? settings.hooks : undefined;
+  return HOOK_EVENTS.map(event => NATIVE_EVENT[harness][event]).filter(native => {
+    const items = isRecord(hooks) ? hooks[native] : undefined;
+    return !(Array.isArray(items) && items.some(item => JSON.stringify(item).includes(HOOK_MARKER)));
+  });
+}
+
+/**
+ * The hooks one harness reads: its settings file has an element that calls the launcher for each of
+ * session start, the prompt and the tool call; the launcher exists, and is committed (a worktree or
+ * a clone gets only what is committed).
+ */
+async function checkHooksOf(env: DoctorEnv, cfg: Config, harness: HookHarness, committed: () => Promise<boolean | undefined>): Promise<Check> {
+  const id = `hooks.${harness}`;
+  if (!cfg.harnesses.includes(harness)) return ok(id, `${harness} is not a configured harness; skipped`);
+  if (harness === 'gemini' && (env.platform ?? process.platform) === 'win32') {
+    return warn(id, 'Gemini CLI runs hooks through PowerShell on Windows; sdlc hooks need a POSIX shell');
+  }
+
+  const file = SETTINGS_FILE[harness];
+  const problems: string[] = [];
+  const fixes: string[] = [];
+  const needsUpgrade = (problem: string): void => {
+    problems.push(problem);
+    if (!fixes.includes('sdlc upgrade')) fixes.push('sdlc upgrade');
+  };
+
+  const text = env.fs.read(file);
+  if (text === undefined) {
+    needsUpgrade(`${file} not found, so ${harness} runs no sdlc hooks`);
+  } else {
+    let settings: unknown;
+    try {
+      settings = JSON.parse(text);
+    } catch {
+      return warn(id, `${file} is not valid JSON, so ${harness} cannot read its hooks`, `fix the syntax of ${file}, then run sdlc upgrade`);
+    }
+    const missing = eventsWithoutHook(settings, harness);
+    if (missing.length > 0) needsUpgrade(`no sdlc hook in ${file} for ${missing.join(', ')}`);
+  }
+
+  if (env.fs.read(HOOK_LAUNCHER) === undefined) {
+    needsUpgrade(`${HOOK_LAUNCHER} not found`);
+  } else if ((await committed()) === false) {
+    problems.push(`${HOOK_LAUNCHER} is not committed; new worktrees and clones will not run the sdlc hooks`);
+    fixes.push(`commit ${HOOK_LAUNCHER}`);
+  }
+  if (problems.length > 0) return warn(id, problems.join('; '), fixes.join('; '));
+
+  const events = HOOK_EVENTS.map(event => NATIVE_EVENT[harness][event]).join(', ');
+  return ok(id, `${file} runs ${HOOK_LAUNCHER} on ${events}${harness === 'codex' ? CODEX_TRUST : ''}`);
+}
+
+/** A shell command every rule of the hook turns down, in the tool name each harness calls its shell. */
+const ROUNDTRIP_COMMAND = 'gh pr merge 1 --admin';
+const SHELL_TOOL: Record<HookHarness, string> = { claude: 'Bash', codex: 'Bash', gemini: 'run_shell_command' };
+const ROUNDTRIP_QUOTE = 120;
+
+/** `text` for a message: one printable line, cut short. */
+function quoted(text: string): string {
+  const line = describeError(text);
+  return line.length > ROUNDTRIP_QUOTE ? `${line.slice(0, ROUNDTRIP_QUOTE - 1)}…` : line;
+}
+
+/** A tracker that reads nothing: the round trip must not touch GitHub, and a pre-tool shell rule never needs a task. */
+const NO_TRACKER = new Proxy({} as Tracker, {
+  get: (_target, property) =>
+    typeof property !== 'string' || property === 'then'
+      ? undefined
+      : async (): Promise<never> => {
+          throw new Error('the hooks round trip does not read tasks');
+        },
+});
+
+/** A git that knows one repository, `root`, on a branch of no task: what the hook asks (`checkoutOf`) and nothing else. */
+function roundTripGit(root: string): GitRunner {
+  return async args => {
+    if (args[0] === 'rev-parse') return { stdout: `${root}\n${join(root, '.git')}\n`, code: 0, stderr: '' };
+    if (args[0] === 'symbolic-ref') return { stdout: 'main\n', code: 0, stderr: '' };
+    return { stdout: '', code: 128, stderr: 'the hooks round trip has no git' };
+  };
+}
+
+const denies = (harness: HookHarness, answer: unknown): boolean =>
+  isRecord(answer) &&
+  (harness === 'gemini' ? answer.decision === 'deny' : isRecord(answer.hookSpecificOutput) && answer.hookSpecificOutput.permissionDecision === 'deny');
+
+/** The observe warning: in `systemMessage` for all, and in `additionalContext` too for Claude and Codex; never a deny. */
+const warns = (harness: HookHarness, answer: unknown): boolean => {
+  const observe = (value: unknown): boolean => typeof value === 'string' && value.includes('sdlc (observe)');
+  if (!isRecord(answer) || denies(harness, answer) || !observe(answer.systemMessage)) return false;
+  return harness === 'gemini' || (isRecord(answer.hookSpecificOutput) && observe(answer.hookSpecificOutput.additionalContext));
+};
+
+/** What is wrong with the answer of `harness`'s pre-tool hook, `undefined` when it is the one the mode calls for. */
+function roundTripProblem(harness: HookHarness, mode: Config['mode'], output: string | undefined, stderr: string[]): string | undefined {
+  const expected = mode === 'enforce' ? 'a deny' : 'the observe warning';
+  if (output === undefined) {
+    const why = stderr.find(line => line.trim() !== '');
+    return `${harness}: expected ${expected}, got no output${why === undefined ? '' : ` (${quoted(why)})`}`;
+  }
+  let answer: unknown;
+  try {
+    answer = JSON.parse(output);
+  } catch {
+    return `${harness}: expected ${expected}, got output that is not JSON: ${quoted(output)}`;
+  }
+  const right = mode === 'enforce' ? denies(harness, answer) : warns(harness, answer);
+  return right ? undefined : `${harness}: expected ${expected}, got ${quoted(output)}`;
+}
+
+/**
+ * Runs `sdlc hook <harness> pre-tool` in process for every configured harness that has hooks, on a
+ * command it must turn down (`gh pr merge --admin`): the answer must be the harness's deny in
+ * enforce mode and the warning in observe mode. This checks the code between the payload and the
+ * answer (the parsing, the rules, the shape of the output), not the launcher script.
+ *
+ * It leaves no trace: the hook runs read-only (it writes no gap, prompt record or task cache and
+ * starts no sync), against a synthetic git and a tracker that rejects every call, so it reads no
+ * task and neither reads nor writes GitHub, and the real logs of the repository stay as they were.
+ */
+async function checkRoundTrip(env: DoctorEnv, cfg: Config): Promise<Check> {
+  const id = 'hooks.roundtrip';
+  const harnesses = cliHarnesses(cfg);
+  if (harnesses.length === 0) return ok(id, 'no configured harness has hooks; skipped');
+
+  const run = env.hookRunner ?? runHook;
+  const root = env.fs.root;
+  const problems: string[] = [];
+  for (const harness of harnesses) {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const payload = JSON.stringify({
+      session_id: 'sdlc-doctor',
+      cwd: root,
+      tool_name: SHELL_TOOL[harness],
+      tool_input: { command: ROUNDTRIP_COMMAND },
+    });
+    const ctx: HookContext = {
+      cwd: root,
+      readStdin: async () => payload,
+      loadConfig: () => cfg,
+      makeTracker: () => NO_TRACKER,
+      gitFor: () => roundTripGit(root),
+      now: () => new Date().toISOString(),
+      out: text => void stdout.push(text),
+      err: text => void stderr.push(text),
+      readOnly: true,
+    };
+    try {
+      await run(harness, 'pre-tool', ctx);
+    } catch (error) {
+      problems.push(`${harness}: the hook threw: ${quoted(describeError(error))}`);
+      continue;
+    }
+    const problem = roundTripProblem(harness, cfg.mode, stdout.length === 0 ? undefined : stdout.join(''), stderr);
+    if (problem !== undefined) problems.push(problem);
+  }
+
+  if (problems.length > 0) {
+    return fail(
+      id,
+      `sdlc hook ${harnesses.join(', ')} pre-tool does not answer \`${ROUNDTRIP_COMMAND}\` as it should: ${problems.join('; ')}`,
+      'sdlc upgrade, then reinstall sdlc if this persists (see INSTALL.md); the harness hooks cannot be trusted until it passes',
+    );
+  }
+  return ok(id, `${harnesses.join(', ')}: pre-tool on \`${ROUNDTRIP_COMMAND}\` ${cfg.mode === 'enforce' ? 'denies it (enforce)' : 'warns about it (observe)'}`);
+}
+
+// --- the local queues and the task worktrees ---------------------------------------------------
+
+type WorktreeList = { worktrees: Worktree[]; mainRoot: string } | { error: unknown };
+
+/** `git worktree list` once per run; the main checkout (first, not bare) is where the kit keeps its local files. */
+function worktreeLister(env: DoctorEnv): () => Promise<WorktreeList> {
+  let known: Promise<WorktreeList> | undefined;
+  return () =>
+    (known ??= listWorktrees(env.git).then(
+      (worktrees): WorktreeList => ({ worktrees, mainRoot: worktrees.find(worktree => !worktree.bare)?.path ?? env.fs.root }),
+      (error: unknown): WorktreeList => ({ error }),
+    ));
+}
+
+/** What waits for `sdlc sync` in the cache of the main checkout (also when doctor runs in a worktree). */
+async function checkOutbox(env: DoctorEnv, worktrees: () => Promise<WorktreeList>): Promise<Check> {
+  const id = 'outbox.pending';
+  const found = await worktrees();
+  const root = 'error' in found ? env.fs.root : found.mainRoot;
+  const { outbox, gaps } = await queuedCounts(root);
+  let failed = 0;
+  try {
+    failed = (await readJsonLines<unknown>(root, OUTBOX_FAILED_FILE)).filter(isRecord).length;
+  } catch {
+    // A file that cannot be read counts as empty, as it does for the queue.
+  }
+  if (outbox + failed + gaps === 0) return ok(id, 'nothing is queued for sdlc sync');
+  return warn(id, `${outbox} queued write(s), ${failed} failed${gaps > 0 ? `, ${gaps} gap(s)` : ''}; run sdlc sync`, 'sdlc sync');
+}
+
+/** Longest the task lookups of `worktrees.orphans` may take in all. */
+const TASK_LOOKUP_MS = 10_000;
+
+const orphanLabel = (orphan: OrphanWorktree): string =>
+  `${printable(orphan.path)}${orphan.branch === undefined ? '' : ` (${printable(orphan.branch)})`}: ${orphan.reason}`;
+
+function orphanFix(orphans: readonly OrphanWorktree[]): string {
+  const fixes = new Set<string>();
+  for (const orphan of orphans) {
+    const issue = taskIssueOf(orphan.branch);
+    if (orphan.reason === 'prunable') fixes.add('git worktree prune');
+    else if (orphan.reason === 'task-done' && issue !== undefined) fixes.add(`sdlc worktree finish ${issue}`);
+    else fixes.add(`git worktree remove ${orphan.path}`);
+  }
+  return [...fixes].join('; ');
+}
+
+/**
+ * Looks up each of `orphans` (task branches no task was found for) and records the status of the tasks that exist in `tasks`.
+ * Returns why the tasks cannot be read, `undefined` when they could. Read only; the whole lookup has one deadline.
+ */
+async function lookUpTasks(
+  tracker: Tracker,
+  orphans: readonly OrphanWorktree[],
+  tasks: Map<number, { status: Status }>,
+): Promise<string | undefined> {
+  const deadline = deadlineOf(TASK_LOOKUP_MS);
+  try {
+    for (const orphan of orphans) {
+      const issue = taskIssueOf(orphan.branch);
+      if (issue === undefined) continue;
+      try {
+        const task = await deadline.run(() => tracker.getTask(issue));
+        tasks.set(issue, { status: task.state.status });
+      } catch (error) {
+        // An issue with no readable task is what makes a worktree an orphan; anything else is "cannot tell".
+        if (!isNoTaskError(error)) return ghReason(error);
+      }
+    }
+    return undefined;
+  } finally {
+    deadline.stop();
+  }
+}
+
+/**
+ * Worktrees under `.worktrees/` that no live task needs. Only a task branch with no task in hand
+ * costs a GitHub read (`getTask`, read only); with GitHub unreachable or `gh` unusable the answer
+ * is "not checked (tasks unavailable)", plus the orphans that need no task (detached, prunable).
+ */
+async function checkWorktreeOrphans(
+  env: DoctorEnv,
+  cfg: Config,
+  blocker: string | undefined,
+  worktrees: () => Promise<WorktreeList>,
+): Promise<Check> {
+  const id = 'worktrees.orphans';
+  const found = await worktrees();
+  if ('error' in found) return notChecked(id, describeError(found.error));
+  const { mainRoot } = found;
+
+  const candidates = orphanWorktrees(found.worktrees, mainRoot, new Map()).filter(orphan => orphan.reason === 'no-task');
+  const tasks = new Map<number, { status: Status }>();
+  let unavailable: string | undefined;
+  if (candidates.length > 0) {
+    unavailable =
+      blocker ?? (await lookUpTasks(env.makeTracker?.(cfg) ?? new GitHubTracker(env.run, cfg, { repoRoot: mainRoot }), candidates, tasks));
+  }
+
+  const orphans = orphanWorktrees(found.worktrees, mainRoot, tasks);
+  if (unavailable !== undefined) {
+    const known = orphans.filter(orphan => orphan.reason !== 'no-task');
+    return warn(
+      id,
+      `not checked (tasks unavailable: ${unavailable})${known.length > 0 ? `; orphans that need no task: ${list(known.map(orphanLabel))}` : ''}`,
+      known.length > 0 ? orphanFix(known) : undefined,
+    );
+  }
+  if (orphans.length === 0) return ok(id, `no orphan worktrees under .worktrees (${found.worktrees.length} worktree(s) listed)`);
+  return warn(id, `orphan worktrees: ${list(orphans.map(orphanLabel))}`, orphanFix(orphans));
+}
+
 /**
  * The preflight and every check of an installed repository, in this order: config, manifest and
- * managed files, git hooks and the legacy hooks they chain, `sdlc` on the PATH, `kit_ref`, board, labels, the Actions workflow and secret (only
- * with `stack.actions`), MCP, the secret guard, push protection, tracked secret files and approval
- * trust. Only reads: the board is planned as a dry run and nothing is written to GitHub or to disk.
+ * managed files, the git version, git hooks and the legacy hooks they chain, `sdlc` on the PATH,
+ * `kit_ref`, board, labels, the Actions workflow and secret (only with `stack.actions`), the MCP
+ * token and the MCP servers of each harness, Superpowers and graphify, the hooks of each harness
+ * and their round trip, the secret guard, push protection, tracked secret files, approval trust,
+ * what waits for `sdlc sync` and the orphan worktrees. Only reads: the board is planned as a dry
+ * run, the round trip runs the hook without a trace, and nothing is written to GitHub or to disk.
  * The checks that call `gh` say `not checked` when `gh` is not installed or not logged in.
  */
 export async function runDoctor(env: DoctorEnv, cfg: Config): Promise<Check[]> {
@@ -682,6 +1093,7 @@ export async function runDoctor(env: DoctorEnv, cfg: Config): Promise<Check[]> {
   await add(isolated('files.managed', () => checkManagedFiles(env.fs, manifest)));
 
   const hooks = await readHooks(env.git);
+  await add(isolated('git.version', () => checkGitVersion(env)));
   await add(isolated('git.hooksPath', () => checkHooksPath(hooks)));
   await add(isolated('git.legacyHooks', () => checkLegacyHooks(env, hooks)));
   const onPath = await add(isolated('sdlc.onPath', () => checkSdlcOnPath(env)));
@@ -695,11 +1107,22 @@ export async function runDoctor(env: DoctorEnv, cfg: Config): Promise<Check[]> {
   }
 
   await add(isolated('mcp.token', () => checkMcpToken(env, cfg)));
-  await add(isolated('mcp.claude', () => checkMcpClaude(env, cfg)));
+  for (const harness of HOOK_HARNESSES) await add(isolated(`mcp.${harness}`, () => checkMcpHarness(env, cfg, harness)));
+  await add(isolated('stack.superpowers', () => checkSuperpowers(env, cfg)));
+  await add(isolated('stack.graphify', () => checkGraphify(env, cfg)));
+
+  const committed = launcherCommitted(env.git);
+  for (const harness of HOOK_HARNESSES) await add(isolated(`hooks.${harness}`, () => checkHooksOf(env, cfg, harness, committed)));
+  await add(isolated('hooks.roundtrip', () => checkRoundTrip(env, cfg)));
+
   await add(isolated('secrets.guard', () => checkSecretGuard(hooks, onPath.status === 'ok')));
   await add(viaGh('secrets.pushProtection', () => checkPushProtection(env, cfg)));
   await add(isolated('secrets.trackedFiles', () => checkTrackedFiles(env, cfg)));
   await add(isolated('approvals.trust', () => checkApprovalTrust(cfg)));
+
+  const worktrees = worktreeLister(env);
+  await add(isolated('outbox.pending', () => checkOutbox(env, worktrees)));
+  await add(isolated('worktrees.orphans', () => checkWorktreeOrphans(env, cfg, blocker, worktrees)));
   return checks;
 }
 

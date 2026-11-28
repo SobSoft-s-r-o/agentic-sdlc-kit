@@ -85,6 +85,7 @@ interface Options {
   deadlineMs?: number;
   exit?: (code: number) => void;
   spawnSync?: (root: string) => void;
+  readOnly?: boolean;
 }
 
 async function run(harness: HookHarness, event: HookEventName, options: Options): Promise<Run> {
@@ -106,6 +107,7 @@ async function run(harness: HookHarness, event: HookEventName, options: Options)
     ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
     ...(options.exit === undefined ? {} : { exit: options.exit }),
     ...(options.spawnSync === undefined ? {} : { spawnSync: options.spawnSync }),
+    ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
   };
   const code = await runHook(harness, event, ctx);
   return { code, stdout: out.join(''), stderr: err, ctx };
@@ -1556,5 +1558,53 @@ describe('registerHookCommand', () => {
     expect(out.join('')).toBe(stdout);
     expect(err).toEqual([`sdlc: hook skipped: ${reason}`]);
     process.exitCode = undefined;
+  });
+});
+
+describe('runHook with readOnly: the answer without any trace', () => {
+  const cacheDir = (): string => join(repo.root, '.sdlc', 'cache');
+
+  it('answers a violation like any hook, and writes no gap', async () => {
+    taskBranch('task/5-x');
+    const stdin = payload(repo.root, 'Bash', { command: 'gh pr merge 1 --admin' });
+
+    const readOnly = await claudePreTool(stdin, { readOnly: true });
+
+    expect(denyReason(readOnly.stdout)).toContain('sdlc (enforce):');
+    expect(gapLines()).toEqual([]);
+
+    // The same run without the flag logs the gap and gives the same answer.
+    const normal = await claudePreTool(stdin);
+    expect(normal.stdout).toBe(readOnly.stdout);
+    expect(gapLines()).toHaveLength(1);
+
+    // And a read-only run after it adds no second line.
+    await claudePreTool(stdin, { readOnly: true });
+    expect(gapLines()).toHaveLength(1);
+  });
+
+  it('creates no cache directory at all, for a violation, a recorded prompt or a cached task', async () => {
+    taskBranch('task/5-x');
+    tracker.seedTask(feature(5, true));
+
+    await claudePreTool(payload(repo.root, 'Bash', { command: 'gh pr merge 1 --admin' }), { readOnly: true });
+    await run('claude', 'prompt', { stdin: claudePrompt('please continue'), readOnly: true });
+    const edit = await claudePreTool(claudeWrite(join(repo.root, 'src', 'a.ts')), { readOnly: true });
+
+    // The task was read from the tracker, and allowed: normally that would be cached.
+    expect(edit.stdout).toBe('');
+    expect(existsSync(cacheDir())).toBe(false);
+  });
+
+  it('does not start sdlc sync, even when something is queued', async () => {
+    taskBranch('task/5-x');
+    tracker.seedTask(feature(5, true));
+    repo.write('.sdlc/cache/outbox.jsonl', `${JSON.stringify({ id: 'a', at: NOW, argv: ['approve', '5'] })}\n`);
+    const spawnSync = vi.fn();
+
+    const result = await run('claude', 'session-start', { stdin: sessionStart(), spawnSync, readOnly: true });
+
+    expect(spawnSync).not.toHaveBeenCalled();
+    expect(contextLines(result.stdout).at(-1)).toBe('Queued for sync: 1 write(s), 0 gap(s); run `sdlc sync`.');
   });
 });
