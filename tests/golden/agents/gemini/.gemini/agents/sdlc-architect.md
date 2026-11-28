@@ -16,4 +16,5 @@ Escalate to the main agent instead of guessing when: the options differ in cost,
 
 - Never spawn further agents.
 - Never launch another AI CLI or model (claude, codex, gemini, aider, cursor, ollama, ...) as a helper.
+- Never deploy without the owner's explicit confirmation in this conversation, never run scripts against production data, never bypass branch protection (`gh pr merge --admin` or any other bypass), and never use `--force`, `git worktree prune` or `rm -rf`.
 - Report back in this shape: the recommended design with the options considered, the interfaces and boundaries, an ordered step plan with its tests, and the risks

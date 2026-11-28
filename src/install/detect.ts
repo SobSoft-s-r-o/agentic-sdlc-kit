@@ -4,6 +4,7 @@ import { Document, isMap, isScalar, visit } from 'yaml';
 import type { Harness } from '../config/schema.js';
 import { BUILTIN_TYPES } from '../core/taskTypes.js';
 import { ghJson, ghText, type GhRunner } from '../github/gh.js';
+import { packageVersion } from '../version.js';
 
 /** What `detectConfig` knows about a repository; `probeRepo` collects it. */
 export interface RepoProbe {
@@ -132,6 +133,7 @@ export function detectConfig(probe: RepoProbe): DetectedConfig {
     version: 1,
     harnesses,
     mode: 'observe',
+    kit_ref: `v${packageVersion()}`,
     github: {
       repo: probe.repo,
       default_branch: probe.defaultBranch,
@@ -145,6 +147,13 @@ export function detectConfig(probe: RepoProbe): DetectedConfig {
     targets,
   });
   document.commentBefore = ' Suggested by "sdlc config suggest". Review every value, then run "sdlc config validate".';
+  const root = document.contents;
+  const kitRef = isMap(root) ? root.items.find(pair => isScalar(pair.key) && pair.key.value === 'kit_ref') : undefined;
+  if (kitRef !== undefined && isScalar(kitRef.key)) {
+    kitRef.key.commentBefore =
+      ' The kit version the generated npx commands and the workflow run (a tag or branch of agentic-sdlc-kit).\n' +
+      ' Until a release tag exists, set main or the ref you installed from; "sdlc doctor" checks that it exists.';
+  }
   visit(document, {
     Seq(_key, node) {
       if (node.items.every(item => isScalar(item))) node.flow = true;

@@ -10,6 +10,7 @@ import {
   scanWorkflowEnvironments,
   type RepoProbe,
 } from '../../src/install/detect.js';
+import { packageVersion } from '../../src/version.js';
 import { fakeGh } from '../support/fakeGh.js';
 
 function probe(overrides: Partial<RepoProbe> = {}): RepoProbe {
@@ -191,6 +192,15 @@ describe('detectConfig', () => {
       const { parsed } = detect();
       expect(parsed.mode).toBe('observe');
       expect(parsed.merge_policy).toBe('owner_only');
+    });
+  });
+
+  describe('kit_ref', () => {
+    it('writes kit_ref explicitly, v<version> by default, with a comment on when to change it', () => {
+      const { yaml, parsed } = detect();
+      expect(parsed.kit_ref).toBe(`v${packageVersion()}`);
+      expect(yaml).toMatch(/\n# Until a release tag exists, set main or the ref you installed from[^\n]*\nkit_ref: v\d/);
+      expect(loadConfigFromString(yaml).kitRef).toBe(`v${packageVersion()}`);
     });
   });
 

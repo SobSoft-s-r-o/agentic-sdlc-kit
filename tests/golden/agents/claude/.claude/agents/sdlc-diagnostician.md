@@ -18,4 +18,5 @@ Escalate to the main agent instead of guessing when: you cannot reproduce the fa
 
 - Never spawn further agents.
 - Never launch another AI CLI or model (claude, codex, gemini, aider, cursor, ollama, ...) as a helper.
+- Never deploy without the owner's explicit confirmation in this conversation, never run scripts against production data, never bypass branch protection (`gh pr merge --admin` or any other bypass), and never use `--force`, `git worktree prune` or `rm -rf`.
 - Report back in this shape: how to reproduce it, the evidence quoted, the root cause apart from symptoms, the hypotheses ruled out, the smallest fix and its regression test, and what is still unverified

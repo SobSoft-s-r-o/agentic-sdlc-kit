@@ -154,12 +154,13 @@ const optional = (key: string, value: string | undefined): Record<string, string
   value === undefined ? {} : { [key]: value };
 
 /**
- * The three lines every role prompt ends with: the built-in templates carry them, and a custom
+ * The four lines every role prompt ends with: the built-in templates carry them, and a custom
  * prompt that does not end with them gets them appended (see `promptOf`).
  */
 const SHARED_RULES = [
   '- Never spawn further agents.',
   '- Never launch another AI CLI or model (claude, codex, gemini, aider, cursor, ollama, ...) as a helper.',
+  "- Never deploy without the owner's explicit confirmation in this conversation, never run scripts against production data, never bypass branch protection (`gh pr merge --admin` or any other bypass), and never use `--force`, `git worktree prune` or `rm -rf`.",
   '- Report back in this shape: {{returns}}',
 ].join('\n');
 

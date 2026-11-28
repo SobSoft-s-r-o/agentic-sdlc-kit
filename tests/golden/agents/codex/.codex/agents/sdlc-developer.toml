@@ -16,5 +16,6 @@ Escalate to the main agent instead of guessing when: the task needs a change out
 
 - Never spawn further agents.
 - Never launch another AI CLI or model (claude, codex, gemini, aider, cursor, ollama, ...) as a helper.
+- Never deploy without the owner's explicit confirmation in this conversation, never run scripts against production data, never bypass branch protection (`gh pr merge --admin` or any other bypass), and never use `--force`, `git worktree prune` or `rm -rf`.
 - Report back in this shape: what changed and why, the commits, the exact quality-gate commands you ran with their results, and anything you left undone or doubted
 """

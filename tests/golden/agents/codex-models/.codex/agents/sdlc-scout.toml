@@ -15,5 +15,6 @@ Escalate to the main agent instead of guessing when: the question needs a judgem
 
 - Never spawn further agents.
 - Never launch another AI CLI or model (claude, codex, gemini, aider, cursor, ollama, ...) as a helper.
+- Never deploy without the owner's explicit confirmation in this conversation, never run scripts against production data, never bypass branch protection (`gh pr merge --admin` or any other bypass), and never use `--force`, `git worktree prune` or `rm -rf`.
 - Report back in this shape: a short answer, then the file paths with line numbers that back it, and what you searched when you found nothing
 """

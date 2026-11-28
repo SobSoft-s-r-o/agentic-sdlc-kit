@@ -53,10 +53,11 @@ const EXPECTED = [
 
 const NAMES = EXPECTED.map(e => e.role);
 
-/** The three lines every built-in role prompt ends with, as written in the templates. */
+/** The four lines every built-in role prompt ends with, as written in the templates. */
 const SHARED_RULES = [
   '- Never spawn further agents.',
   '- Never launch another AI CLI or model (claude, codex, gemini, aider, cursor, ollama, ...) as a helper.',
+  "- Never deploy without the owner's explicit confirmation in this conversation, never run scripts against production data, never bypass branch protection (`gh pr merge --admin` or any other bypass), and never use `--force`, `git worktree prune` or `rm -rf`.",
   '- Report back in this shape: {{returns}}',
 ].join('\n');
 
@@ -317,9 +318,10 @@ describe('renderAgents', () => {
       expect(body).not.toContain('{{');
       expect(body).toContain(`- Report back in this shape: ${reviewer.returns}`);
       expect(body).toContain(reviewer.escalateWhen);
-      expect(body.trimEnd().split('\n').slice(-3)).toEqual([
+      expect(body.trimEnd().split('\n').slice(-4)).toEqual([
         '- Never spawn further agents.',
         '- Never launch another AI CLI or model (claude, codex, gemini, aider, cursor, ollama, ...) as a helper.',
+        "- Never deploy without the owner's explicit confirmation in this conversation, never run scripts against production data, never bypass branch protection (`gh pr merge --admin` or any other bypass), and never use `--force`, `git worktree prune` or `rm -rf`.",
         `- Report back in this shape: ${reviewer.returns}`,
       ]);
     });
@@ -468,7 +470,7 @@ describe('renderAgents', () => {
         expect(first.split('Never spawn further agents').length - 1).toBe(1);
       });
 
-      it('adds all three lines when only some of them end the prompt, or they do not start a line', () => {
+      it('adds all four lines when only some of them end the prompt, or they do not start a line', () => {
         const partial = 'Do the work.\n\n- Never spawn further agents.\n- Report back in this shape: {{returns}}\n';
         expect(promptIn('claude', rendered('claude', partial))).toBe(`${partial.replace('{{returns}}', 'a short report').trimEnd()}\n\n${RENDERED_RULES}\n`);
         const inline = `See: ${SHARED_RULES}\n`;
@@ -479,7 +481,7 @@ describe('renderAgents', () => {
         for (const def of builtinRoles()) {
           const prompt = promptIn('claude', byPath(renderAgents(cfgWith(), 'claude', [def]), `.claude/agents/sdlc-${def.role}.md`).content);
           expect(prompt.split('Never spawn further agents').length - 1, def.role).toBe(1);
-          expect(prompt.trimEnd().split('\n').slice(-3).join('\n'), def.role).toBe(
+          expect(prompt.trimEnd().split('\n').slice(-4).join('\n'), def.role).toBe(
             RENDERED_RULES.replace('a short report', def.returns),
           );
         }

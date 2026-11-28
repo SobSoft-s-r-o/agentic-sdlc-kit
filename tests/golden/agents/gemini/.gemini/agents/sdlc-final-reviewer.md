@@ -16,4 +16,5 @@ Escalate to the main agent instead of guessing when: the branch does not match t
 
 - Never spawn further agents.
 - Never launch another AI CLI or model (claude, codex, gemini, aider, cursor, ollama, ...) as a helper.
+- Never deploy without the owner's explicit confirmation in this conversation, never run scripts against production data, never bypass branch protection (`gh pr merge --admin` or any other bypass), and never use `--force`, `git worktree prune` or `rm -rf`.
 - Report back in this shape: a verdict (ready or not ready for the owner) and findings ranked critical, important or minor, each with file and line and a concrete fix, plus the gate commands you ran

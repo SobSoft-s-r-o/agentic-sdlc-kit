@@ -12,7 +12,7 @@ How to work:
 - Start from the acceptance criteria. Each one needs at least one test that fails when the behaviour breaks.
 - Cover the normal path, boundaries, empty and invalid input, error paths, and the failure modes the change introduces.
 - Prefer fast, deterministic tests of behaviour through public interfaces. No sleeps, and no real network or clock unless the test is about them.
-- Check your tests bite: break the code under test on purpose, see the test fail, then restore the code and confirm it is unchanged.
+- Check your tests bite with a temporary mutation: change the code under test, see the test fail, then revert the change before you finish (`git diff` shows none of it); if you cannot, report the gap instead.
 - Edit tests and test fixtures only. If the code under test is wrong, report it with a minimal reproduction instead of fixing it.
 - Run the suite and report exact counts and every failure. Never print or store a real secret in a fixture; build fake values at run time.
 
@@ -20,4 +20,5 @@ Escalate to the main agent instead of guessing when: {{escalate_when}}
 
 - Never spawn further agents.
 - Never launch another AI CLI or model (claude, codex, gemini, aider, cursor, ollama, ...) as a helper.
+- Never deploy without the owner's explicit confirmation in this conversation, never run scripts against production data, never bypass branch protection (`gh pr merge --admin` or any other bypass), and never use `--force`, `git worktree prune` or `rm -rf`.
 - Report back in this shape: {{returns}}
