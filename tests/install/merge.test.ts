@@ -291,13 +291,19 @@ describe('mergeJsonKeys', () => {
     expect(out).toBe(`${JSON.stringify({ editor: 'vim', mcpServers: { github: { url: 'u' } } }, null, 4).split('\n').join('\r\n')}\r\n`);
   });
 
-  it('uses two spaces and a final newline for a new file, an empty one, or one with no indentation', () => {
-    const two = `${JSON.stringify({ a: 1, mcpServers: { github: { url: 'u' } } }, null, 2)}\n`;
-    expect(mergeJsonKeys(undefined, [entry], new Set()).text).toBe(`${JSON.stringify({ mcpServers: { github: { url: 'u' } } }, null, 2)}\n`);
-    expect(mergeJsonKeys('', [entry], new Set()).text).toBe(`${JSON.stringify({ mcpServers: { github: { url: 'u' } } }, null, 2)}\n`);
-    expect(mergeJsonKeys('{"a":1}\n', [entry], new Set()).text).toBe(two);
-    // no indentation and no final newline in the original: the newline stays absent
-    expect(mergeJsonKeys('{"a":1}', [entry], new Set()).text).toBe(two.trimEnd());
+  it('uses two spaces and a final newline for a new file or an empty one', () => {
+    const two = `${JSON.stringify({ mcpServers: { github: { url: 'u' } } }, null, 2)}\n`;
+    expect(mergeJsonKeys(undefined, [entry], new Set()).text).toBe(two);
+    expect(mergeJsonKeys('', [entry], new Set()).text).toBe(two);
+    expect(mergeJsonKeys('  \n', [entry], new Set()).text).toBe(two);
+  });
+
+  it('keeps a file written on one line on one line, and its final newline (or its absence)', () => {
+    // the user's text is not reflowed: the new member joins the line
+    expect(mergeJsonKeys('{"a":1}\n', [entry], new Set()).text).toBe('{"a":1, "mcpServers": {"github":{"url":"u"}}}\n');
+    expect(mergeJsonKeys('{"a":1}', [entry], new Set()).text).toBe('{"a":1, "mcpServers": {"github":{"url":"u"}}}');
+    // an empty top-level object is spread over lines, as a new file is
+    expect(mergeJsonKeys('{}', [entry], new Set()).text).toBe(JSON.stringify({ mcpServers: { github: { url: 'u' } } }, null, 2));
   });
 
   it('returns the input untouched when no key is set: all skipped, or all already in sync', () => {
@@ -361,7 +367,7 @@ describe('mergeJsonKeys with owned array items', () => {
   const text = (doc: unknown) => `${JSON.stringify(doc, null, 2)}\n`;
   const userDoc = { permissions: { allow: ['Bash(ls)'] }, hooks: { PreToolUse: [mine] } };
 
-  it('appends after the user items and leaves everything else byte-identical', () => {
+  it('appends after the user items in a conventionally formatted file (hand-written layouts: see the splice tests)', () => {
     const user = text(userDoc);
     const result = mergeJsonKeys(user, [items('sdlc hook pre-tool')], new Set(), 's.json');
     expect(result.text).toBe(
@@ -443,6 +449,24 @@ describe('mergeJsonKeys with owned array items', () => {
     expect(() => mergeJsonKeys(undefined, [{ ...bad, items: { marker: '' } }], new Set(), 's.json')).toThrow(
       's.json: hooks/PreToolUse: the marker must not be empty',
     );
+  });
+});
+
+describe('mergeJsonKeys with a renamed marker', () => {
+  it('removes the elements of the previous marker as well, and keeps every other element', () => {
+    const mine = { matcher: 'Bash', hooks: [{ type: 'command', command: './mine.sh' }] };
+    const old = { matcher: 'Bash', hooks: [{ type: 'command', command: 'sdlc hook pre-tool' }] };
+    const fresh = { matcher: 'Bash', hooks: [{ type: 'command', command: 'sdlc-kit run pre-tool' }] };
+    const doc = `${JSON.stringify({ hooks: { PreToolUse: [old, mine] } }, null, 2)}\n`;
+    const out = mergeJsonKeys(
+      doc,
+      [{ pointer: ['hooks', 'PreToolUse'], value: [fresh], items: { marker: 'sdlc-kit run', previousMarker: 'sdlc hook' } }],
+      new Set(),
+    ).text;
+    expect(JSON.parse(out).hooks.PreToolUse).toEqual([mine, fresh]);
+    // without the previous marker the old item is the user's
+    const kept = mergeJsonKeys(doc, [{ pointer: ['hooks', 'PreToolUse'], value: [fresh], items: { marker: 'sdlc-kit run' } }], new Set()).text;
+    expect(JSON.parse(kept).hooks.PreToolUse).toEqual([old, mine, fresh]);
   });
 });
 
@@ -555,6 +579,153 @@ describe('removeJsonKeys', () => {
       const before = text({ mcpServers: { github: {} }, hooks: { PreToolUse: [mine, ours('sdlc hook a')] } });
       expect(removeJsonKeys(before, [['mcpServers', 'github'], pre])).toBe(text({ hooks: { PreToolUse: [mine] } }));
     });
+  });
+});
+
+describe('JSON merges splice into the user\'s own text', () => {
+  const eol = '\r\n';
+  const lines = (...rows: string[]): string => rows.join(eol) + eol;
+  // Hand-written on purpose: inline arrays, blank lines, a literal and an escaped é, 1.0 and 1e3,
+  // an integer beyond 2^53, odd spacing, CRLF. JSON.stringify would change every one of them.
+  const HAND_WRITTEN = lines(
+    '{',
+    '  "editor":   "vim",',
+    '  "tags": ["a",   "b", "c"],',
+    '',
+    '  "name": "caf\\u00e9 é",',
+    '  "ratio": 1.0,',
+    '  "big": 1e3,',
+    '  "id": 12345678901234567890,',
+    '',
+    '  "mcpServers": {',
+    '    "db": { "command": "x", "args": ["--a", "--b"] }',
+    '  },',
+    '  "hooks": {',
+    '    "PreToolUse": [',
+    '      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "user hook" }] }',
+    '    ],',
+    '',
+    '    "Stop": [ { "hooks": [] } ]',
+    '  }',
+    '}',
+  );
+  const github = { pointer: ['mcpServers', 'github'], value: { url: 'u' } };
+  const OURS = (command: string): unknown => ({ matcher: 'Bash', hooks: [{ type: 'command', command }] });
+  const ownItems = (pointer: string[], ...items: unknown[]) => ({ pointer, value: items, items: { marker: 'sdlc hook' } });
+
+  /** `original` with `inserted` put at `at`: what a pure insertion must produce, nothing else changes. */
+  const insertAt = (original: string, at: string, inserted: string): string => {
+    const i = original.indexOf(at);
+    expect(i).toBeGreaterThanOrEqual(0);
+    return original.slice(0, i + at.length) + inserted + original.slice(i + at.length);
+  };
+
+  it('adds a member and takes it away again, byte for byte', () => {
+    const merged = mergeJsonKeys(HAND_WRITTEN, [github], new Set()).text;
+    // only the new member is added: after "db", indented like its sibling, with the file's CRLF
+    const member = `,${eol}    "github": {${eol}      "url": "u"${eol}    }`;
+    expect(merged).toBe(insertAt(HAND_WRITTEN, '"args": ["--a", "--b"] }', member));
+    for (const kept of ['"tags": ["a",   "b", "c"],', '"name": "caf\\u00e9 é",', '"ratio": 1.0,', '"big": 1e3,', '"id": 12345678901234567890,']) {
+      expect(merged).toContain(kept);
+    }
+    expect(removeJsonKeys(merged, [['mcpServers', 'github']], 'a.json', { pruneEmpty: false })).toBe(HAND_WRITTEN);
+  });
+
+  it('adds a missing top-level object and removes it again with its separating comma', () => {
+    const entry = { pointer: ['permissions', 'allow'], value: ['Bash(ls)'] };
+    const merged = mergeJsonKeys(HAND_WRITTEN, [entry], new Set());
+    expect(merged.createdParents).toEqual(['permissions']);
+    const member = `,${eol}  "permissions": {${eol}    "allow": [${eol}      "Bash(ls)"${eol}    ]${eol}  }`;
+    expect(merged.text).toBe(insertAt(HAND_WRITTEN, '"Stop": [ { "hooks": [] } ]' + eol + '  }', member));
+    expect(removeJsonKeys(merged.text, [['permissions', 'allow']], 'a.json', { pruneEmpty: ['permissions'] })).toBe(HAND_WRITTEN);
+  });
+
+  it('replaces only an owned value and leaves every other line as the user wrote it', () => {
+    const entry = { pointer: ['mcpServers', 'db'], value: { command: 'y' } };
+    const merged = mergeJsonKeys(HAND_WRITTEN, [entry], new Set(['mcpServers/db'])).text;
+    const before = HAND_WRITTEN.split(eol);
+    const after = merged.split(eol);
+    expect(after).toHaveLength(before.length);
+    const changed = after.flatMap((line, i) => (line === before[i] ? [] : [i]));
+    expect(changed).toEqual([10]);
+    expect(after[10]).toBe('    "db": {"command":"y"}');
+  });
+
+  it('appends an owned item to an inline array, and uninstall restores the file byte for byte', () => {
+    const entry = ownItems(['hooks', 'Stop'], OURS('sdlc hook stop'));
+    const merged = mergeJsonKeys(HAND_WRITTEN, [entry], new Set()).text;
+    expect(merged).toBe(
+      insertAt(HAND_WRITTEN, '{ "hooks": [] }', `, ${JSON.stringify(OURS('sdlc hook stop'))}`),
+    );
+    const marker = [{ pointer: ['hooks', 'Stop'], marker: 'sdlc hook' }];
+    expect(removeJsonKeys(merged, marker, 'a.json', { pruneEmpty: false })).toBe(HAND_WRITTEN);
+  });
+
+  it('appends owned items to an array spread over lines in its layout, and takes them back out', () => {
+    const entry = ownItems(['hooks', 'PreToolUse'], OURS('sdlc hook pre-tool'));
+    const merged = mergeJsonKeys(HAND_WRITTEN, [entry], new Set()).text;
+    const item = JSON.stringify(OURS('sdlc hook pre-tool'), null, 2).split('\n').join(`${eol}      `);
+    expect(merged).toBe(
+      insertAt(HAND_WRITTEN, '"command": "user hook" }] }', `,${eol}      ${item}`),
+    );
+    expect(merged).toContain('{ "matcher": "Edit", "hooks": [{ "type": "command", "command": "user hook" }] }');
+    const marker = [{ pointer: ['hooks', 'PreToolUse'], marker: 'sdlc hook' }];
+    expect(removeJsonKeys(merged, marker, 'a.json', { pruneEmpty: false })).toBe(HAND_WRITTEN);
+  });
+
+  it('refreshes an owned item in place of the old one and leaves the user items byte for byte', () => {
+    const v1 = mergeJsonKeys(HAND_WRITTEN, [ownItems(['hooks', 'PreToolUse'], OURS('sdlc hook v1'))], new Set()).text;
+    const v2 = mergeJsonKeys(v1, [ownItems(['hooks', 'PreToolUse'], OURS('sdlc hook v2'))], new Set()).text;
+    expect(v2).toBe(
+      mergeJsonKeys(HAND_WRITTEN, [ownItems(['hooks', 'PreToolUse'], OURS('sdlc hook v2'))], new Set()).text,
+    );
+    expect(v2).not.toContain('sdlc hook v1');
+  });
+
+  it('creates an owned array under an existing object and uninstall removes it with its comma', () => {
+    const entry = ownItems(['hooks', 'SessionStart'], OURS('sdlc hook session-start'));
+    const merged = mergeJsonKeys(HAND_WRITTEN, [entry], new Set());
+    expect(merged.createdParents).toEqual(['hooks/SessionStart']);
+    const member = `,${eol}    "SessionStart": [${eol}      ${JSON.stringify(OURS('sdlc hook session-start'), null, 2).split('\n').join(`${eol}      `)}${eol}    ]`;
+    expect(merged.text).toBe(insertAt(HAND_WRITTEN, '"Stop": [ { "hooks": [] } ]', member));
+    const marker = [{ pointer: ['hooks', 'SessionStart'], marker: 'sdlc hook' }];
+    expect(removeJsonKeys(merged.text, marker, 'a.json', { pruneEmpty: ['hooks/SessionStart'] })).toBe(HAND_WRITTEN);
+  });
+
+  it('never rewrites what it does not touch: the 20-digit integer, 1.0 and 1e3 survive a merge and a removal', () => {
+    const merged = mergeJsonKeys(HAND_WRITTEN, [github, ownItems(['hooks', 'Stop'], OURS('sdlc hook stop'))], new Set()).text;
+    for (const kept of ['12345678901234567890', '1.0,', '1e3,', 'caf\\u00e9 é', '"tags": ["a",   "b", "c"],']) {
+      expect(merged).toContain(kept);
+    }
+    const blank = (text: string): number => text.split(eol).filter(line => line === '').length;
+    expect(blank(merged)).toBe(blank(HAND_WRITTEN));
+    const restored = removeJsonKeys(
+      merged,
+      [['mcpServers', 'github'], { pointer: ['hooks', 'Stop'], marker: 'sdlc hook' }],
+      'a.json',
+      { pruneEmpty: false },
+    );
+    expect(restored).toBe(HAND_WRITTEN);
+  });
+
+  it('keeps LF files LF and tab-indented files tab-indented', () => {
+    const lf = '{\n\t"a": [1,2],\n\n\t"mcpServers": {\n\t\t"db": {}\n\t}\n}';
+    const merged = mergeJsonKeys(lf, [github], new Set()).text;
+    expect(merged).toBe(insertAt(lf, '"db": {}', ',\n\t\t"github": {\n\t\t\t"url": "u"\n\t\t}'));
+    expect(merged.includes('\r')).toBe(false);
+    expect(removeJsonKeys(merged, [['mcpServers', 'github']], 'a.json', { pruneEmpty: false })).toBe(lf);
+  });
+
+  it('is not fooled by braces, brackets, commas and escapes inside strings', () => {
+    const tricky = lines('{', '  "note": "a } ] , \\" { [ \\\\",', '  "mcpServers": { "db": { "command": "}" } }', '}');
+    const merged = mergeJsonKeys(tricky, [github], new Set()).text;
+    expect(JSON.parse(merged)).toEqual({ note: 'a } ] , " { [ \\', mcpServers: { db: { command: '}' }, github: { url: 'u' } } });
+    expect(merged.startsWith(`{${eol}  "note": "a } ] , \\" { [ \\\\",${eol}`)).toBe(true);
+    expect(removeJsonKeys(merged, [['mcpServers', 'github']], 'a.json', { pruneEmpty: false })).toBe(tricky);
+  });
+
+  it('refuses a file with comments instead of guessing, leaving it for the user to fix', () => {
+    expect(() => mergeJsonKeys('{\n  // note\n  "a": 1\n}', [github], new Set(), 'a.json')).toThrow(/a\.json is not valid JSON/);
   });
 });
 

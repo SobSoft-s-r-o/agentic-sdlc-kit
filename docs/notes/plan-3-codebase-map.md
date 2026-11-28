@@ -223,16 +223,18 @@ file/md/line-blocks deduped; conflicts throw). Add `renderHooks(cfg, harness): C
 `src/render/changes.ts` `Change` kinds (paths repo-relative, `/`):
 - `FileChange {kind:'file', path, content, mode?: 0o755}`; `MdBlockChange {kind:'md-block', path, content}` (`<!-- sdlc:begin/end -->`);
   `LineBlockChange {kind:'line-block', path, content, comment:'#'}` (`# sdlc:begin/end`);
-  `JsonKeysChange {kind:'json-keys', path, entries: {pointer: string[], value}[]}`;
+  `JsonKeysChange {kind:'json-keys', path, entries: {pointer: string[], value, items?: {marker: string}}[]}`;
   `TomlBlockChange {kind:'toml-block', path, content, ownedTables: string[]}` (markers `# >>> sdlc:begin (managed by agentic-sdlc-kit; ...) >>>`).
 
 Merge engine `src/install/merge.ts` (pure, string in/out; `MergeError`): `mergeMdBlock`, `mergeLineBlock`, `mergeTomlBlock(existing, body,
 ownedTables)`, `filterTomlBody` (drops tables the user already defines outside the block, reports `skipped`), `tomlTableText`,
 `mergeJsonKeys(existing, entries, owned: Set<string>, path)`: sets a key if absent or owned (by manifest key, pointers joined by `/`);
-a present key the user owns is left alone and reported in `skipped`; keeps key order, indent, EOL, final newline; `createdParents`
-for objects it had to create. `removeJsonKeys`, `jsonKey`, `jsonValueAt`, `parseJsonObject`, `canonicalJson`, `blockBody`.
-Whole-array/whole-value ownership: a `json-keys` entry owns its entire value. For hooks, `['hooks','PreToolUse']` would own the whole
-array and clobber user hooks in that event; either accept that (document it) or extend `merge.ts` with an array-element merge by a marker field.
+a present key the user owns is left alone and reported in `skipped`; the edits are spliced into the user's text (offset-tracking
+scanner in `src/install/jsonText.ts`), so everything the user wrote around them stays byte for byte; `createdParents` for objects and
+arrays it had to create. `removeJsonKeys`, `jsonKey`, `jsonValueAt`, `parseJsonObject`, `canonicalJson`, `blockBody`.
+Owned array items: a `json-keys` entry owns its entire value, unless it carries `items: {marker}`. It then owns only the elements of
+the array whose `JSON.stringify` contains the marker; the user's other elements stay, ours are appended last, and uninstall removes only
+ours. Use this for hook arrays such as `['hooks','PreToolUse']`: `value` is the array of our items, each containing the marker.
 `.claude/settings.json` is NOT rendered today (absent); Claude MCP goes to `.mcp.json`. Rendering hooks there is a new json-keys
 change at `['hooks', <Event>]` (also `permissions` must not be touched).
 
@@ -244,11 +246,12 @@ So `.gemini/settings.json` and `.codex/config.toml` are ALREADY written by the M
 `Change` (same path, same kind) via `mergeChanges`, so a gemini `hooks` json-keys entry and the `mcpServers` ones fuse, and the
 codex hooks tables join the one toml-block (add their names to `ownedTables`).
 
-Manifest `src/install/manifest.ts`: `MANIFEST_PATH = '.sdlc/manifest.json'`, `ManifestEntry {path, kind, key?, hash, createdFile?,
+Manifest `src/install/manifest.ts`: `MANIFEST_PATH = '.sdlc/manifest.json'`, `ManifestEntry {path, kind, key?, hash, marker?, createdFile?,
 createdParents?}`, `Manifest {version: 1, kit, entries}`, `newManifest`, `serializeManifest`, `parseManifest`, `readManifest(fs)`,
 `hashText`, `entryDiskHash(entry, text)`. Entry kinds: `file`, `md-block`, `line-block`, `json-keys` (key = pointer joined by `/`),
 `toml-block` (key = table name, or none for the whole block). A user-modified managed region is detected by hash and kept unless
-`--overwrite-modified`. New hook entries need no manifest schema change.
+`--overwrite-modified`. An items entry records its `marker` (uninstall needs it) and its `hash` covers the owned elements only;
+`createdParents` may list an array we created. Entries without `marker` read as before, so the manifest `version` stays 1.
 Apply `src/install/apply.ts`: `planApply(...)`, `applyPlan(plan, fs, {removeObsolete})`, `planUninstall(fs, manifest)`, `formatPlan`,
 `Notice`, `PlanError`, `ApplyPlan`, `OBSOLETE_MODIFIED`. Commands `src/commands/install.ts`: `Reporter`, `InstallContext`,
 `installFiles(...)`, `runInit(ctx, options)`, `runUpgrade`, `runUninstall`.

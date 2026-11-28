@@ -41,9 +41,10 @@ export interface ManifestEntry {
    */
   createdFile?: true;
   /**
-   * `json-keys` only, in a file the user had: the objects the kit created on the way to its keys, as
-   * manifest keys (`mcpServers`). Uninstall removes one of them once it is empty; an object the user
-   * had is never listed and never removed. Every entry of the path carries the same list.
+   * `json-keys` only, in a file the user had: the objects and arrays the kit created on the way to its
+   * keys, as manifest keys (`mcpServers`, or `hooks/SessionStart` for an array of owned items).
+   * Uninstall removes one of them once it is empty; an object or array the user had is never listed
+   * and never removed. Every entry of the path carries the same list.
    */
   createdParents?: string[];
 }

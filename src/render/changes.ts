@@ -32,9 +32,10 @@ export interface LineBlockChange {
  * An entry with `items` owns only some elements of the array at `pointer`, not the array: `value` is
  * an array of items, each of which contains `items.marker` (a string) once serialized with
  * `JSON.stringify`. The merge removes the elements that contain the marker, appends `value`'s
- * items, and leaves every other element (the user's) in place. The marker must stay the same
- * between kit versions: it is how the kit finds its items again. An `items` entry and a plain entry
- * never share a pointer.
+ * items, and leaves every other element (the user's) in place. The manifest records the marker, so a
+ * later kit version may rename it: the items of the old marker are found by the recorded one and
+ * replaced (an item the user edited is kept with a notice, as always). An `items` entry and a plain
+ * entry never share a pointer.
  */
 export interface JsonKeysChange {
   kind: 'json-keys';

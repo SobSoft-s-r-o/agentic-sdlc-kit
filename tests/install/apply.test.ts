@@ -1284,7 +1284,7 @@ describe('owned array items in a JSON file', () => {
     fs.write(SETTINGS, text(doc));
   };
 
-  it('appends our items after the user items, leaves the rest byte-identical and records what it did', () => {
+  it('appends our items after the user items in a conventionally formatted file and records what it did', () => {
     const fs = memoryFs({ [SETTINGS]: userText });
     const { result } = install([settings()], fs);
     expect(result.errors).toEqual([]);
@@ -1472,14 +1472,73 @@ describe('owned array items in a JSON file', () => {
       expect(entriesOf(fs).map(e => e.key)).toEqual(['hooks/PreToolUse', 'hooks/SessionStart']);
     });
 
-    it('that differ from ours are the user\'s: kept with a notice, not managed', () => {
+    it('that differ from ours are kept with a notice that says how to replace them, and are not managed', () => {
       const user = text({ hooks: { PreToolUse: [userItem, ours('sdlc hook pre-tool old')] } });
       const fs = memoryFs({ [SETTINGS]: user });
       const { plan: p } = install([settings()], fs);
-      expect(p.notices).toEqual([{ path: SETTINGS, message: 'hooks/PreToolUse already defined by you; kept' }]);
+      expect(p.notices).toEqual([
+        {
+          path: SETTINGS,
+          message: "hooks/PreToolUse differs from the kit's; kept (rerun with --overwrite-modified to replace)",
+        },
+      ]);
       expect(docOf(fs).hooks.PreToolUse).toEqual([userItem, ours('sdlc hook pre-tool old')]);
       expect(docOf(fs).hooks.SessionStart).toEqual([ours(START)]);
       expect(entriesOf(fs).map(e => e.key)).toEqual(['hooks/SessionStart']);
+    });
+
+    it('that differ from ours are replaced and owned with --overwrite-modified, the user items stay', () => {
+      const user = text({ hooks: { PreToolUse: [userItem, ours('sdlc hook pre-tool old')] } });
+      const fs = memoryFs({ [SETTINGS]: user });
+      const { plan: p, result } = install([settings()], fs, { overwriteModified: true });
+      expect(result.errors).toEqual([]);
+      expect(p.notices).toEqual([]);
+      expect(docOf(fs).hooks.PreToolUse).toEqual([userItem, ours(PRE_V1)]);
+      expect(entriesOf(fs).map(e => [e.key, e.hash])).toEqual([
+        ['hooks/PreToolUse', hashText(canonicalJson([ours(PRE_V1)]))],
+        ['hooks/SessionStart', hashText(canonicalJson([ours(START)]))],
+      ]);
+      // now they are ours: uninstall takes them away and leaves the user item
+      uninstall(fs);
+      expect(docOf(fs)).toEqual({ hooks: { PreToolUse: [userItem] } });
+    });
+  });
+
+  describe('a marker that a later kit version renames', () => {
+    const renamed = (command: string, marker: string): JsonKeysChange => ({
+      kind: 'json-keys',
+      path: SETTINGS,
+      entries: [{ pointer: ['hooks', 'PreToolUse'], value: [ours(command)], items: { marker } }],
+    });
+
+    it('finds the items of the old marker, replaces them and records the new marker', () => {
+      const fs = memoryFs({ [SETTINGS]: userText });
+      install([renamed('sdlc hook pre-tool v1', 'sdlc hook')], fs);
+      const { plan: p, result } = install([renamed('sdlc-kit run pre-tool', 'sdlc-kit run')], fs);
+      expect(result.errors).toEqual([]);
+      expect(p.notices).toEqual([]);
+      expect(docOf(fs).hooks.PreToolUse).toEqual([userItem, ours('sdlc-kit run pre-tool')]);
+      expect(entriesOf(fs).map(e => [e.key, e.marker])).toEqual([['hooks/PreToolUse', 'sdlc-kit run']]);
+      // uninstall now uses the new marker and leaves the user item
+      uninstall(fs);
+      expect(fs.snapshot()).toEqual({ [SETTINGS]: userText });
+    });
+
+    it('keeps an item of the old marker that the user edited, like any other edit', () => {
+      const fs = memoryFs({ [SETTINGS]: userText });
+      install([renamed('sdlc hook pre-tool v1', 'sdlc hook')], fs);
+      const doc = docOf(fs);
+      doc.hooks.PreToolUse[1].hooks[0].command = 'sdlc hook pre-tool v1 --mine';
+      fs.write(SETTINGS, text(doc));
+      const { plan: p } = install([renamed('sdlc-kit run pre-tool', 'sdlc-kit run')], fs);
+      expect(p.notices).toEqual([
+        {
+          path: SETTINGS,
+          message: 'hooks/PreToolUse: modified locally; kept (rerun with --overwrite-modified to replace)',
+        },
+      ]);
+      expect(docOf(fs).hooks.PreToolUse[1].hooks[0].command).toBe('sdlc hook pre-tool v1 --mine');
+      expect(entriesOf(fs).map(e => e.marker)).toEqual(['sdlc hook']);
     });
   });
 
