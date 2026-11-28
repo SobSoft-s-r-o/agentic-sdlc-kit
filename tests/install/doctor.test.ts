@@ -138,6 +138,8 @@ interface GitState {
   version?: string;
   /** Whether the hook launcher is in `HEAD` (default); false is a launcher that was never committed. */
   launcherCommitted?: boolean;
+  /** The mode `git ls-files -s` shows for the launcher; defaults to the executable 100755. `null` makes the call fail. */
+  launcherMode?: string | null;
   /** The output of `git worktree list --porcelain`; defaults to the one main checkout, `/memory`. */
   worktrees?: string;
   /** Makes `git worktree list` fail. */
@@ -164,6 +166,10 @@ function fakeGit(state: GitState = {}): FakeGit {
       return state.launcherCommitted === false
         ? { stdout: '', code: 128, stderr: "fatal: path '.sdlc/hooks/run.sh' exists on disk, but not in 'HEAD'" }
         : { stdout: '', code: 0, stderr: '' };
+    }
+    if (line === 'ls-files -s -- .sdlc/hooks/run.sh') {
+      if (state.launcherMode === null) return { stdout: '', code: 128, stderr: 'fatal: index file corrupt' };
+      return { stdout: `${state.launcherMode ?? '100755'} 0123456789abcdef0123456789abcdef01234567 0\t.sdlc/hooks/run.sh\n`, code: 0, stderr: '' };
     }
     if (line === 'worktree list --porcelain') {
       return state.worktreesFail === true
@@ -1534,6 +1540,50 @@ describe('stack.superpowers', () => {
     expect(execLines(h, 'claude', 'codex', 'gemini').filter(line => / (plugin|extensions) /.test(line))).toEqual(['gemini extensions list -o json']);
   });
 
+  describe('a plugin that is installed but not in use', () => {
+    const claudeList = (extra: Record<string, unknown>): ExecResult =>
+      stdoutOf(JSON.stringify([{ id: 'superpowers@claude-plugins-official', version: '7.0.2', enabled: true, ...extra }]));
+
+    it('warns for a disabled plugin, in each harness, with the install command as the fix', async () => {
+      const h = allThree({
+        exec: {
+          claudePlugins: claudeList({ scope: 'user', enabled: false }),
+          codexPlugins: stdoutOf(JSON.stringify({ installed: [{ name: 'superpowers', enabled: false }], available: [] })),
+          geminiPlugins: stdoutOf(JSON.stringify([{ name: 'superpowers', isActive: false }])),
+        },
+      });
+      const check = byId(await runDoctor(h.env, h.cfg), 'stack.superpowers');
+
+      expect(check.status).toBe('warn');
+      expect(check.message).toContain('claude, codex, gemini');
+      expect(check.fix).toBe(['claude', 'codex', 'gemini'].map(name => superpowersInstall(name as 'claude')).join(' && '));
+    });
+
+    it('claude: a project-scope plugin counts for the repository it was installed in, and only there', async () => {
+      const here = allThree({ exec: { claudePlugins: claudeList({ scope: 'project', projectPath: '/memory' }) } });
+      expect(byId(await runDoctor(here.env, here.cfg), 'stack.superpowers').status).toBe('ok');
+
+      for (const scope of ['project', 'local']) {
+        const elsewhere = allThree({ exec: { claudePlugins: claudeList({ scope, projectPath: '/somewhere/else' }) } });
+        const check = byId(await runDoctor(elsewhere.env, elsewhere.cfg), 'stack.superpowers');
+        expect(check.status, scope).toBe('warn');
+        expect(check.message).toContain('claude');
+        expect(check.fix).toBe(superpowersInstall('claude'));
+      }
+      const noPath = allThree({ exec: { claudePlugins: claudeList({ scope: 'local' }) } });
+      expect(byId(await runDoctor(noPath.env, noPath.cfg), 'stack.superpowers').status).toBe('warn');
+    });
+
+    it('claude: a user-scope plugin counts whatever its project path, and so does one installed in the main checkout of this worktree', async () => {
+      const user = allThree({ exec: { claudePlugins: claudeList({ scope: 'user', projectPath: '/somewhere/else' }) } });
+      expect(byId(await runDoctor(user.env, user.cfg), 'stack.superpowers').status).toBe('ok');
+
+      const worktrees = 'worktree /main\nHEAD 0123456789abcdef\nbranch refs/heads/main\n\nworktree /memory\nHEAD 0123456789abcdef\nbranch refs/heads/task/5-x\n\n';
+      const main = allThree({ git: { worktrees }, exec: { claudePlugins: claudeList({ scope: 'project', projectPath: '/main' }) } });
+      expect(byId(await runDoctor(main.env, main.cfg), 'stack.superpowers').status).toBe('ok');
+    });
+  });
+
   it('runs every CLI in the environment of a hook, with a time limit', async () => {
     const h = allThree({ env: { PATH: '/usr/bin:/tmp/x/_npx/1/node_modules/.bin:/bin', npm_command: 'exec' } });
     await runDoctor(h.env, h.cfg);
@@ -1542,7 +1592,8 @@ describe('stack.superpowers', () => {
     // an mcp list and a plugin list for each of the three, and graphify --version
     expect(calls).toHaveLength(7);
     for (const { index, command, args } of calls) {
-      expect(h.execOptions[index]?.timeoutMs, `${command} ${args.join(' ')}`).toBe(15_000);
+      // `mcp list` health-checks every server (Claude took 22 s, Gemini waits up to 10 s per unreachable one)
+      expect(h.execOptions[index]?.timeoutMs, `${command} ${args.join(' ')}`).toBe(args[0] === 'mcp' ? 60_000 : 15_000);
       expect(h.execOptions[index]?.env?.PATH, `${command} ${args.join(' ')}`).toBe('/usr/bin:/bin');
       expect(h.execOptions[index]?.env?.npm_command).toBeUndefined();
     }
@@ -1668,7 +1719,8 @@ describe.each([
     const h = allThree();
     await runDoctor(h.env, h.cfg);
     const index = h.execCalls.findIndex(([command, a]) => command === name && a[0] === 'mcp');
-    expect(h.execOptions[index]).toMatchObject({ timeoutMs: 15_000 });
+    expect(h.execOptions[index]).toMatchObject({ timeoutMs: 60_000 });
+    expect(h.execOptions[index]?.env).toBeDefined();
   });
 });
 
@@ -1681,12 +1733,48 @@ describe('mcp.codex, on text that is not the --json list', () => {
   });
 });
 
-describe('mcp.claude, with the time limit and hook environment of the others', () => {
-  it('runs claude mcp list with them', async () => {
+describe('the mcp list checks', () => {
+  it('mcp.claude runs claude mcp list with the long time limit of the mcp lists, and the hook environment', async () => {
     const h = harness();
     await runDoctor(h.env, h.cfg);
     const index = h.execCalls.findIndex(([command, a]) => command === 'claude' && a[0] === 'mcp');
-    expect(h.execOptions[index]).toMatchObject({ timeoutMs: 15_000 });
+    expect(h.execOptions[index]).toMatchObject({ timeoutMs: 60_000 });
+    expect(h.execOptions[index]?.env).toBeDefined();
+  });
+
+  it('starts the three lists together, so a slow one does not hold up the others', async () => {
+    const h = allThree();
+    const inner = h.env.exec;
+    const started: string[] = [];
+    const seenAtStart: Record<string, number> = {};
+    let release: () => void = () => undefined;
+    const allStarted = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    h.env.exec = async (cmd, args, options) => {
+      if (args[0] !== 'mcp') return inner(cmd, args, options);
+      started.push(cmd);
+      if (started.length === 3) release();
+      // a sequential run never gets to three: give up waiting, and let the assertion below say so
+      await Promise.race([allStarted, new Promise(resolve => setTimeout(resolve, 300))]);
+      seenAtStart[cmd] = started.length;
+      return inner(cmd, args, options);
+    };
+    const checks = await runDoctor(h.env, h.cfg);
+
+    expect(seenAtStart).toEqual({ claude: 3, codex: 3, gemini: 3 });
+    // The results come in the order of the harnesses all the same.
+    const ids = checks.map(check => check.id).filter(id => id.startsWith('mcp.'));
+    expect(ids).toEqual(['mcp.token', 'mcp.claude', 'mcp.codex', 'mcp.gemini']);
+    for (const id of ['mcp.claude', 'mcp.codex', 'mcp.gemini']) expect(byId(checks, id).status).toBe('ok');
+  });
+
+  it('one list that throws or fails does not change the others', async () => {
+    const h = allThree({ exec: { codexMcp: new Error('codex timed out after 60s') } });
+    const checks = await runDoctor(h.env, h.cfg);
+    expect(byId(checks, 'mcp.codex').status).toBe('warn');
+    expect(byId(checks, 'mcp.claude').status).toBe('ok');
+    expect(byId(checks, 'mcp.gemini').status).toBe('ok');
   });
 });
 
@@ -1816,6 +1904,37 @@ describe('hooks.<harness>', () => {
     expect(h.git.calls.filter(call => call[0] === 'cat-file')).toEqual([]);
   });
 
+  it('warns when the committed launcher is not executable (mode 100644), with the command that fixes it', async () => {
+    const h = allThree({ git: { launcherMode: '100644' } });
+    const checks = await runDoctor(h.env, h.cfg);
+
+    for (const name of ['claude', 'codex', 'gemini']) {
+      const check = byId(checks, `hooks.${name}`);
+      expect(check.status).toBe('warn');
+      expect(check.message).toContain('.sdlc/hooks/run.sh is committed with mode 100644, not 100755');
+      expect(check.fix).toBe('git update-index --chmod=+x .sdlc/hooks/run.sh');
+    }
+    // asked once for all three, and in the form that shows the mode
+    expect(h.git.calls.filter(call => call[0] === 'ls-files' && call[1] === '-s')).toEqual([['ls-files', '-s', '--', '.sdlc/hooks/run.sh']]);
+  });
+
+  it('is ok for the executable mode, and does not warn when git cannot say what the mode is', async () => {
+    const executable = allThree({ git: { launcherMode: '100755' } });
+    expect(byId(await runDoctor(executable.env, executable.cfg), 'hooks.claude').status).toBe('ok');
+
+    const unknown = allThree({ git: { launcherMode: null } });
+    expect(byId(await runDoctor(unknown.env, unknown.cfg), 'hooks.claude').status).toBe('ok');
+  });
+
+  it('a launcher that is not committed says so only, and git is not asked for its mode', async () => {
+    const h = allThree({ git: { launcherCommitted: false, launcherMode: '100644' } });
+    const check = byId(await runDoctor(h.env, h.cfg), 'hooks.claude');
+
+    expect(check.message).not.toContain('mode');
+    expect(check.fix).toBe('commit .sdlc/hooks/run.sh');
+    expect(h.git.calls.filter(call => call[0] === 'ls-files' && call[1] === '-s')).toEqual([]);
+  });
+
   it('gemini on Windows: warns that its hooks run through PowerShell, which sdlc hooks cannot use', async () => {
     const h = allThree({ platform: 'win32' });
     const checks = await runDoctor(h.env, h.cfg);
@@ -1825,7 +1944,9 @@ describe('hooks.<harness>', () => {
       message: 'Gemini CLI runs hooks through PowerShell on Windows; sdlc hooks need a POSIX shell',
     });
     expect(byId(checks, 'hooks.claude').status).toBe('ok');
-    expect(byId(allThree({ platform: 'linux' }).env && (await runDoctor(allThree({ platform: 'linux' }).env, threeHarnesses())), 'hooks.gemini').status).toBe('ok');
+
+    const linux = allThree({ platform: 'linux' });
+    expect(byId(await runDoctor(linux.env, linux.cfg), 'hooks.gemini').status).toBe('ok');
   });
 });
 
@@ -1948,6 +2069,77 @@ describe('hooks.roundtrip', () => {
     expect(byId(await runDoctor(h.env, cfg), 'hooks.roundtrip').status).toBe('fail');
   });
 
+  describe('a deny must carry the whole output contract', () => {
+    const deny = (name: string, over: Record<string, unknown> = {}, drop: string[] = []): string => {
+      const body: Record<string, unknown> =
+        name === 'gemini'
+          ? { decision: 'deny', reason: 'sdlc (enforce): no', ...over }
+          : { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'sdlc (enforce): no', ...over } };
+      const target = (name === 'gemini' ? body : body.hookSpecificOutput) as Record<string, unknown>;
+      for (const key of drop) delete target[key];
+      return JSON.stringify(body);
+    };
+    const runnerOf = (output: (name: string) => string): NonNullable<DoctorEnv['hookRunner']> => async (name, _event, ctx) => {
+      ctx.out(output(name));
+      return 0;
+    };
+    const verdict = async (output: (name: string) => string, harnesses = '[claude, codex, gemini]'): Promise<Check> => {
+      const cfg = inMode('enforce', harnesses);
+      const h = harness({ cfg, fs: installedFs(cfg), installed: ALL_CLIS, hookRunner: runnerOf(output) });
+      return byId(await runDoctor(h.env, cfg), 'hooks.roundtrip');
+    };
+
+    it('passes for the exact output of each harness', async () => {
+      expect((await verdict(name => deny(name))).status).toBe('ok');
+    });
+
+    it.each(['claude', 'codex'] as const)('%s: fails for a deny without hookEventName, or with the name of another event', async name => {
+      const missing = await verdict(n => deny(n, {}, ['hookEventName']), `[${name}]`);
+      expect(missing.status).toBe('fail');
+      expect(missing.message).toContain(name);
+      expect(missing.message).toContain('hookEventName');
+
+      const wrong = await verdict(n => deny(n, { hookEventName: 'UserPromptSubmit' }), `[${name}]`);
+      expect(wrong.status).toBe('fail');
+      expect(wrong.message).toContain('PreToolUse');
+    });
+
+    it.each(['claude', 'codex', 'gemini'] as const)('%s: fails for a deny with an empty reason, or none', async name => {
+      const key = name === 'gemini' ? 'reason' : 'permissionDecisionReason';
+      for (const over of [{ [key]: '' }, { [key]: '   ' }, { [key]: 5 }]) {
+        const check = await verdict(n => deny(n, over), `[${name}]`);
+        expect(check.status, JSON.stringify(over)).toBe('fail');
+        expect(check.message).toContain(name);
+        expect(check.message).toContain('reason');
+      }
+      const none = await verdict(n => deny(n, {}, [key]), `[${name}]`);
+      expect(none.status).toBe('fail');
+    });
+
+    it('gemini names no event in its deny, so none is asked for', async () => {
+      expect(JSON.parse(deny('gemini'))).toEqual({ decision: 'deny', reason: 'sdlc (enforce): no' });
+      expect((await verdict(n => deny(n), '[gemini]')).status).toBe('ok');
+    });
+
+    it('uses the event name of the hook output, not a copy of it', async () => {
+      // Gemini's own name for the pre-tool event is BeforeTool; a gemini hook that answers in the claude/codex shape is no deny
+      const check = await verdict(() => deny('claude'), '[gemini]');
+      expect(check.status).toBe('fail');
+    });
+
+    it('observe: the warning of claude and codex must name the event too, and carry text', async () => {
+      const cfg = inMode('observe', '[claude, codex]');
+      const warning = (over: Record<string, unknown>): string =>
+        JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: 'sdlc (observe): x', ...over }, systemMessage: 'sdlc (observe): x' });
+      const good = harness({ cfg, fs: installedFs(cfg), hookRunner: runnerOf(() => warning({})) });
+      expect(byId(await runDoctor(good.env, cfg), 'hooks.roundtrip').status).toBe('ok');
+      for (const over of [{ hookEventName: 'SessionStart' }, { hookEventName: undefined }]) {
+        const bad = harness({ cfg, fs: installedFs(cfg), hookRunner: runnerOf(() => warning(over)) });
+        expect(byId(await runDoctor(bad.env, cfg), 'hooks.roundtrip').status, JSON.stringify(over)).toBe('fail');
+      }
+    });
+  });
+
   it('quotes why a hook was skipped when it printed nothing', async () => {
     const hookRunner: NonNullable<DoctorEnv['hookRunner']> = async (_name, _event, ctx) => {
       ctx.err('sdlc: hook skipped: stdin is not valid JSON');
@@ -2025,13 +2217,32 @@ describe('outbox.pending', () => {
     expect(check.fix).toBe('sdlc sync');
   });
 
-  it('counts the gaps the hooks logged, which wait for sdlc sync too', async () => {
+  it('reports gaps only as a note: a queue of gaps alone is ok, not a warning', async () => {
     const dir = checkout({ 'gaps.jsonl': `${gap}\n${gap}\n` });
     const h = harness({ git: { worktrees: porcelain(dir) } });
     const check = byId(await runDoctor(h.env, h.cfg), 'outbox.pending');
 
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('2 gap(s) waiting for sync');
+    expect(check.fix).toBeUndefined();
+  });
+
+  it('keeps the message for queued writes the same when there are gaps too', async () => {
+    const dir = checkout({ 'outbox.jsonl': `${entry('a')}\n`, 'gaps.jsonl': `${gap}\n` });
+    const h = harness({ git: { worktrees: porcelain(dir) } });
+    const check = byId(await runDoctor(h.env, h.cfg), 'outbox.pending');
+
     expect(check.status).toBe('warn');
-    expect(check.message).toMatch(/0 queued write\(s\), 0 failed, 2 gap\(s\); run sdlc sync/);
+    expect(check.message).toBe('1 queued write(s), 0 failed; run sdlc sync');
+  });
+
+  it('warns for failed writes alone', async () => {
+    const dir = checkout({ 'outbox-failed.jsonl': `${JSON.stringify({ id: 'c', at: 'x', argv: ['approve', '9'], failedAt: 'y', error: 'boom' })}\n` });
+    const h = harness({ git: { worktrees: porcelain(dir) } });
+    const check = byId(await runDoctor(h.env, h.cfg), 'outbox.pending');
+
+    expect(check.status).toBe('warn');
+    expect(check.message).toBe('0 queued write(s), 1 failed; run sdlc sync');
   });
 
   it('reads the cache of the main checkout, whichever worktree doctor runs in', async () => {

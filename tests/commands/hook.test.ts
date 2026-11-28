@@ -1596,6 +1596,24 @@ describe('runHook with readOnly: the answer without any trace', () => {
     expect(existsSync(cacheDir())).toBe(false);
   });
 
+  it('records no approval from a /approve prompt: nothing is written to the task, and it says so', async () => {
+    taskBranch('task/5-x');
+    tracker.seedTask(publishedPlan());
+    const writes = tracker.writes;
+    const before = (await tracker.getTask(5)).state;
+
+    const result = await run('claude', 'prompt', { stdin: claudePrompt('/approve\nlooks good'), readOnly: true });
+
+    expect(contextLines(result.stdout)).toEqual(['sdlc: read-only run; the approval was not recorded.']);
+    expect(tracker.writes).toBe(writes);
+    expect((await tracker.getTask(5)).state).toEqual(before);
+    expect(existsSync(cacheDir())).toBe(false);
+
+    // The same prompt in a normal run still records it.
+    await run('claude', 'prompt', { stdin: claudePrompt('/approve\nlooks good') });
+    expect((await tracker.getTask(5)).state.stages.planning?.approval).toMatchObject({ source: 'prompt', by: 'shop-owner' });
+  });
+
   it('does not start sdlc sync, even when something is queued', async () => {
     taskBranch('task/5-x');
     tracker.seedTask(feature(5, true));

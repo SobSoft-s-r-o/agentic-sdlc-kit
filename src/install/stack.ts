@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Harness } from '../config/schema.js';
 import type { HookHarness } from '../hooks/types.js';
 
@@ -71,23 +73,49 @@ function jsonArray(text: string, what: string): unknown[] {
   return value;
 }
 
+/** `path` with symbolic links resolved; as written (made absolute) when it does not exist. */
+function realPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+const sameDirectory = (a: string, b: string): boolean => realPath(a) === realPath(b);
+
 /**
- * Whether the plugin list of `harness` (the stdout of `superpowersListArgs`) holds Superpowers:
- * Claude a JSON array with an `id` that starts `superpowers@`, Codex `{installed: [{name}]}` (what
- * is merely `available` does not count), Gemini a JSON array with an extension named `superpowers`.
+ * Whether the Claude plugin entry is in use in a repository at one of `repoRoots`: user scope is
+ * for every repository; project and local scope only for the one in `projectPath` (by real path).
+ */
+function claudePluginInUse(plugin: Record<string, unknown>, repoRoots: readonly string[]): boolean {
+  if (plugin.enabled === false) return false;
+  if (plugin.scope !== 'project' && plugin.scope !== 'local') return true;
+  const { projectPath } = plugin;
+  return typeof projectPath === 'string' && repoRoots.some(root => sameDirectory(projectPath, root));
+}
+
+/**
+ * Whether the plugin list of `harness` (the stdout of `superpowersListArgs`) holds Superpowers, in
+ * use: Claude a JSON array with an `id` that starts `superpowers@` that is not `enabled: false` (and,
+ * for project or local scope, was installed for a repository at one of `repoRoots`), Codex
+ * `{installed: [{name}]}` with the plugin not `enabled: false` (what is merely `available` does not
+ * count), Gemini a JSON array with an extension named `superpowers` that is not `isActive: false`.
  * Throws when the text is not the list it expects, which is not the same as Superpowers missing.
  */
-export function superpowersInstalled(harness: HookHarness, stdout: string): boolean {
+export function superpowersInstalled(harness: HookHarness, stdout: string, repoRoots: readonly string[] = []): boolean {
   const what = `${harness} plugin list`;
   if (harness === 'codex') {
     const value = parseJson(stdout, what);
     if (!isRecord(value) || !Array.isArray(value.installed)) throw new Error(`${what} has no installed list`);
-    return value.installed.some(plugin => isRecord(plugin) && plugin.name === 'superpowers');
+    return value.installed.some(plugin => isRecord(plugin) && plugin.name === 'superpowers' && plugin.enabled !== false);
   }
   const entries = jsonArray(stdout, what);
   return harness === 'claude'
-    ? entries.some(plugin => isRecord(plugin) && typeof plugin.id === 'string' && plugin.id.startsWith('superpowers@'))
-    : entries.some(plugin => isRecord(plugin) && plugin.name === 'superpowers');
+    ? entries.some(
+        plugin => isRecord(plugin) && typeof plugin.id === 'string' && plugin.id.startsWith('superpowers@') && claudePluginInUse(plugin, repoRoots),
+      )
+    : entries.some(plugin => isRecord(plugin) && plugin.name === 'superpowers' && plugin.isActive !== false);
 }
 
 /** `<name>: ...` per line, the name being everything before the first `: ` (Claude). */

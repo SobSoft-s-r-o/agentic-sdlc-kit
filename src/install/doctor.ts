@@ -8,6 +8,7 @@ import { ensureBoard } from '../github/board.js';
 import { GhError, ghJson, type GhRunner } from '../github/gh.js';
 import { GitHubTracker } from '../github/githubTracker.js';
 import { readJsonLines } from '../hooks/localLog.js';
+import { EVENT_NAMES } from '../hooks/output.js';
 import { HOOK_EVENTS, HOOK_HARNESSES, type HookEventName, type HookHarness } from '../hooks/types.js';
 import { OUTBOX_FAILED_FILE, queuedCounts } from '../outbox/outbox.js';
 import { WORKFLOW_PATH } from '../render/github.js';
@@ -583,12 +584,19 @@ function checkMcpToken(env: DoctorEnv, cfg: Config): Check {
 
 // --- the harness CLIs: MCP servers, Superpowers and graphify -------------------------------------
 
-/** Longest one of the list commands below may take: a hung CLI must not stall the whole run. */
+/** Longest the plugin lists and `graphify --version` may take: a hung CLI must not stall the whole run. */
 const CLI_TIMEOUT_MS = 15_000;
 
+/**
+ * Longest an `mcp list` may take. It health-checks every configured server (Claude took 22 s on a
+ * machine with a few; Gemini waits up to 10 s for each one that does not answer), so a slow list
+ * is not a hung one.
+ */
+const MCP_LIST_TIMEOUT_MS = 60_000;
+
 /** Runs `cmd` in the repository root, in the environment a hook sees, with a time limit. */
-function runCli(env: DoctorEnv, cmd: string, args: string[]): ReturnType<DoctorEnv['exec']> {
-  return env.exec(cmd, args, { env: hookEnvironment(env.env).env, timeoutMs: CLI_TIMEOUT_MS });
+function runCli(env: DoctorEnv, cmd: string, args: string[], timeoutMs = CLI_TIMEOUT_MS): ReturnType<DoctorEnv['exec']> {
+  return env.exec(cmd, args, { env: hookEnvironment(env.env).env, timeoutMs });
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -614,7 +622,7 @@ async function checkMcpHarness(env: DoctorEnv, cfg: Config, harness: HookHarness
   const shown = `${harness} mcp list`;
   let result: Awaited<ReturnType<DoctorEnv['exec']>>;
   try {
-    result = await runCli(env, harness, mcpListArgs(harness));
+    result = await runCli(env, harness, mcpListArgs(harness), MCP_LIST_TIMEOUT_MS);
   } catch (error) {
     return warn(id, `could not run ${shown}: ${describeError(error)}`);
   }
@@ -634,12 +642,18 @@ async function checkMcpHarness(env: DoctorEnv, cfg: Config, harness: HookHarness
   return warn(id, `${shown} does not show: ${missing.join(', ')}`, MCP_FIX[harness]);
 }
 
+/** The root of this checkout and, in a linked worktree, that of the main checkout: where a project-scope plugin may have been installed. */
+async function repositoryRoots(env: DoctorEnv, worktrees: () => Promise<WorktreeList>): Promise<string[]> {
+  const found = await worktrees();
+  return 'error' in found || found.mainRoot === env.fs.root ? [env.fs.root] : [env.fs.root, found.mainRoot];
+}
+
 /**
- * Superpowers in each configured harness, from its plugin list in JSON. A harness whose CLI is not
+ * Superpowers, in use, in each configured harness, from its plugin list in JSON. A harness whose CLI is not
  * on the PATH is "not checked", never a warning; a list that cannot be read is a warning that does
  * not say how to install it, because it is not known to be missing.
  */
-async function checkSuperpowers(env: DoctorEnv, cfg: Config): Promise<Check> {
+async function checkSuperpowers(env: DoctorEnv, cfg: Config, worktrees: () => Promise<WorktreeList>): Promise<Check> {
   const id = 'stack.superpowers';
   if (!cfg.stack.superpowers) return ok(id, 'stack.superpowers is off; skipped');
   const harnesses = cliHarnesses(cfg);
@@ -660,7 +674,9 @@ async function checkSuperpowers(env: DoctorEnv, cfg: Config): Promise<Check> {
       if (result.code !== 0) {
         unreadable.push(`could not read ${shown}: command ${failure(result.code, result.stderr)}`);
       } else {
-        (superpowersInstalled(harness, result.stdout) ? installed : missing).push(harness);
+        // A Claude plugin of project or local scope is for the repository it was installed in: this one, or its main checkout.
+        const roots = harness === 'claude' ? await repositoryRoots(env, worktrees) : [];
+        (superpowersInstalled(harness, result.stdout, roots) ? installed : missing).push(harness);
       }
     } catch (error) {
       unreadable.push(`could not read ${shown}: ${describeError(error)}`);
@@ -768,10 +784,29 @@ function checkApprovalTrust(cfg: Config): Check {
 
 const CODEX_TRUST = ' (Codex runs it only after you trust the project and approve it in /hooks)';
 
-/** Whether the launcher is in `HEAD`, asked of git at most once per run; `undefined` when git cannot say. */
-function launcherCommitted(git: GitRunner): () => Promise<boolean | undefined> {
-  let known: Promise<boolean | undefined> | undefined;
-  return () => (known ??= git(['cat-file', '-e', `HEAD:${HOOK_LAUNCHER}`]).then(result => result.code === 0, () => undefined));
+/** What git says about the hook launcher: whether it is in `HEAD` and, if so, the mode it is recorded with. `undefined` where git cannot say. */
+interface LauncherState {
+  committed: boolean | undefined;
+  mode: string | undefined;
+}
+
+/** The executable file mode: a launcher recorded as 100644 is not run by a clone or a new worktree (git on Windows records 100644 unless told). */
+const EXECUTABLE_MODE = '100755';
+
+/** The state of the launcher in git, asked at most once per run (two read-only commands). */
+function launcherState(git: GitRunner): () => Promise<LauncherState> {
+  const probe = async (): Promise<LauncherState> => {
+    try {
+      const inHead = await git(['cat-file', '-e', `HEAD:${HOOK_LAUNCHER}`]);
+      if (inHead.code !== 0) return { committed: false, mode: undefined };
+      const listed = await git(['ls-files', '-s', '--', HOOK_LAUNCHER]);
+      return { committed: true, mode: listed.code === 0 ? /^(\d{6}) /.exec(listed.stdout)?.[1] : undefined };
+    } catch {
+      return { committed: undefined, mode: undefined };
+    }
+  };
+  let known: Promise<LauncherState> | undefined;
+  return () => (known ??= probe());
 }
 
 /** The native event names of `harness` that have no array element calling the launcher (the same test the merge applies: the marker is in the element's JSON). */
@@ -785,10 +820,10 @@ function eventsWithoutHook(settings: unknown, harness: HookHarness): string[] {
 
 /**
  * The hooks one harness reads: its settings file has an element that calls the launcher for each of
- * session start, the prompt and the tool call; the launcher exists, and is committed (a worktree or
- * a clone gets only what is committed).
+ * session start, the prompt and the tool call; the launcher exists, and is committed, executable
+ * (a worktree or a clone gets only what is committed, with the mode it is committed with).
  */
-async function checkHooksOf(env: DoctorEnv, cfg: Config, harness: HookHarness, committed: () => Promise<boolean | undefined>): Promise<Check> {
+async function checkHooksOf(env: DoctorEnv, cfg: Config, harness: HookHarness, launcher: () => Promise<LauncherState>): Promise<Check> {
   const id = `hooks.${harness}`;
   if (!cfg.harnesses.includes(harness)) return ok(id, `${harness} is not a configured harness; skipped`);
   if (harness === 'gemini' && (env.platform ?? process.platform) === 'win32') {
@@ -819,9 +854,15 @@ async function checkHooksOf(env: DoctorEnv, cfg: Config, harness: HookHarness, c
 
   if (env.fs.read(HOOK_LAUNCHER) === undefined) {
     needsUpgrade(`${HOOK_LAUNCHER} not found`);
-  } else if ((await committed()) === false) {
-    problems.push(`${HOOK_LAUNCHER} is not committed; new worktrees and clones will not run the sdlc hooks`);
-    fixes.push(`commit ${HOOK_LAUNCHER}`);
+  } else {
+    const { committed, mode } = await launcher();
+    if (committed === false) {
+      problems.push(`${HOOK_LAUNCHER} is not committed; new worktrees and clones will not run the sdlc hooks`);
+      fixes.push(`commit ${HOOK_LAUNCHER}`);
+    } else if (mode !== undefined && mode !== EXECUTABLE_MODE) {
+      problems.push(`${HOOK_LAUNCHER} is committed with mode ${mode}, not ${EXECUTABLE_MODE}; new worktrees and clones cannot run it`);
+      fixes.push(`git update-index --chmod=+x ${HOOK_LAUNCHER}`);
+    }
   }
   if (problems.length > 0) return warn(id, problems.join('; '), fixes.join('; '));
 
@@ -859,16 +900,44 @@ function roundTripGit(root: string): GitRunner {
   };
 }
 
-const denies = (harness: HookHarness, answer: unknown): boolean =>
-  isRecord(answer) &&
-  (harness === 'gemini' ? answer.decision === 'deny' : isRecord(answer.hookSpecificOutput) && answer.hookSpecificOutput.permissionDecision === 'deny');
+const nonEmpty = (value: unknown): boolean => typeof value === 'string' && value.trim() !== '';
 
-/** The observe warning: in `systemMessage` for all, and in `additionalContext` too for Claude and Codex; never a deny. */
-const warns = (harness: HookHarness, answer: unknown): boolean => {
+/** What is missing from `answer` as the deny of `harness` (the contract of `renderOutput`), `undefined` when it is a whole one. */
+function denyFault(harness: HookHarness, answer: unknown): string | undefined {
+  if (!isRecord(answer)) return 'it is not an object';
+  if (harness === 'gemini') {
+    if (answer.decision !== 'deny') return 'decision is not "deny"';
+    return nonEmpty(answer.reason) ? undefined : 'the reason is missing or empty';
+  }
+  const output = answer.hookSpecificOutput;
+  if (!isRecord(output)) return 'hookSpecificOutput is missing';
+  const event = EVENT_NAMES[harness]['pre-tool'];
+  if (output.hookEventName !== event) return `hookEventName is ${JSON.stringify(output.hookEventName) ?? 'missing'}, not "${event}"`;
+  if (output.permissionDecision !== 'deny') return 'permissionDecision is not "deny"';
+  return nonEmpty(output.permissionDecisionReason) ? undefined : 'the reason (permissionDecisionReason) is missing or empty';
+}
+
+/** Whether `answer` decides to deny at all, whole or not. */
+const decidesToDeny = (answer: Record<string, unknown>): boolean =>
+  answer.decision === 'deny' || (isRecord(answer.hookSpecificOutput) && answer.hookSpecificOutput.permissionDecision === 'deny');
+
+/**
+ * What is missing from `answer` as the observe warning of `harness`, `undefined` when it is a whole
+ * one: in `systemMessage` for all, and for Claude and Codex in `additionalContext` of the pre-tool
+ * event too; never a deny.
+ */
+function warnFault(harness: HookHarness, answer: unknown): string | undefined {
   const observe = (value: unknown): boolean => typeof value === 'string' && value.includes('sdlc (observe)');
-  if (!isRecord(answer) || denies(harness, answer) || !observe(answer.systemMessage)) return false;
-  return harness === 'gemini' || (isRecord(answer.hookSpecificOutput) && observe(answer.hookSpecificOutput.additionalContext));
-};
+  if (!isRecord(answer)) return 'it is not an object';
+  if (decidesToDeny(answer)) return 'it denies, and observe mode only warns';
+  if (!observe(answer.systemMessage)) return 'systemMessage is not the observe warning';
+  if (harness === 'gemini') return undefined;
+  const output = answer.hookSpecificOutput;
+  if (!isRecord(output)) return 'hookSpecificOutput is missing';
+  const event = EVENT_NAMES[harness]['pre-tool'];
+  if (output.hookEventName !== event) return `hookEventName is ${JSON.stringify(output.hookEventName) ?? 'missing'}, not "${event}"`;
+  return observe(output.additionalContext) ? undefined : 'additionalContext is not the observe warning';
+}
 
 /** What is wrong with the answer of `harness`'s pre-tool hook, `undefined` when it is the one the mode calls for. */
 function roundTripProblem(harness: HookHarness, mode: Config['mode'], output: string | undefined, stderr: string[]): string | undefined {
@@ -883,8 +952,8 @@ function roundTripProblem(harness: HookHarness, mode: Config['mode'], output: st
   } catch {
     return `${harness}: expected ${expected}, got output that is not JSON: ${quoted(output)}`;
   }
-  const right = mode === 'enforce' ? denies(harness, answer) : warns(harness, answer);
-  return right ? undefined : `${harness}: expected ${expected}, got ${quoted(output)}`;
+  const fault = mode === 'enforce' ? denyFault(harness, answer) : warnFault(harness, answer);
+  return fault === undefined ? undefined : `${harness}: expected ${expected}, got ${quoted(output)} (${fault})`;
 }
 
 /**
@@ -971,8 +1040,9 @@ async function checkOutbox(env: DoctorEnv, worktrees: () => Promise<WorktreeList
   } catch {
     // A file that cannot be read counts as empty, as it does for the queue.
   }
-  if (outbox + failed + gaps === 0) return ok(id, 'nothing is queued for sdlc sync');
-  return warn(id, `${outbox} queued write(s), ${failed} failed${gaps > 0 ? `, ${gaps} gap(s)` : ''}; run sdlc sync`, 'sdlc sync');
+  if (outbox + failed > 0) return warn(id, `${outbox} queued write(s), ${failed} failed; run sdlc sync`, 'sdlc sync');
+  // A gap is a note for `sdlc sync` to pick up, not something to fix: it is no warning.
+  return ok(id, gaps === 0 ? 'nothing is queued for sdlc sync' : `no queued writes; ${gaps} gap(s) waiting for sync`);
 }
 
 /** Longest the task lookups of `worktrees.orphans` may take in all. */
@@ -1107,12 +1177,15 @@ export async function runDoctor(env: DoctorEnv, cfg: Config): Promise<Check[]> {
   }
 
   await add(isolated('mcp.token', () => checkMcpToken(env, cfg)));
-  for (const harness of HOOK_HARNESSES) await add(isolated(`mcp.${harness}`, () => checkMcpHarness(env, cfg, harness)));
-  await add(isolated('stack.superpowers', () => checkSuperpowers(env, cfg)));
+  // The three lists run together: each may take up to a minute.
+  const lists = await Promise.all(HOOK_HARNESSES.map(harness => isolated(`mcp.${harness}`, () => checkMcpHarness(env, cfg, harness))));
+  for (const list of lists) await add(Promise.resolve(list));
+  const worktrees = worktreeLister(env);
+  await add(isolated('stack.superpowers', () => checkSuperpowers(env, cfg, worktrees)));
   await add(isolated('stack.graphify', () => checkGraphify(env, cfg)));
 
-  const committed = launcherCommitted(env.git);
-  for (const harness of HOOK_HARNESSES) await add(isolated(`hooks.${harness}`, () => checkHooksOf(env, cfg, harness, committed)));
+  const launcher = launcherState(env.git);
+  for (const harness of HOOK_HARNESSES) await add(isolated(`hooks.${harness}`, () => checkHooksOf(env, cfg, harness, launcher)));
   await add(isolated('hooks.roundtrip', () => checkRoundTrip(env, cfg)));
 
   await add(isolated('secrets.guard', () => checkSecretGuard(hooks, onPath.status === 'ok')));
@@ -1120,7 +1193,6 @@ export async function runDoctor(env: DoctorEnv, cfg: Config): Promise<Check[]> {
   await add(isolated('secrets.trackedFiles', () => checkTrackedFiles(env, cfg)));
   await add(isolated('approvals.trust', () => checkApprovalTrust(cfg)));
 
-  const worktrees = worktreeLister(env);
   await add(isolated('outbox.pending', () => checkOutbox(env, worktrees)));
   await add(isolated('worktrees.orphans', () => checkWorktreeOrphans(env, cfg, blocker, worktrees)));
   return checks;

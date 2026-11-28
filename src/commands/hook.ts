@@ -100,8 +100,10 @@ export interface HookContext {
    */
   exit?(code: number): void;
   /**
-   * Answers without leaving a trace: no gap, prompt record or task cache is written and no sync is
-   * started. `sdlc doctor`'s round trip sets it, so that checking the hooks never adds to the real logs.
+   * Answers without leaving a trace: no gap, prompt record or task cache is written, no owner
+   * approval is applied (a `/approve` prompt is answered with a line saying it was not recorded)
+   * and no sync is started. `sdlc doctor`'s round trip sets it, so that checking the hooks never
+   * adds to the real logs or writes to GitHub.
    */
   readOnly?: boolean;
 }
@@ -462,6 +464,7 @@ const isApprovalAction = (action: string): action is ApprovalAction =>
 
 const NO_TASK_FOR_APPROVAL = 'sdlc: no task on this branch; the approval was not recorded.';
 const BARE_CANCEL = 'sdlc: approval not recorded: /cancel needs a reason on the same line, as in "/cancel no longer needed".';
+const READ_ONLY_APPROVAL = 'sdlc: read-only run; the approval was not recorded.';
 const GITHUB_UNREACHABLE = 'sdlc: could not reach GitHub; approval not recorded, ask again or approve by comment';
 
 /**
@@ -512,6 +515,8 @@ async function promptApproval(env: HookEnv, prompt: string): Promise<string | un
     const approver = promptApprover(env.cfg, login);
     if ('refused' in approver) return `sdlc: ${approver.refused}`;
 
+    // The one write of this prompt (the comment and the state of the task): a read-only run stops before it.
+    if (env.ctx.readOnly === true) return READ_ONLY_APPROVAL;
     await applyApproval(
       ctx,
       issue,

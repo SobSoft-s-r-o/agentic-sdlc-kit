@@ -1,7 +1,7 @@
 import type { HookEventName, HookHarness, HookOutcome } from './types.js';
 
 /** Claude Code and Codex CLI wrap their answers in `hookSpecificOutput`; Gemini names its events differently. */
-const EVENT_NAMES: Record<HookHarness, Record<HookEventName, string>> = {
+export const EVENT_NAMES: Record<HookHarness, Record<HookEventName, string>> = {
   claude: { 'session-start': 'SessionStart', prompt: 'UserPromptSubmit', 'pre-tool': 'PreToolUse' },
   codex: { 'session-start': 'SessionStart', prompt: 'UserPromptSubmit', 'pre-tool': 'PreToolUse' },
   gemini: { 'session-start': 'SessionStart', prompt: 'BeforeAgent', 'pre-tool': 'BeforeTool' },
