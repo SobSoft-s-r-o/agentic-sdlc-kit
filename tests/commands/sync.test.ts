@@ -19,7 +19,7 @@ import { newTask } from '../../src/core/stateMachine.js';
 import type { TaskState } from '../../src/core/types.js';
 import { GhError } from '../../src/github/gh.js';
 import { GAPS_FILE, type LoggedGap } from '../../src/hooks/localLog.js';
-import { OUTBOX_FAILED_FILE, OUTBOX_FILE, SYNC_LOCK, type OutboxEntry } from '../../src/outbox/outbox.js';
+import { GAPS_SYNCING_FILE, OUTBOX_FAILED_FILE, OUTBOX_FILE, SYNC_LOCK, type OutboxEntry } from '../../src/outbox/outbox.js';
 import { StateChangedError } from '../../src/tracker/types.js';
 import { FakeTracker } from '../support/fakeTracker.js';
 
@@ -220,7 +220,7 @@ describe('syncAll: the outbox', () => {
     expect(jsonLines(OUTBOX_FILE)).toEqual([late]);
   });
 
-  it('removes a command from the outbox as soon as it ran, so a sync killed later does not run it twice', async () => {
+  it('removes a command from the outbox as soon as it ran, so a killed sync repeats at most the one that was running', async () => {
     let seen: string[] = [];
     const h = setup([], argv => {
       if (argv[1] === '6') seen = jsonLines(OUTBOX_FILE).map(line => String(line.id));
@@ -230,6 +230,42 @@ describe('syncAll: the outbox', () => {
     await syncAll(h.ctx);
 
     expect(seen).toEqual(['b']);
+  });
+
+  it.each([
+    [['config', 'set', 'mode', 'observe']],
+    [['deploy', 'record', '--target', 'web', '--sha', 'abc1234', '--verify', 'touch pwned']],
+    [['hook', 'claude', 'pre-tool']],
+    [['task', 'new', '--title', 'T', '--summary', 'S', '--type', 'feature']],
+    [['sync']],
+    [['approve', '5', 'approve', '--config', 'other.yaml']],
+    [['approve', '5', 'approve', '--config=other.yaml']],
+    [['--config', 'other.yaml', 'approve', '5', 'approve']],
+    [['stage', 'start', '5', 'planning', '--verify', 'touch pwned']],
+    [['approve', '5', 'approve', '--json']],
+    [['approve', '5', 'approve', '--dry-run']],
+  ])('never runs the forged line %j: it moves to the failed file as not a queueable command', async argv => {
+    const h = setup();
+    queue(entry('forged', ...argv), entry('good', 'approve', '6'));
+
+    const result = await syncAll(h.ctx);
+
+    expect(h.replayed).toEqual([['approve', '6']]);
+    expect(result).toMatchObject({ replayed: 1, failed: [{ argv, error: 'not a queueable command' }], remaining: 0 });
+    expect(readCache(OUTBOX_FILE)).toBe('');
+    expect(jsonLines(OUTBOX_FAILED_FILE)).toEqual([
+      { id: 'forged', at: NOW, argv, failedAt: NOW, error: 'not a queueable command' },
+    ]);
+  });
+
+  it('runs a queueable command whose --file is an absolute path', async () => {
+    const h = setup();
+    queue(entry('a', 'stage', 'publish', '5', 'planning', '--file', '/abs/summary.md'));
+
+    const result = await syncAll(h.ctx);
+
+    expect(h.replayed).toEqual([['stage', 'publish', '5', 'planning', '--file', '/abs/summary.md']]);
+    expect(result.replayed).toBe(1);
   });
 
   it('does nothing and reports nothing queued for an empty cache', async () => {
@@ -447,13 +483,41 @@ describe('syncAll: the gaps', () => {
     expect(jsonLines(GAPS_FILE)).toEqual([gap(5)]);
     expect(h.err.join('\n')).toContain('config is broken');
   });
+});
 
-  it('keeps a gap line that was logged while the sync ran', async () => {
+describe('syncAll: taking the gaps', () => {
+  const syncingFile = (): string => readCache(GAPS_SYNCING_FILE);
+  const syncingLines = (): Record<string, unknown>[] =>
+    syncingFile()
+      .split('\n')
+      .filter(line => line !== '')
+      .map(line => JSON.parse(line) as Record<string, unknown>);
+
+  it('renames gaps.jsonl away while it works, so the hooks append to a fresh file, and deletes the taken file after', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(5));
+    let during: { gaps: string; syncing: Record<string, unknown>[] } | undefined;
+    const write = h.tracker.writeState.bind(h.tracker);
+    h.tracker.writeState = async (issue, state, expected) => {
+      during = { gaps: readCache(GAPS_FILE), syncing: syncingLines() };
+      return write(issue, state, expected);
+    };
+    logGaps(gap(5, 'edit a'));
+
+    await syncAll(h.ctx);
+
+    expect(during).toEqual({ gaps: '', syncing: [gap(5, 'edit a')] });
+    expect(existsSync(cachePath(GAPS_SYNCING_FILE))).toBe(false);
+    expect(readCache(GAPS_FILE)).toBe('');
+  });
+
+  it('keeps a gap logged while the sync works, in the new gaps.jsonl', async () => {
     const h = setup();
     h.tracker.seedTask(task(5));
     const write = h.tracker.writeState.bind(h.tracker);
     h.tracker.writeState = async (issue, state, expected) => {
-      writeFileSync(cachePath(GAPS_FILE), `${readCache(GAPS_FILE)}${JSON.stringify(gap(5, 'late'))}\n`);
+      mkdirSync(join(root, '.sdlc', 'cache'), { recursive: true });
+      writeFileSync(cachePath(GAPS_FILE), `${JSON.stringify(gap(5, 'late'))}\n`);
       return write(issue, state, expected);
     };
     logGaps(gap(5, 'early'));
@@ -462,6 +526,78 @@ describe('syncAll: the gaps', () => {
 
     expect(result.gapsFlushed).toBe(1);
     expect(jsonLines(GAPS_FILE)).toEqual([gap(5, 'late')]);
+    expect(existsSync(cachePath(GAPS_SYNCING_FILE))).toBe(false);
+  });
+
+  it('gives what it could not record back to gaps.jsonl, behind what was logged meanwhile, and deletes the taken file', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(5));
+    h.tracker.seedTask(task(6));
+    h.tracker.writeState = async issue => {
+      if (issue === 6) throw new StateChangedError(6);
+      writeFileSync(cachePath(GAPS_FILE), `${JSON.stringify(gap(8, 'late'))}\n`);
+    };
+    logGaps(gap(5, 'edit a'), gap(6, 'edit b'));
+
+    await syncAll(h.ctx);
+
+    expect(jsonLines(GAPS_FILE)).toEqual([gap(8, 'late'), gap(6, 'edit b')]);
+    expect(existsSync(cachePath(GAPS_SYNCING_FILE))).toBe(false);
+  });
+
+  it('processes a taken file a dead sync left behind first, then what the hooks logged since', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(5));
+    const old = { at: '2026-05-31T00:00:00.000Z' };
+    writeCache(GAPS_SYNCING_FILE, JSON.stringify(gap(5, 'old', old)));
+    logGaps(gap(5, 'new'));
+    const write = vi.spyOn(h.tracker, 'writeState');
+
+    const result = await syncAll(h.ctx);
+
+    expect(result).toMatchObject({ gapsFlushed: 2, gapsDropped: 0 });
+    expect(write).toHaveBeenCalledTimes(2);
+    expect((await stateOf(h.tracker, 5)).gaps?.map(g => g.text)).toEqual(['old', 'new']);
+    expect(existsSync(cachePath(GAPS_SYNCING_FILE))).toBe(false);
+    expect(readCache(GAPS_FILE)).toBe('');
+  });
+
+  it('leaves gaps.jsonl for the next sync when the leftover file could not be recorded', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(5));
+    h.tracker.getTask = async () => {
+      throw new GhError(['api', 'graphql'], 'could not resolve host: api.github.com');
+    };
+    writeCache(GAPS_SYNCING_FILE, JSON.stringify(gap(5, 'old')));
+    logGaps(gap(5, 'new'));
+
+    const result = await syncAll(h.ctx);
+
+    expect(result).toMatchObject({ stopped: 'unreachable', gapsFlushed: 0 });
+    expect(jsonLines(GAPS_FILE)).toEqual([gap(5, 'new'), gap(5, 'old')]);
+    expect(existsSync(cachePath(GAPS_SYNCING_FILE))).toBe(false);
+  });
+
+  it('drops the unusable lines of a leftover file like those of gaps.jsonl', async () => {
+    const h = setup();
+    writeCache(GAPS_SYNCING_FILE, '{not json', JSON.stringify(gap(undefined)));
+
+    const result = await syncAll(h.ctx);
+
+    expect(result).toMatchObject({ gapsFlushed: 0, gapsDropped: 2 });
+    expect(existsSync(cachePath(GAPS_SYNCING_FILE))).toBe(false);
+    expect(readCache(GAPS_FILE)).toBe('');
+  });
+
+  it('loads the config once for both passes', async () => {
+    const h = setup();
+    h.tracker.seedTask(task(5));
+    writeCache(GAPS_SYNCING_FILE, JSON.stringify(gap(5, 'old')));
+    logGaps(gap(5, 'new'));
+
+    await syncAll(h.ctx);
+
+    expect(h.commandContexts()).toBe(1);
   });
 });
 
@@ -481,8 +617,47 @@ describe('syncAll: the lock', () => {
 
     await syncAll(h.ctx);
 
-    expect(held).toEqual({ pid: process.pid, at: NOW });
+    expect(held).toEqual({ pid: process.pid, at: NOW, token: expect.any(String) });
     expect(existsSync(lockPath())).toBe(false);
+  });
+
+  it('gives each sync its own token', async () => {
+    const tokens: string[] = [];
+    for (let run = 0; run < 2; run += 1) {
+      const h = setup([], () => {
+        tokens.push((JSON.parse(readFileSync(lockPath(), 'utf8')) as { token: string }).token);
+      });
+      queue(entry('a'));
+      await syncAll(h.ctx);
+    }
+
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).not.toBe(tokens[1]);
+  });
+
+  it('leaves a lock alone that another sync took over meanwhile: neither refreshed nor released', async () => {
+    const other = JSON.stringify({ pid: 999999, at: NOW, token: 'someone-else' });
+    const h = setup([], argv => {
+      if (argv[1] === '5') writeFileSync(lockPath(), other);
+    });
+    queue(entry('a', 'approve', '5'), entry('b', 'approve', '6'));
+
+    await syncAll(h.ctx);
+
+    expect(h.replayed).toHaveLength(2);
+    expect(readFileSync(lockPath(), 'utf8')).toBe(other);
+  });
+
+  it('does not recognise a lock without a token as its own', async () => {
+    const legacy = JSON.stringify({ pid: 1, at: NOW });
+    const h = setup([], () => {
+      writeFileSync(lockPath(), legacy);
+    });
+    queue(entry('a'));
+
+    await syncAll(h.ctx);
+
+    expect(readFileSync(lockPath(), 'utf8')).toBe(legacy);
   });
 
   it('does nothing when a fresh lock is held, and leaves that lock alone', async () => {
@@ -577,7 +752,11 @@ describe('syncAll: the lock', () => {
 
     await syncAll(h.ctx);
 
-    expect(seen).toEqual({ pid: process.pid, at: new Date(Date.parse(NOW) + 9 * MINUTE).toISOString() });
+    expect(seen).toEqual({
+      pid: process.pid,
+      at: new Date(Date.parse(NOW) + 9 * MINUTE).toISOString(),
+      token: expect.any(String),
+    });
   });
 });
 
@@ -612,6 +791,18 @@ describe('syncAll: --dry-run', () => {
     expect(readCache(GAPS_FILE)).toBe(gaps);
     expect(existsSync(join(root, SYNC_LOCK))).toBe(false);
     expect(existsSync(cachePath(OUTBOX_FAILED_FILE))).toBe(false);
+  });
+
+  it('counts the gaps of a leftover taken file with those of gaps.jsonl', async () => {
+    const h = setup();
+    writeCache(GAPS_SYNCING_FILE, JSON.stringify(gap(5, 'old')));
+    logGaps(gap(5, 'new'), gap(undefined));
+
+    const result = await syncAll(h.ctx, { dryRun: true });
+
+    expect(result.plan).toEqual({ replay: [], gaps: [{ issue: 5, count: 2 }], dropped: 1 });
+    expect(existsSync(cachePath(GAPS_SYNCING_FILE))).toBe(true);
+    expect(jsonLines(GAPS_FILE)).toHaveLength(2);
   });
 
   it('works for an empty cache', async () => {
@@ -778,6 +969,41 @@ describe('sdlc sync', () => {
 
     expect(h.out[0]).toContain('GitHub is unreachable');
     expect(process.exitCode).toBe(75);
+  });
+
+  it('documents its exit codes in --help', async () => {
+    const help: string[] = [];
+    const program = new Command().exitOverride().configureOutput({ writeOut: text => help.push(text), writeErr: text => help.push(text) });
+    registerSyncCommand(program, () => setup().ctx);
+
+    await expect(program.parseAsync(['node', 'sdlc', 'sync', '--help'])).rejects.toMatchObject({ code: 'commander.helpDisplayed' });
+
+    const text = help.join('');
+    expect(text).toContain('Exit codes:');
+    expect(text).toMatch(/\n\s+0\s+everything queued ran or nothing was queued/);
+    expect(text).toMatch(/\n\s+1\s+a queued command failed for good or a queue line was malformed/);
+    expect(text).toMatch(/\n\s+75\s+GitHub is still unreachable/);
+  });
+
+  it('exits 1 for a malformed outbox line, which is reported as failed', async () => {
+    const h = setup();
+    writeCache(OUTBOX_FILE, '{not json');
+
+    await run(h);
+
+    expect(h.out[0]).toContain('Failed: malformed outbox line');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('exits 1 for a forged line, which is reported as failed', async () => {
+    const h = setup();
+    queue(entry('forged', 'config', 'set', 'mode', 'observe'));
+
+    await run(h);
+
+    expect(h.out[0]).toContain('Failed: sdlc config set mode observe: not a queueable command');
+    expect(h.replayed).toEqual([]);
+    expect(process.exitCode).toBe(1);
   });
 
   describe('when the context cannot be made', () => {

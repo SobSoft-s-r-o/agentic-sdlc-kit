@@ -37,6 +37,7 @@ import { CACHE_DIR, SYNC_LOG_FILE } from './hooks/localLog.js';
 import { mainRootOf } from './hooks/resolve.js';
 import { nodeRepoFs } from './install/repoFs.js';
 import { createGitRunner } from './install/provision.js';
+import { isQueueableCommandPath, queueArgvOf } from './outbox/outbox.js';
 import { execProgram, findOnPath } from './secrets/gitleaks.js';
 import { packageVersion } from './version.js';
 
@@ -70,49 +71,11 @@ export interface CliDeps {
   err?: (text: string) => void;
 }
 
-/**
- * The commands that may be queued for `sdlc sync` when GitHub cannot be reached: each one re-applies
- * its event to the state it finds, so running it later is safe. `task new` is not here (a replay would
- * create a second issue), nor is `deploy record` (a replay would run its `--verify` command later),
- * nor are the commands that only read.
- */
-const QUEUEABLE: ReadonlySet<string> = new Set([
-  'stage start',
-  'stage publish',
-  'evidence add',
-  'review handoff',
-  'approve',
-  'task checkpoint',
-]);
-
 /** The words that name `command`: `stage publish`. */
 function commandPath(command: Command): string {
   const names: string[] = [];
   for (let current: Command | null = command; current?.parent; current = current.parent) names.unshift(current.name());
   return names.join(' ');
-}
-
-/** Options whose value is a file; a queued command runs from another directory, so it needs the full path. */
-const PATH_OPTIONS: ReadonlySet<string> = new Set(['--file', '--config']);
-
-/** `argv` with the files its options name (`--file`, `--config`) as absolute paths, in both `--file x` and `--file=x` forms. */
-function withAbsolutePaths(argv: readonly string[], cwd: string): string[] {
-  const result: string[] = [];
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index] as string;
-    const equals = arg.indexOf('=');
-    if (equals > 0 && PATH_OPTIONS.has(arg.slice(0, equals))) {
-      result.push(`${arg.slice(0, equals)}=${resolve(cwd, arg.slice(equals + 1))}`);
-      continue;
-    }
-    result.push(arg);
-    const value = argv[index + 1];
-    if (PATH_OPTIONS.has(arg) && value !== undefined) {
-      result.push(resolve(cwd, value));
-      index += 1;
-    }
-  }
-  return result;
 }
 
 const writeLine = (stream: NodeJS.WriteStream) => (text: string) => void stream.write(`${text}\n`);
@@ -372,8 +335,10 @@ export function buildProgram(deps: CliDeps = {}): Command {
   // A command that may be queued also gets the command line to queue (`runCommand` does the queueing).
   program.hook('preAction', (_program, command) => {
     if (program.opts<{ json?: boolean }>().json) command.setOptionValue('json', true);
-    if (QUEUEABLE.has(commandPath(command))) {
-      command.setOptionValue('queueArgv', withAbsolutePaths(deps.argv ?? process.argv.slice(2), process.cwd()));
+    if (isQueueableCommandPath(commandPath(command))) {
+      // Only a command line sync could run is queued; `undefined` (`--config`, `--dry-run`, ...) keeps the failure as it is.
+      const queueArgv = queueArgvOf(deps.argv ?? process.argv.slice(2), process.cwd());
+      if (queueArgv !== undefined) command.setOptionValue('queueArgv', queueArgv);
     }
   });
 

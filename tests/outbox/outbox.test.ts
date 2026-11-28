@@ -11,13 +11,19 @@ import type { TaskState } from '../../src/core/types.js';
 import { GhError } from '../../src/github/gh.js';
 import { GAPS_FILE, OUTBOX_FILE as LOG_OUTBOX_FILE, type LoggedGap } from '../../src/hooks/localLog.js';
 import {
+  appendRawLines,
   EXIT_TEMPFAIL,
   enqueue,
+  GAPS_SYNCING_FILE,
   isOutboxEntry,
+  isQueueableArgv,
+  isQueueableCommandPath,
   isTransportError,
   OUTBOX_FAILED_FILE,
   OUTBOX_FILE,
+  queueArgvOf,
   queuedCounts,
+  QUEUEABLE_COMMANDS,
   readOutbox,
   readRawLines,
   removeLines,
@@ -71,6 +77,7 @@ describe('names', () => {
     expect(OUTBOX_FILE).toBe('outbox.jsonl');
     expect(OUTBOX_FILE).toBe(LOG_OUTBOX_FILE);
     expect(OUTBOX_FAILED_FILE).toBe('outbox-failed.jsonl');
+    expect(GAPS_SYNCING_FILE).toBe('gaps.jsonl.syncing');
     expect(SYNC_LOCK).toBe('.sdlc/cache/sync.lock');
     expect(EXIT_TEMPFAIL).toBe(75);
   });
@@ -168,6 +175,13 @@ describe('the outbox file', () => {
     expect(await queuedCounts(root)).toEqual({ outbox: 1, gaps: 2 });
   });
 
+  it('counts the gaps a sync has taken into gaps.jsonl.syncing too', async () => {
+    writeCache(GAPS_FILE, `${JSON.stringify(gap(5))}\n`);
+    writeCache(GAPS_SYNCING_FILE, `${JSON.stringify(gap(6))}\n{not json\n${JSON.stringify(gap())}\n`);
+
+    expect(await queuedCounts(root)).toEqual({ outbox: 0, gaps: 3 });
+  });
+
   it('counts a file that cannot be read as empty', async () => {
     mkdirSync(cacheFile(OUTBOX_FILE), { recursive: true });
 
@@ -208,6 +222,127 @@ describe('removeLines', () => {
     writeCache('q.jsonl', 'a\n\n  \nb');
     expect(await readRawLines(root, 'q.jsonl')).toEqual(['a', 'b']);
     expect(await readRawLines(root, 'missing.jsonl')).toEqual([]);
+  });
+});
+
+describe('appendRawLines', () => {
+  it('appends the lines as given, creating the file, and nothing for no line', async () => {
+    await appendRawLines(root, 'q.jsonl', []);
+    expect(existsSync(cacheFile('q.jsonl'))).toBe(false);
+
+    await appendRawLines(root, 'q.jsonl', ['a', '{"b":1}']);
+    await appendRawLines(root, 'q.jsonl', ['c']);
+
+    expect(readCache('q.jsonl')).toBe('a\n{"b":1}\nc\n');
+  });
+});
+
+describe('which command lines may be queued', () => {
+  it('lists the six queueable commands', () => {
+    expect(QUEUEABLE_COMMANDS.map(words => words.join(' '))).toEqual([
+      'stage start',
+      'stage publish',
+      'evidence add',
+      'review handoff',
+      'approve',
+      'task checkpoint',
+    ]);
+    expect(QUEUEABLE_COMMANDS.every(words => isQueueableCommandPath(words.join(' ')))).toBe(true);
+    for (const path of ['task new', 'task', 'stage', 'deploy record', 'config set', 'hook', 'sync', 'approve 5', '']) {
+      expect(isQueueableCommandPath(path)).toBe(false);
+    }
+  });
+
+  it.each([
+    [['stage', 'start', '5', 'planning']],
+    [['stage', 'publish', '5', 'planning', '--needs-approval', '--file', '/abs/summary.md']],
+    [['stage', 'publish', '5', 'planning', '--file=/abs/summary.md']],
+    [['evidence', 'add', '5', '--kind', 'backup', '--ref', 'b1']],
+    [['review', 'handoff', '5', '--pr', '9', '--targets', 'web,api']],
+    [['approve', '5', 'approve', '--unverified']],
+    [['approve', '5', 'cancel', '--reason', 'no longer needed']],
+    [['task', 'checkpoint', '5', '--current', 'writing the plan']],
+  ])('accepts %j', argv => {
+    expect(isQueueableArgv(argv)).toBe(true);
+  });
+
+  it.each([
+    [[]],
+    [['config', 'set', 'mode', 'observe']],
+    [['deploy', 'record', '--target', 'web', '--sha', 'abc1234', '--verify', 'touch pwned']],
+    [['hook', 'claude', 'pre-tool']],
+    [['task', 'new', '--title', 'T', '--summary', 'S', '--type', 'feature']],
+    [['task', 'set-type', '5', 'bugfix']],
+    [['task', 'reopen', '5']],
+    [['reconcile']],
+    [['status']],
+    [['sync']],
+    [['stage']],
+    [['stage', 'finish', '5']],
+    [['stage start', '5', 'planning']],
+    [['--version']],
+    [['--config', 'other.yaml', 'approve', '5', 'approve']],
+    [['--json', 'approve', '5', 'approve']],
+    [['approve', '5', 'approve', '--config', 'other.yaml']],
+    [['approve', '5', 'approve', '--config=other.yaml']],
+    [['stage', 'start', '5', 'planning', '--verify', 'touch pwned']],
+    [['stage', 'start', '5', 'planning', '--verify=touch pwned']],
+    [['approve', '5', 'approve', '--json']],
+    [['approve', '5', 'approve', '--json=true']],
+    [['approve', '5', 'approve', '--dry-run']],
+    [['approve', '5', 'approve', '--dry-run=1']],
+  ])('refuses %j', argv => {
+    expect(isQueueableArgv(argv)).toBe(false);
+  });
+
+  describe('queueArgvOf', () => {
+    it('takes --json out, wherever it stands', () => {
+      expect(queueArgvOf(['--json', 'approve', '5', 'approve'], root)).toEqual(['approve', '5', 'approve']);
+      expect(queueArgvOf(['approve', '5', 'approve', '--json', '--unverified'], root)).toEqual([
+        'approve',
+        '5',
+        'approve',
+        '--unverified',
+      ]);
+    });
+
+    it('makes the file of --file absolute, in both forms, and keeps an absolute one', () => {
+      const here = resolve(root, 'notes', 'summary.md');
+      expect(queueArgvOf(['stage', 'publish', '5', 'planning', '--file', 'notes/summary.md'], root)).toEqual([
+        'stage',
+        'publish',
+        '5',
+        'planning',
+        '--file',
+        here,
+      ]);
+      expect(queueArgvOf(['stage', 'publish', '5', 'planning', '--file=notes/summary.md'], root)).toEqual([
+        'stage',
+        'publish',
+        '5',
+        'planning',
+        `--file=${here}`,
+      ]);
+      expect(queueArgvOf(['stage', 'publish', '5', 'planning', '--file', here], root)).toEqual([
+        'stage',
+        'publish',
+        '5',
+        'planning',
+        '--file',
+        here,
+      ]);
+    });
+
+    it.each([
+      [['--config', 'other.yaml', 'approve', '5', 'approve']],
+      [['approve', '5', 'approve', '--config=other.yaml']],
+      [['approve', '5', 'approve', '--dry-run']],
+      [['stage', 'start', '5', 'planning', '--verify', 'x']],
+      [['task', 'new', '--title', 'T']],
+      [[]],
+    ])('is undefined for %j, which must not be queued', argv => {
+      expect(queueArgvOf(argv, root)).toBeUndefined();
+    });
   });
 });
 
@@ -434,17 +569,40 @@ describe('which commands queue (cli)', () => {
     expect(process.exitCode).toBe(1);
   });
 
-  it('resolves the config path of the queued command line too, whichever form it is given in', async () => {
-    const { deps } = setup();
-    const args = ['--config', 'cfg/sdlc.config.yaml', 'stage', 'start', '5', 'planning'];
+  it.each([
+    [['--config', 'cfg/sdlc.config.yaml', 'stage', 'start', '5', 'planning']],
+    [['stage', 'start', '5', 'planning', '--config=other.yaml']],
+  ])('does not queue %j (a line sync would refuse to run), and fails as before', async args => {
+    const { deps, err } = setup();
 
     await run(args, deps);
-    await run(['stage', 'start', '5', 'planning', '--config=other.yaml'], deps);
 
+    expect(existsSync(cacheFile(OUTBOX_FILE))).toBe(false);
+    expect(process.exitCode).toBe(1);
+    expect(err.join('\n')).toContain('could not resolve host');
+  });
+
+  it('stores the command line without --json, and says nothing of it in the JSON answer', async () => {
+    const { deps, out } = setup();
+
+    await run(['--json', 'approve', '5', 'approve', '--unverified'], deps);
+    await run(['approve', '5', 'approve', '--unverified', '--json'], deps);
+
+    expect(entriesOf(OUTBOX_FILE).map(entry => entry.argv)).toEqual([
+      ['approve', '5', 'approve', '--unverified'],
+      ['approve', '5', 'approve', '--unverified'],
+    ]);
     const [first, second] = entriesOf(OUTBOX_FILE);
-    expect(first?.argv).toEqual(['--config', resolve('cfg/sdlc.config.yaml'), 'stage', 'start', '5', 'planning']);
-    expect(second?.argv).toEqual(['stage', 'start', '5', 'planning', `--config=${resolve('other.yaml')}`]);
-    for (const value of [first?.argv[1], resolve('other.yaml')]) expect(isAbsolute(value as string)).toBe(true);
+    expect(JSON.parse(out[0] as string)).toEqual({ queued: true, id: first?.id });
+    expect(JSON.parse(out[1] as string)).toEqual({ queued: true, id: second?.id });
+  });
+
+  it('prints the command line as stored, without --json', async () => {
+    const { deps, out } = setup();
+
+    await run(['approve', '5', 'approve', '--unverified'], deps);
+
+    expect(out).toEqual(['queued for `sdlc sync` (GitHub unreachable): sdlc approve 5 approve --unverified']);
   });
 
   it('keeps a file path that is already absolute and the other arguments as given', async () => {
@@ -454,5 +612,13 @@ describe('which commands queue (cli)', () => {
     await run(['stage', 'publish', '5', 'planning', `--file=${file}`], deps);
 
     expect(entriesOf(OUTBOX_FILE)[0]?.argv).toEqual(['stage', 'publish', '5', 'planning', `--file=${file}`]);
+  });
+
+  it('resolves a relative --file given in the --file= form too', async () => {
+    const { deps } = setup();
+
+    await run(['stage', 'publish', '5', 'planning', '--file=summary.md'], deps);
+
+    expect(entriesOf(OUTBOX_FILE)[0]?.argv).toEqual(['stage', 'publish', '5', 'planning', `--file=${resolve('summary.md')}`]);
   });
 });

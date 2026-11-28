@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { GhError } from '../github/gh.js';
 import {
   appendJsonLine,
@@ -21,6 +21,12 @@ export { OUTBOX_FILE };
 
 /** Where `sdlc sync` moves a queued command that failed for good (and a line it cannot read). */
 export const OUTBOX_FAILED_FILE = 'outbox-failed.jsonl';
+/**
+ * Where `sdlc sync` keeps the gap lines it has taken from `gaps.jsonl` (renamed, so the hooks, which
+ * append to a fresh `gaps.jsonl`, never write into a file sync is rewriting). One left behind by a
+ * sync that died is processed first by the next one.
+ */
+export const GAPS_SYNCING_FILE = 'gaps.jsonl.syncing';
 /** The lock of a running `sdlc sync`, relative to the repository root. */
 export const SYNC_LOCK = '.sdlc/cache/sync.lock';
 /** `EX_TEMPFAIL`: a queueable command that failed because GitHub is unreachable and was not queued. */
@@ -33,6 +39,72 @@ export interface OutboxEntry {
   id: string;
   at: string;
   argv: string[];
+}
+
+/**
+ * The commands that may be queued, and so replayed, as the words that name them. Each re-applies its
+ * event to the state it finds, so running it later is safe. `task new` is not here (a replay would
+ * create a second issue), nor is `deploy record` (a replay would run its `--verify` command later),
+ * nor are the commands that only read or change settings.
+ */
+export const QUEUEABLE_COMMANDS: readonly (readonly string[])[] = [
+  ['stage', 'start'],
+  ['stage', 'publish'],
+  ['evidence', 'add'],
+  ['review', 'handoff'],
+  ['approve'],
+  ['task', 'checkpoint'],
+];
+
+/** Whether the command that runs, named as `stage publish`, may be queued. */
+export const isQueueableCommandPath = (path: string): boolean =>
+  QUEUEABLE_COMMANDS.some(words => words.join(' ') === path);
+
+/** Options that never belong in a queued command line: another config, a shell command to run, output and dry-run modes. */
+const REFUSED_OPTIONS: readonly string[] = ['--config', '--verify', '--json', '--dry-run'];
+
+/**
+ * Whether `argv` is a command line `sdlc sync` may run: it starts with the words of a queueable
+ * command (no global option before them) and holds none of `--config`, `--verify`, `--json` and
+ * `--dry-run`, in either `--x v` or `--x=v` form. Sync checks every line with this before it runs it,
+ * so a line written by hand cannot make it run anything else.
+ */
+export function isQueueableArgv(argv: readonly string[]): boolean {
+  if (!QUEUEABLE_COMMANDS.some(words => words.every((word, index) => argv[index] === word))) return false;
+  return !argv.some(arg => REFUSED_OPTIONS.some(option => arg === option || arg.startsWith(`${option}=`)));
+}
+
+/** `argv` with the value of `--file` (both forms) as an absolute path, since sync runs from another directory. */
+function withAbsoluteFiles(argv: readonly string[], cwd: string): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index] as string;
+    if (arg.startsWith('--file=')) {
+      result.push(`--file=${resolve(cwd, arg.slice('--file='.length))}`);
+      continue;
+    }
+    result.push(arg);
+    const value = argv[index + 1];
+    if (arg === '--file' && value !== undefined) {
+      result.push(resolve(cwd, value));
+      index += 1;
+    }
+  }
+  return result;
+}
+
+/**
+ * The command line to queue for what the user ran (`argv`, what follows `sdlc`): `--json` taken out
+ * (a replay's output is not shown, and its failures should name their reason on stderr) and `--file`
+ * made absolute. `undefined` when the run must not be queued: it is no queueable command line (it
+ * has `--config`, `--dry-run` or `--verify`, say), which sync would refuse to run.
+ */
+export function queueArgvOf(argv: readonly string[], cwd: string): string[] | undefined {
+  const stored = withAbsoluteFiles(
+    argv.filter(arg => arg !== '--json'),
+    cwd,
+  );
+  return isQueueableArgv(stored) ? stored : undefined;
 }
 
 const TRANSPORT_FAILURE =
@@ -87,8 +159,9 @@ export async function readOutbox(root: string): Promise<OutboxEntry[]> {
 }
 
 /**
- * What waits for `sdlc sync`: queued commands and recorded gaps. Only well-formed lines count, the
- * ones sync would act on; a file that cannot be read counts as empty.
+ * What waits for `sdlc sync`: queued commands and recorded gaps (those a running or dead sync has
+ * taken into `gaps.jsonl.syncing` included). Only well-formed lines count, the ones sync would act
+ * on; a file that cannot be read counts as empty.
  */
 export async function queuedCounts(root: string): Promise<{ outbox: number; gaps: number }> {
   const count = async (file: string, wellFormed: (value: unknown) => boolean): Promise<number> => {
@@ -98,7 +171,10 @@ export async function queuedCounts(root: string): Promise<{ outbox: number; gaps
       return 0;
     }
   };
-  return { outbox: await count(OUTBOX_FILE, isOutboxEntry), gaps: await count(GAPS_FILE, isLoggedGap) };
+  return {
+    outbox: await count(OUTBOX_FILE, isOutboxEntry),
+    gaps: (await count(GAPS_FILE, isLoggedGap)) + (await count(GAPS_SYNCING_FILE, isLoggedGap)),
+  };
 }
 
 const isMissing = (error: unknown): boolean => {
@@ -116,10 +192,23 @@ export async function readRawLines(root: string, file: string): Promise<string[]
   }
 }
 
+/** Appends `lines` (as `readRawLines` gave them) to a cache file, creating it and its directory when needed. */
+export async function appendRawLines(root: string, file: string, lines: readonly string[]): Promise<void> {
+  if (lines.length === 0) return;
+  const path = cachePath(root, file);
+  await mkdir(dirname(path), { recursive: true });
+  await appendFile(path, lines.map(line => `${line}\n`).join(''));
+}
+
 /**
  * Takes `lines` (as `readRawLines` gave them) out of a cache file: one line for each one given.
  * The file is read again first, so a line appended since is kept; it is written aside and renamed,
  * so a reader never sees half of it. A missing file stays missing; one left with no line is empty.
+ *
+ * Not safe against an append between its read and its rename (that line is lost), so it is for files
+ * only one process writes to at a time: the outbox, which only the queueing command (an append) and
+ * the one running `sdlc sync` (under its lock) touch, and `gaps.jsonl.syncing`. `gaps.jsonl`, which
+ * the hooks append to at any moment, is never rewritten: sync renames it away first.
  */
 export async function removeLines(root: string, file: string, lines: readonly string[]): Promise<void> {
   const path = cachePath(root, file);

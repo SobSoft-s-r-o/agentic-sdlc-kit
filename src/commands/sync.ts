@@ -1,16 +1,20 @@
 import { execFile, type ExecFileException } from 'node:child_process';
-import { mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Command } from 'commander';
 import { StateCommentError } from '../core/stateComment.js';
 import { TransitionError } from '../core/stateMachine.js';
 import { ConfigError } from '../core/taskTypes.js';
 import type { Gap } from '../core/types.js';
-import { appendJsonLine, GAPS_FILE, isLoggedGap, type LoggedGap } from '../hooks/localLog.js';
+import { appendJsonLine, cachePath, GAPS_FILE, isLoggedGap, type LoggedGap } from '../hooks/localLog.js';
 import {
+  appendRawLines,
   errorChain,
   EXIT_TEMPFAIL,
+  GAPS_SYNCING_FILE,
   isOutboxEntry,
+  isQueueableArgv,
   isTransportError,
   NO_QUEUE_ENV,
   OUTBOX_FAILED_FILE,
@@ -72,6 +76,7 @@ export const LOCK_STALE_MS = 10 * 60_000;
 /** Longest one replayed command may take; one that takes longer is killed and counts as GitHub being unreachable. */
 export const REPLAY_TIMEOUT_MS = 120_000;
 const MALFORMED_LINE = 'malformed outbox line';
+const NOT_QUEUEABLE = 'not a queueable command';
 const MAX_REPLAY_OUTPUT = 16 * 1024 * 1024;
 
 const reasonOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -86,57 +91,72 @@ const lastLine = (text: string): string =>
 
 const lockPathOf = (ctx: SyncContext): string => join(ctx.repoRoot, ...SYNC_LOCK.split('/'));
 
-const lockContent = (ctx: SyncContext): string => JSON.stringify({ pid: process.pid, at: ctx.now() });
+const lockContent = (ctx: SyncContext, token: string): string =>
+  JSON.stringify({ pid: process.pid, at: ctx.now(), token });
+
+/** The lock as written; `undefined` when it is gone or cannot be read as one. */
+async function readLock(path: string): Promise<{ at?: string; token?: string } | undefined> {
+  try {
+    const value: unknown = JSON.parse(await readFile(path, 'utf8'));
+    return typeof value === 'object' && value !== null ? (value as { at?: string; token?: string }) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** When the lock was last written: the time it says, else the time of its file; `undefined` when it is gone. */
 async function lockTime(path: string): Promise<number | undefined> {
+  const written = Date.parse((await readLock(path))?.at ?? '');
+  if (!Number.isNaN(written)) return written;
+  // A lock that is still being written, or one nobody can read: judge it by its file.
   try {
-    const written = Date.parse((JSON.parse(await readFile(path, 'utf8')) as { at?: string }).at ?? '');
-    if (!Number.isNaN(written)) return written;
     return (await stat(path)).mtimeMs;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    // A lock that is still being written, or one nobody can read: judge it by its file.
-    try {
-      return (await stat(path)).mtimeMs;
-    } catch {
-      return undefined;
-    }
+  } catch {
+    return undefined;
   }
 }
 
 /**
- * Takes the lock: the file is created with `wx`, so only one sync gets it. A lock older than
- * `LOCK_STALE_MS` is taken over. False when another sync holds it.
+ * Takes the lock and returns the token that proves it is ours: the file is created with `wx`, so only
+ * one sync gets it, and read back to confirm the token (a sync that took over the same stale lock
+ * meanwhile would have replaced it). A lock older than `LOCK_STALE_MS` is taken over. `undefined`
+ * when another sync holds it.
  */
-async function acquireLock(ctx: SyncContext): Promise<boolean> {
+async function acquireLock(ctx: SyncContext): Promise<string | undefined> {
   const path = lockPathOf(ctx);
   await mkdir(dirname(path), { recursive: true });
+  const token = randomUUID();
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const handle = await open(path, 'wx');
       try {
-        await handle.writeFile(lockContent(ctx));
+        await handle.writeFile(lockContent(ctx, token));
       } finally {
         await handle.close();
       }
-      return true;
+      return (await readLock(path))?.token === token ? token : undefined;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
     const written = await lockTime(path);
-    if (written !== undefined && Date.parse(ctx.now()) - written <= LOCK_STALE_MS) return false;
+    if (written !== undefined && Date.parse(ctx.now()) - written <= LOCK_STALE_MS) return undefined;
     await unlink(path).catch(() => undefined);
   }
-  return false;
+  return undefined;
 }
 
-/** Writes the time into the lock again, so a long sync is not mistaken for a dead one. */
-async function refreshLock(ctx: SyncContext): Promise<void> {
-  await writeFile(lockPathOf(ctx), lockContent(ctx)).catch(() => undefined);
+/** Writes the time into the lock again, so a long sync is not mistaken for a dead one; a lock that is no longer ours is left alone. */
+async function refreshLock(ctx: SyncContext, token: string): Promise<void> {
+  const path = lockPathOf(ctx);
+  if ((await readLock(path))?.token !== token) return;
+  await writeFile(path, lockContent(ctx, token)).catch(() => undefined);
 }
 
-const releaseLock = (ctx: SyncContext): Promise<void> => unlink(lockPathOf(ctx)).catch(() => undefined);
+/** Gives the lock back, unless another sync has taken it over since. */
+async function releaseLock(ctx: SyncContext, token: string): Promise<void> {
+  const path = lockPathOf(ctx);
+  if ((await readLock(path))?.token === token) await unlink(path).catch(() => undefined);
+}
 
 const parseLine = (line: string): unknown => {
   try {
@@ -152,14 +172,16 @@ interface TaskGaps {
   gaps: Gap[];
 }
 
-/** The gap lines of the gaps file, by task, and what cannot be recorded: `dropped` lines name no task, `unreadable` ones are no gap. */
-async function readGapLines(
-  root: string,
-): Promise<{ byIssue: Map<number, TaskGaps>; dropped: string[]; unreadable: string[] }> {
+/** The gap `lines` by task, and what cannot be recorded: `dropped` lines name no task, `unreadable` ones are no gap. */
+function groupGapLines(lines: readonly string[]): {
+  byIssue: Map<number, TaskGaps>;
+  dropped: string[];
+  unreadable: string[];
+} {
   const byIssue = new Map<number, TaskGaps>();
   const dropped: string[] = [];
   const unreadable: string[] = [];
-  for (const line of await readRawLines(root, GAPS_FILE)) {
+  for (const line of lines) {
     const value = parseLine(line);
     if (!isLoggedGap(value)) {
       unreadable.push(line);
@@ -196,50 +218,106 @@ const cannotTakeGaps = (error: unknown): boolean =>
       isNoTaskError(link) || link instanceof StateCommentError || link instanceof ConfigError || link instanceof TransitionError,
   );
 
+const isMissing = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+};
+
+const syncingExists = (root: string): Promise<boolean> =>
+  stat(cachePath(root, GAPS_SYNCING_FILE)).then(
+    () => true,
+    () => false,
+  );
+
 /**
- * Records the logged gaps into the state comments, one `gap_recorded` per task (the state keeps the
- * newest `MAX_GAPS`). A line that names no task, or is no gap, is thrown away (and counted as dropped);
- * so are the gaps of a task that cannot hold them. The gaps of a task that could not be written now stay for the next sync.
+ * Takes the gap lines the hooks logged: `gaps.jsonl` is renamed to `gaps.jsonl.syncing`, which is
+ * atomic, and the hooks, which open the file afresh for every line, start a new `gaps.jsonl`.
+ * False when there was nothing to take.
  */
-async function flushGaps(ctx: SyncContext, result: SyncResult): Promise<void> {
-  const { byIssue, dropped, unreadable } = await readGapLines(ctx.repoRoot);
-  result.gapsDropped += dropped.length + unreadable.length;
-  if (dropped.length + unreadable.length > 0) await removeLines(ctx.repoRoot, GAPS_FILE, [...dropped, ...unreadable]);
-  if (byIssue.size === 0) return;
-
-  let commandContext: CommandContext;
+async function takeGaps(root: string): Promise<boolean> {
   try {
-    commandContext = await ctx.makeCommandContext();
+    await rename(cachePath(root, GAPS_FILE), cachePath(root, GAPS_SYNCING_FILE));
+    return true;
   } catch (error) {
-    ctx.err(`could not record the gaps: ${reasonOf(error)}`);
-    return;
-  }
-
-  for (const issue of [...byIssue.keys()].sort((a, b) => a - b)) {
-    const group = byIssue.get(issue) as TaskGaps;
-    try {
-      await recordGaps(commandContext, issue, group.gaps);
-      result.gapsFlushed += group.gaps.length;
-      await removeLines(ctx.repoRoot, GAPS_FILE, group.lines);
-    } catch (error) {
-      if (isTransportError(error)) {
-        result.stopped = 'unreachable';
-        ctx.err(`GitHub is unreachable: the gaps of #${issue} and later tasks stay queued`);
-        return;
-      }
-      if (cannotTakeGaps(error)) {
-        result.gapsDropped += group.gaps.length;
-        await removeLines(ctx.repoRoot, GAPS_FILE, group.lines);
-        ctx.err(`dropped ${group.gaps.length} gap(s) of #${issue}: ${reasonOf(error)}`);
-      } else {
-        ctx.err(`could not record the gaps of #${issue}, kept for the next sync: ${reasonOf(error)}`);
-      }
-    }
+    if (isMissing(error)) return false;
+    throw error;
   }
 }
 
+/**
+ * Records the gaps of `gaps.jsonl.syncing` into the state comments, one `gap_recorded` per task (the
+ * state keeps the newest `MAX_GAPS`). A line that names no task, or is no gap, is thrown away (and
+ * counted as dropped); so are the gaps of a task that cannot hold them. What could not be recorded
+ * now (GitHub unreachable, a state that keeps changing) goes back to `gaps.jsonl` for the next sync,
+ * and the `.syncing` file is deleted. Only sync (under its lock) writes the `.syncing` file, so
+ * lines are taken out of it one task at a time with `removeLines`. Returns how many lines went back.
+ */
+async function flushTaken(
+  ctx: SyncContext,
+  result: SyncResult,
+  commandContext: () => Promise<CommandContext>,
+): Promise<number> {
+  const root = ctx.repoRoot;
+  const { byIssue, dropped, unreadable } = groupGapLines(await readRawLines(root, GAPS_SYNCING_FILE));
+  result.gapsDropped += dropped.length + unreadable.length;
+  if (dropped.length + unreadable.length > 0) await removeLines(root, GAPS_SYNCING_FILE, [...dropped, ...unreadable]);
+
+  if (byIssue.size > 0) {
+    let recordWith: CommandContext | undefined;
+    try {
+      recordWith = await commandContext();
+    } catch (error) {
+      ctx.err(`could not record the gaps: ${reasonOf(error)}`);
+    }
+
+    for (const issue of recordWith === undefined ? [] : [...byIssue.keys()].sort((a, b) => a - b)) {
+      const group = byIssue.get(issue) as TaskGaps;
+      try {
+        await recordGaps(recordWith as CommandContext, issue, group.gaps);
+        result.gapsFlushed += group.gaps.length;
+        await removeLines(root, GAPS_SYNCING_FILE, group.lines);
+      } catch (error) {
+        if (isTransportError(error)) {
+          result.stopped = 'unreachable';
+          ctx.err(`GitHub is unreachable: the gaps of #${issue} and later tasks stay queued`);
+          break;
+        }
+        if (cannotTakeGaps(error)) {
+          result.gapsDropped += group.gaps.length;
+          await removeLines(root, GAPS_SYNCING_FILE, group.lines);
+          ctx.err(`dropped ${group.gaps.length} gap(s) of #${issue}: ${reasonOf(error)}`);
+        } else {
+          ctx.err(`could not record the gaps of #${issue}, kept for the next sync: ${reasonOf(error)}`);
+        }
+      }
+    }
+  }
+
+  // Back first, deleted after: a sync that dies in between leaves duplicates (which merge), not a loss.
+  const rest = await readRawLines(root, GAPS_SYNCING_FILE);
+  await appendRawLines(root, GAPS_FILE, rest);
+  await unlink(cachePath(root, GAPS_SYNCING_FILE)).catch(() => undefined);
+  return rest.length;
+}
+
+/**
+ * Records the logged gaps. A `.syncing` file left by a sync that died is processed first; then (when
+ * that went through) what the hooks logged since is taken and processed.
+ */
+async function flushGaps(ctx: SyncContext, result: SyncResult): Promise<void> {
+  // The config is loaded once, and only when a gap names a task.
+  let made: Promise<CommandContext> | undefined;
+  const commandContext = (): Promise<CommandContext> => (made ??= ctx.makeCommandContext());
+
+  if (await syncingExists(ctx.repoRoot)) {
+    const kept = await flushTaken(ctx, result, commandContext);
+    if (kept > 0 || result.stopped !== undefined) return;
+  }
+  if (await takeGaps(ctx.repoRoot)) await flushTaken(ctx, result, commandContext);
+}
+
 /** Replays the outbox in order; a command that failed for good moves to the failed file, one that met an unreachable GitHub ends the replay. */
-async function replayOutbox(ctx: SyncContext, result: SyncResult): Promise<void> {
+async function replayOutbox(ctx: SyncContext, result: SyncResult, token: string): Promise<void> {
   for (const line of await readRawLines(ctx.repoRoot, OUTBOX_FILE)) {
     const value = parseLine(line);
     if (!isOutboxEntry(value)) {
@@ -250,6 +328,13 @@ async function replayOutbox(ctx: SyncContext, result: SyncResult): Promise<void>
     }
 
     const entry: OutboxEntry = value;
+    // The outbox is a file anyone can write: only the queueable commands, without options that change what they do, are ever run.
+    if (!isQueueableArgv(entry.argv)) {
+      await appendJsonLine(ctx.repoRoot, OUTBOX_FAILED_FILE, { ...entry, failedAt: ctx.now(), error: NOT_QUEUEABLE });
+      await removeLines(ctx.repoRoot, OUTBOX_FILE, [line]);
+      result.failed.push({ argv: entry.argv, error: NOT_QUEUEABLE });
+      continue;
+    }
     const { code, stderr } = await ctx.replay(entry.argv);
     if (code === EXIT_TEMPFAIL) {
       result.stopped = 'unreachable';
@@ -263,14 +348,17 @@ async function replayOutbox(ctx: SyncContext, result: SyncResult): Promise<void>
       result.failed.push({ argv: entry.argv, error });
     }
     await removeLines(ctx.repoRoot, OUTBOX_FILE, [line]);
-    await refreshLock(ctx);
+    await refreshLock(ctx, token);
   }
 }
 
 /** What a real sync would do, changing nothing (no lock either). */
 async function planSync(ctx: SyncContext): Promise<SyncResult> {
   const entries = await readOutbox(ctx.repoRoot);
-  const { byIssue, dropped, unreadable } = await readGapLines(ctx.repoRoot);
+  const { byIssue, dropped, unreadable } = groupGapLines([
+    ...(await readRawLines(ctx.repoRoot, GAPS_SYNCING_FILE)),
+    ...(await readRawLines(ctx.repoRoot, GAPS_FILE)),
+  ]);
   return {
     replayed: 0,
     failed: [],
@@ -287,15 +375,16 @@ async function planSync(ctx: SyncContext): Promise<SyncResult> {
 
 /**
  * Replays the queued commands, then records the logged gaps. Only one sync runs at a time (a lock
- * file in the cache); with `dryRun` nothing is changed, not even the lock. When GitHub turns out to
- * be unreachable (a replay exits `EXIT_TEMPFAIL`) the rest of the queue and the gaps stay for the
- * next sync. Each replayed command leaves the outbox as soon as it ran, so a sync that is killed
- * does not run it twice.
+ * file in the cache, owned by a token); with `dryRun` nothing is changed, not even the lock. When
+ * GitHub turns out to be unreachable (a replay exits `EXIT_TEMPFAIL`) the rest of the queue and the
+ * gaps stay for the next sync. Each replayed command leaves the outbox as soon as it ran, so a sync
+ * that is killed repeats at most the one command that was running.
  */
 export async function syncAll(ctx: SyncContext, opts: { dryRun?: boolean } = {}): Promise<SyncResult> {
   if (opts.dryRun === true) return planSync(ctx);
 
-  if (!(await acquireLock(ctx))) {
+  const token = await acquireLock(ctx);
+  if (token === undefined) {
     return {
       replayed: 0,
       failed: [],
@@ -307,12 +396,12 @@ export async function syncAll(ctx: SyncContext, opts: { dryRun?: boolean } = {})
   }
   try {
     const result: SyncResult = { replayed: 0, failed: [], remaining: 0, gapsFlushed: 0, gapsDropped: 0 };
-    await replayOutbox(ctx, result);
+    await replayOutbox(ctx, result, token);
     if (result.stopped === undefined) await flushGaps(ctx, result);
     result.remaining = (await readOutbox(ctx.repoRoot)).length;
     return result;
   } finally {
-    await releaseLock(ctx);
+    await releaseLock(ctx, token);
   }
 }
 
@@ -394,6 +483,17 @@ export function registerSyncCommand(program: Command, makeContext: SyncContextFa
     .description('Replay commands queued while GitHub was unreachable and record the gaps the hooks logged')
     .option('--dry-run', 'list what would be replayed and recorded; change nothing')
     .option('--json', 'print machine-readable JSON')
+    .addHelpText(
+      'after',
+      [
+        '',
+        'Exit codes:',
+        '  0   everything queued ran or nothing was queued; also when another sync is already running',
+        '  1   a queued command failed for good or a queue line was malformed (moved to',
+        '      .sdlc/cache/outbox-failed.jsonl), or sync itself failed',
+        `  ${EXIT_TEMPFAIL}  GitHub is still unreachable; what is left stays queued for the next sync`,
+      ].join('\n'),
+    )
     .action(async (options: { dryRun?: boolean; json?: boolean }) => {
       let ctx: SyncContext | undefined;
       try {

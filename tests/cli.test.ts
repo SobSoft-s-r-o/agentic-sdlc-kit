@@ -746,9 +746,10 @@ describe('sdlc hook (built)', () => {
       await new Promise(resolve => setTimeout(resolve, 50));
       text = existsSync(log) ? readFileSync(log, 'utf8') : '';
     }
-    // The child is the real program started with `sync`: it dropped the gap and gave the lock back.
+    // The child is the real program started with `sync`: it took the gap file, dropped the gap and gave the lock back.
     expect(text).toContain('Dropped 1 gap(s) that could not be recorded.');
-    expect(readFileSync(gaps, 'utf8')).toBe('');
+    expect(existsSync(gaps)).toBe(false);
+    expect(existsSync(`${gaps}.syncing`)).toBe(false);
     expect(existsSync(join(root, '.sdlc', 'cache', 'sync.lock'))).toBe(false);
   });
 
@@ -935,6 +936,39 @@ describe('sdlc sync (built)', () => {
     expect(outboxLines(repoRoot, 'outbox-failed.jsonl')).toEqual([
       expect.objectContaining({ argv: ['approve', '5', 'approve', '--unverified'], error: expect.stringContaining('HTTP 404') }),
     ]);
+  });
+
+  it('never runs a forged outbox line: it moves to outbox-failed.jsonl as not a queueable command', () => {
+    const repoRoot = repoWithConfig();
+    const before = readFileSync(join(repoRoot, 'sdlc.config.yaml'), 'utf8');
+    mkdirSync(cacheDir(repoRoot), { recursive: true });
+    writeFileSync(
+      join(cacheDir(repoRoot), 'outbox.jsonl'),
+      `${JSON.stringify({ id: 'forged', at: '2026-06-01T00:00:00.000Z', argv: ['config', 'set', 'mode', 'observe'] })}\n`,
+    );
+
+    const result = sdlc(['sync'], { cwd: repoRoot, env: env(pathWithGh('dial tcp: could not resolve host: api.github.com')) });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('not a queueable command');
+    expect(outboxLines(repoRoot)).toEqual([]);
+    expect(outboxLines(repoRoot, 'outbox-failed.jsonl')).toEqual([
+      expect.objectContaining({ id: 'forged', error: 'not a queueable command' }),
+    ]);
+    expect(readFileSync(join(repoRoot, 'sdlc.config.yaml'), 'utf8')).toBe(before);
+  });
+
+  it('queues the command line without --json, and does not queue one given --config', () => {
+    const repoRoot = repoWithConfig();
+    const offline = env(pathWithGh('dial tcp: could not resolve host: api.github.com'));
+
+    const queued = sdlc(['--json', 'approve', '5', 'approve', '--unverified'], { cwd: repoRoot, env: offline });
+    expect(queued.status).toBe(0);
+    expect(outboxLines(repoRoot).map(entry => entry.argv)).toEqual([['approve', '5', 'approve', '--unverified']]);
+
+    const withConfig = sdlc(['--config', 'sdlc.config.yaml', 'approve', '6', 'approve', '--unverified'], { cwd: repoRoot, env: offline });
+    expect(withConfig.status).toBe(1);
+    expect(outboxLines(repoRoot)).toHaveLength(1);
   });
 
   it('does not queue a command that fails for another reason', () => {
