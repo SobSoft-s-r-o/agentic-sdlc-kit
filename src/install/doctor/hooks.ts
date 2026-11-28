@@ -292,6 +292,8 @@ const CODEX_SWITCH_KEYS = ['features.hooks', 'features.codex_hooks'];
  * any depth, so that `features = { hooks = false }` reads as `features.hooks = false`.
  */
 function falseSwitch(key: string[], value: string): string | undefined {
+  // No switch key has more than two names, so a deeper one cannot be one: this also bounds the recursion on a deeply nested inline table.
+  if (key.length > 2) return undefined;
   if (value.startsWith('{') && value.endsWith('}')) {
     for (const entry of inlineEntries(value.slice(1, -1))) {
       const pair = splitPair(entry);
@@ -303,6 +305,13 @@ function falseSwitch(key: string[], value: string): string | undefined {
   }
   const name = key.join('.');
   return value === 'false' && key.length === 2 && CODEX_SWITCH_KEYS.includes(name) ? `${name} is false` : undefined;
+}
+
+/** The names of the table a `[table]` or `[[array.of.tables]]` header line opens, `undefined` when `line` is not one (sliced, not matched with a pattern, so no input makes it backtrack). */
+function tableNames(line: string): string[] | undefined {
+  if (line.startsWith('[[') && line.endsWith(']]')) return keyNames(line.slice(2, -2));
+  if (line.startsWith('[') && line.endsWith(']')) return keyNames(line.slice(1, -1));
+  return undefined;
 }
 
 /**
@@ -318,8 +327,7 @@ function codexSwitch(text: string | undefined): string | undefined {
   let table: string[] = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = withoutComment(raw).trim();
-    const header = /^\[\[?\s*(.+?)\s*\]\]?$/.exec(line);
-    const named = header === null ? undefined : keyNames(header[1] as string);
+    const named = tableNames(line);
     if (named !== undefined) {
       table = named;
       continue;

@@ -2115,10 +2115,52 @@ describe('hooks.switches', () => {
     'features = { note = "hooks = false" }\n',
     'other = { hooks = false }\n',
     '# features = { hooks = false }\n',
+    '[features]\n[[x.y]]\nhooks = false\n',
+    // Malformed lines: no switch, and the reader does not throw.
+    'features = { hooks = "false\n',
+    'features = { hooks = false\n',
+    'features = {\n',
+    'features = }\n',
+    '[\n',
+    '[[\n',
+    ']\n',
+    '[]\n',
+    '[features\nhooks = false\n',
+    '=\n',
+    '= false\n',
+    'hooks =\n',
+    '"features = { hooks = false }\n',
+    "'features.hooks' = false\n",
   ])('does not take %j for a Codex switch', async toml => {
     const h = allThree({ cfg: enforceThree() });
     h.fs.write('.codex/config.toml', toml);
     expect(byId(await runDoctor(h.env, h.cfg), 'hooks.switches').status).toBe('ok');
+  });
+
+  /** The doctor on `toml` as the project's Codex config, with the time it took. */
+  async function timedCodexCheck(toml: string): Promise<{ check: Check; ms: number }> {
+    const h = allThree({ cfg: enforceThree() });
+    h.fs.write('.codex/config.toml', toml);
+    const started = performance.now();
+    const check = byId(await runDoctor(h.env, h.cfg), 'hooks.switches');
+    return { check, ms: performance.now() - started };
+  }
+
+  it('reads a very deeply nested inline table without overflowing the stack or taking long', async () => {
+    const depth = 10_000;
+    const { check, ms } = await timedCodexCheck(`features = ${'{ a = '.repeat(depth)}false${' }'.repeat(depth)}\n`);
+    expect(check.status).toBe('ok');
+    expect(ms).toBeLessThan(2000);
+  });
+
+  it.each([
+    ['a header with a long run of blanks', `[${' '.repeat(20_000)}x]\nhooks = false\n`],
+    // Not a header (it does not end in `]`): a backtracking header pattern takes cubic time on it.
+    ['a line that looks like a header and is not one', `[${' '.repeat(20_000)}x${' '.repeat(20_000)}y\nhooks = false\n`],
+  ])('reads %s in time', async (_name, toml) => {
+    const { check, ms } = await timedCodexCheck(toml);
+    expect(check.status).toBe('ok');
+    expect(ms).toBeLessThan(2000);
   });
 
   it('only warns, in enforce too, for a switch in the user-level settings', async () => {
