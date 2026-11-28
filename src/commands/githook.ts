@@ -182,6 +182,26 @@ export async function decidePrePush(
 const NO_SUCH_ISSUE = /could not resolve to an? issue/i;
 
 /**
+ * Whether `error` from `Tracker.getTask` means the issue has no task to read: it has no state
+ * comment, or does not exist. Any other failure (offline, no `gh`, rate limit, a state comment that
+ * cannot be read) is not.
+ */
+export function isMissingTaskError(error: unknown): boolean {
+  return (
+    error instanceof NoStateCommentError || (error instanceof GhError && NO_SUCH_ISSUE.test(error.stderr))
+  );
+}
+
+/**
+ * Whether `error` from `Tracker.getTask` means there is no tracked task, for the git hooks: the
+ * issue exists without readable task state, or does not exist. Any other failure (offline, no
+ * `gh`, rate limit) is not.
+ */
+export function isNoTaskError(error: unknown): boolean {
+  return isMissingTaskError(error) || error instanceof StateCommentError;
+}
+
+/**
  * `TaskLookup` over the tracker: true for a tracked task. An issue that exists without readable
  * task state, or does not exist, is false; any other failure (offline, no `gh`, rate limit) rejects.
  */
@@ -191,8 +211,7 @@ export function lookupTrackedTask(tracker: Pick<Tracker, 'getTask'>): TaskLookup
       await tracker.getTask(issue);
       return true;
     } catch (error) {
-      if (error instanceof NoStateCommentError || error instanceof StateCommentError) return false;
-      if (error instanceof GhError && NO_SUCH_ISSUE.test(error.stderr)) return false;
+      if (isNoTaskError(error)) return false;
       throw error;
     }
   };
@@ -201,7 +220,7 @@ export function lookupTrackedTask(tracker: Pick<Tracker, 'getTask'>): TaskLookup
 // -- post-checkout -------------------------------------------------------------------------------------
 
 /** Text for one terminal line: control characters and runs of white space become one space. */
-const oneLine = (text: string): string => text.replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ').trim();
+export const oneLine = (text: string): string => text.replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ').trim();
 
 /** `task #12: In progress · Planning · next: Write the plan`. */
 export function describeCheckout(state: TaskState): string {
@@ -251,20 +270,28 @@ export async function runSteps(ctx: GitHookContext, hook: HookName, steps: reado
  * Calls made after the deadline are refused without being started. `stop` must be called when the
  * hook is done.
  */
-interface Deadline {
+export interface Deadline {
   /** A tracker call was still running at the deadline; it keeps running in the background. */
   readonly abandoned: boolean;
   run<T>(work: () => Promise<T>): Promise<T>;
   stop(): void;
 }
 
-function deadlineOf(totalMs: number): Deadline {
+/** What a call abandoned on the deadline rejects with (so a caller can tell a timeout from another failure). */
+export class DeadlineError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeadlineError';
+  }
+}
+
+export function deadlineOf(totalMs: number): Deadline {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let expiry: Promise<never> | undefined;
   let passed = false;
   let abandoned = false;
   let pending = 0;
-  const timedOut = (): Error => new Error(`timed out after ${totalMs / 1000}s`);
+  const timedOut = (): Error => new DeadlineError(`timed out after ${totalMs / 1000}s`);
   return {
     get abandoned() {
       return abandoned;

@@ -10,6 +10,8 @@ import {
   describeCheckout,
   exitAfterFlush,
   HOOK_NAMES,
+  isMissingTaskError,
+  isNoTaskError,
   lookupTrackedTask,
   POST_CHECKOUT_LOOKUP_TIMEOUT_MS,
   PRE_PUSH_LOOKUP_TIMEOUT_MS,
@@ -24,13 +26,13 @@ import {
 import { ConfigError } from '../../src/core/taskTypes.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
 import { newTask } from '../../src/core/stateMachine.js';
-import { STATE_MARKER } from '../../src/core/stateComment.js';
+import { STATE_MARKER, StateCommentError } from '../../src/core/stateComment.js';
 import type { TaskState } from '../../src/core/types.js';
 import { GhError } from '../../src/github/gh.js';
 import type { GitRunner } from '../../src/install/provision.js';
 import { fingerprintOf } from '../../src/secrets/scan.js';
 import type { ExecResult } from '../../src/secrets/gitleaks.js';
-import type { Tracker } from '../../src/tracker/types.js';
+import { NoStateCommentError, type Tracker } from '../../src/tracker/types.js';
 import { FakeTracker } from '../support/fakeTracker.js';
 import { githubToken, sampleFor, SAMPLES } from '../support/secrets.js';
 
@@ -227,6 +229,26 @@ describe('decidePrePush', () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.messages.map(m => m.level)).toEqual(['error', 'warn']);
+  });
+});
+
+describe('isMissingTaskError and isNoTaskError', () => {
+  const noSuchIssue = new GhError(['issue', 'view', '9'], 'GraphQL: Could not resolve to an Issue with the number of 9.');
+  const offline = new GhError(['issue', 'view', '9'], 'error connecting to api.github.com');
+
+  it('a missing task is an issue without a state comment or one that does not exist, nothing else', () => {
+    expect(isMissingTaskError(new NoStateCommentError(9))).toBe(true);
+    expect(isMissingTaskError(noSuchIssue)).toBe(true);
+    expect(isMissingTaskError(new StateCommentError('not valid JSON'))).toBe(false);
+    expect(isMissingTaskError(offline)).toBe(false);
+    expect(isMissingTaskError(new Error('boom'))).toBe(false);
+  });
+
+  it('the git hooks also count a state comment that cannot be read as no task', () => {
+    expect(isNoTaskError(new StateCommentError('not valid JSON'))).toBe(true);
+    expect(isNoTaskError(new NoStateCommentError(9))).toBe(true);
+    expect(isNoTaskError(noSuchIssue)).toBe(true);
+    expect(isNoTaskError(offline)).toBe(false);
   });
 });
 

@@ -12,6 +12,18 @@ const JSON_FENCE = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/m;
 const STRING_FIELDS = ['status', 'phase', 'type', 'updatedAt'] as const;
 const ARRAY_FIELDS = ['targets', 'pendingTargets', 'prs', 'evidence'] as const;
 
+function isGap(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const gap = value as Record<string, unknown>;
+  return (
+    typeof gap.at === 'string' &&
+    typeof gap.rule === 'string' &&
+    typeof gap.text === 'string' &&
+    typeof gap.harness === 'string' &&
+    typeof gap.blocked === 'boolean'
+  );
+}
+
 export class StateCommentError extends Error {
   constructor(message: string) {
     super(message);
@@ -32,7 +44,7 @@ export function renderStateComment(state: TaskState): string {
  * the marker (an ordinary comment); throws `StateCommentError` when it does but the state is
  * unusable: no JSON fence, malformed JSON, an unsupported schema, or a missing or mistyped
  * `issue`, `status`, `phase`, `type`, `updatedAt`, `targets`, `pendingTargets`, `prs`,
- * `evidence` or `stages` (the error names the field).
+ * `evidence` or `stages`, or a mistyped optional `typeChanges` or `gaps` (the error names the field).
  */
 export function parseStateComment(body: string): TaskState | null {
   const start = body.trimStart();
@@ -74,6 +86,16 @@ export function parseStateComment(body: string): TaskState | null {
   }
   if (candidate.typeChanges !== undefined && !Array.isArray(candidate.typeChanges)) {
     throw new StateCommentError('state comment has invalid "typeChanges": expected an array');
+  }
+  if (candidate.gaps !== undefined) {
+    if (!Array.isArray(candidate.gaps)) {
+      throw new StateCommentError('state comment has invalid "gaps": expected an array');
+    }
+    if (!candidate.gaps.every(isGap)) {
+      throw new StateCommentError(
+        'state comment has invalid "gaps": every entry needs string at, rule, text and harness, and boolean blocked',
+      );
+    }
   }
   return parsed as TaskState;
 }

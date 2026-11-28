@@ -356,15 +356,19 @@ export class GitHubTracker implements Tracker {
    * Patches the state comment. Posts a new one when the issue has none (or only an untrusted one),
    * or when GitHub refuses the edit with 403 or 404 (an owner's comment the token may not edit): the
    * new comment is then the newest, so it is the one read from now on. Any other failure rejects.
-   * With `expected`, a state comment that is not the one read (another id, or edited since) is a
-   * `StateChangedError` and nothing is written.
+   * With `expected`, a state comment that is not the one read (another id, edited since, or with a
+   * different body, which catches an edit within the same second) is a `StateChangedError` and
+   * nothing is written.
    */
   async writeState(issue: number, state: TaskState, expected?: ExpectedStateComment): Promise<void> {
     const body = renderStateComment(state);
     const existing = await this.findStateComment(issue);
     if (
       expected &&
-      (!existing || String(existing.id) !== expected.id || updatedAt(existing) !== Date.parse(expected.updatedAt))
+      (!existing ||
+        String(existing.id) !== expected.id ||
+        updatedAt(existing) !== Date.parse(expected.updatedAt) ||
+        (existing.body ?? '').trim() !== expected.body.trim())
     ) {
       throw new StateChangedError(issue);
     }
@@ -688,6 +692,7 @@ export class GitHubTracker implements Tracker {
       state,
       stateCommentId: String(comment.id),
       stateCommentUpdatedAt: comment.updated_at ?? comment.created_at,
+      stateCommentBody: comment.body ?? '',
     };
   }
 

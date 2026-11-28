@@ -1,0 +1,8 @@
+{
+  "session_id": "7f3e0001",
+  "transcript_path": "",
+  "cwd": "/work/proj",
+  "hook_event_name": "BeforeAgent",
+  "timestamp": "2026-11-28T10:00:04.000Z",
+  "prompt": "Summarize the open TODOs."
+}

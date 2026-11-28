@@ -6,6 +6,7 @@ import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.j
 import { newTask } from '../../src/core/stateMachine.js';
 import type { TaskState } from '../../src/core/types.js';
 import { statusReport } from '../../src/engine/status.js';
+import type { GitRunner } from '../../src/install/provision.js';
 import { FakeTracker } from '../support/fakeTracker.js';
 
 const cfg = loadConfig(join(dirname(fileURLToPath(import.meta.url)), '../fixtures/config/valid.yaml'));
@@ -216,6 +217,8 @@ describe('statusReport', () => {
       stalePausedOnAgent: [],
       untracked: [],
       pendingReconcile: [],
+      queued: { outbox: 0, gaps: 0 },
+      orphanWorktrees: [],
     });
   });
 
@@ -297,5 +300,170 @@ describe('statusReport', () => {
     h.tracker.failNext('scanTasks');
 
     await expect(statusReport(h.ctx, { staleDays: 7 })).rejects.toThrow(/scanTasks/);
+  });
+});
+
+describe('orphanWorktrees', () => {
+  const PORCELAIN = [
+    ['worktree /repo', 'HEAD 1111', 'branch refs/heads/main'],
+    ['worktree /repo/.worktrees/1-live', 'HEAD 2222', 'branch refs/heads/task/1-live'],
+    ['worktree /repo/.worktrees/2-finished', 'HEAD 3333', 'branch refs/heads/task/2-finished'],
+    ['worktree /repo/.worktrees/9-lost', 'HEAD 4444', 'branch refs/heads/task/9-lost'],
+    ['worktree /repo/.worktrees/old', 'HEAD 5555', 'detached'],
+    ['worktree /elsewhere/9-lost', 'HEAD 6666', 'branch refs/heads/task/9-lost'],
+  ]
+    .map(lines => lines.join('\n'))
+    .join('\n\n');
+
+  const fakeGit = (stdout = PORCELAIN, code = 0): { git: GitRunner; calls: string[][] } => {
+    const calls: string[][] = [];
+    return {
+      calls,
+      git: async args => {
+        calls.push(args);
+        return { stdout, stderr: code === 0 ? '' : 'fatal: not a git repository', code };
+      },
+    };
+  };
+
+  function seeded() {
+    const h = setup();
+    h.tracker.seedTask(task(1, 'feature', { status: 'in_progress', phase: 'implementation' }));
+    h.tracker.seedTask(task(2, 'feature', { status: 'done', phase: 'delivery', outcome: 'completed' }));
+    return h;
+  }
+
+  it('lists the worktrees under .worktrees/ whose task is untracked or done, or that are detached', async () => {
+    const h = seeded();
+    const { git, calls } = fakeGit();
+
+    const report = await statusReport(h.ctx, { staleDays: 7, git, repoRoot: '/repo' });
+
+    expect(calls).toEqual([['worktree', 'list', '--porcelain']]);
+    expect(report.orphanWorktrees).toEqual([
+      { path: '/repo/.worktrees/2-finished', branch: 'task/2-finished', reason: 'task-done' },
+      { path: '/repo/.worktrees/9-lost', branch: 'task/9-lost', reason: 'no-task' },
+      { path: '/repo/.worktrees/old', reason: 'detached' },
+    ]);
+  });
+
+  describe('a worktree whose task is not in the scan', () => {
+    /** #9 closed a year ago, long before the lookback: the scan does not hold it. */
+    function closedLongAgo(h: ReturnType<typeof setup>, overrides: Partial<TaskState> = {}): void {
+      h.tracker.seedTask(
+        task(9, 'feature', { status: 'done', phase: 'delivery', outcome: 'completed', ...overrides }),
+        { open: false, updatedAt: ago(400) },
+      );
+    }
+    const lost = { path: '/repo/.worktrees/9-lost', branch: 'task/9-lost' };
+
+    it('is task-done when its task closed before the lookback and is done', async () => {
+      const h = seeded();
+      closedLongAgo(h);
+      const scanned = await h.tracker.scanTasks({ closedSince: ago(30) });
+      expect(scanned.tracked.map(t => t.issue)).not.toContain(9);
+
+      const report = await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git, repoRoot: '/repo' });
+
+      expect(report.orphanWorktrees).toContainEqual({ ...lost, reason: 'task-done' });
+    });
+
+    it('stays no-task when the task is not done', async () => {
+      const h = seeded();
+      closedLongAgo(h, { status: 'in_progress', phase: 'implementation', outcome: 'cancelled' });
+
+      const report = await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git, repoRoot: '/repo' });
+
+      expect(report.orphanWorktrees).toContainEqual({ ...lost, reason: 'no-task' });
+    });
+
+    it('stays no-task when the lookup fails, and so does the rest of the report', async () => {
+      const h = seeded();
+      closedLongAgo(h);
+      h.tracker.failNext('getTask');
+
+      const report = await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git, repoRoot: '/repo' });
+
+      expect(report.orphanWorktrees.map(orphan => orphan.reason)).toEqual(['task-done', 'no-task', 'detached']);
+      expect(issues(report.byStatus.in_progress)).toEqual([1]);
+    });
+
+    it('stays no-task when no issue has that number', async () => {
+      const h = seeded();
+
+      const report = await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git, repoRoot: '/repo' });
+
+      expect(report.orphanWorktrees).toContainEqual({ ...lost, reason: 'no-task' });
+    });
+
+    it('is looked up only for worktrees the scan does not know, and not at all with --all', async () => {
+      const h = seeded();
+      closedLongAgo(h);
+      const lookups: string[] = [];
+      const getTask = h.tracker.getTask.bind(h.tracker);
+      h.tracker.getTask = async issue => {
+        lookups.push(`#${issue}`);
+        return getTask(issue);
+      };
+
+      await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git, repoRoot: '/repo' });
+      expect(lookups).toEqual(['#9']);
+
+      lookups.length = 0;
+      const all = await statusReport(h.ctx, { staleDays: 7, all: true, git: fakeGit().git, repoRoot: '/repo' });
+      expect(lookups).toEqual([]);
+      expect(all.orphanWorktrees).toContainEqual({ ...lost, reason: 'task-done' });
+    });
+  });
+
+  it('takes the repository root from the context when the options have none', async () => {
+    const h = seeded();
+    h.ctx.repoRoot = '/repo';
+
+    const report = await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git });
+
+    expect(report.orphanWorktrees.map(orphan => orphan.reason)).toEqual(['task-done', 'no-task', 'detached']);
+  });
+
+  it('judges worktrees by the tasks of the whole scan, an issue without a readable state included as untracked', async () => {
+    const h = seeded();
+    h.tracker.issues.push({ number: 9, title: 'Hand-made', body: '', labels: ['sdlc:task'], open: true, onBoard: false });
+
+    const report = await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git, repoRoot: '/repo' });
+
+    expect(report.orphanWorktrees.find(orphan => orphan.branch === 'task/9-lost')?.reason).toBe('no-task');
+  });
+
+  it('is empty without a git runner or a repository root', async () => {
+    const h = seeded();
+
+    expect((await statusReport(h.ctx, { staleDays: 7 })).orphanWorktrees).toEqual([]);
+    expect((await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git })).orphanWorktrees).toEqual([]);
+    expect((await statusReport(h.ctx, { staleDays: 7, repoRoot: '/repo' })).orphanWorktrees).toEqual([]);
+  });
+
+  it('is empty, and the rest of the report is still there, when git fails or cannot run', async () => {
+    const h = seeded();
+    const failing = fakeGit('', 128).git;
+    const missing: GitRunner = async () => {
+      throw new Error('git not found; install https://git-scm.com');
+    };
+
+    for (const git of [failing, missing]) {
+      const report = await statusReport(h.ctx, { staleDays: 7, git, repoRoot: '/repo' });
+      expect(report.orphanWorktrees).toEqual([]);
+      expect(issues(report.byStatus.in_progress)).toEqual([1]);
+    }
+  });
+
+  it('writes nothing: git is only asked to list', async () => {
+    const h = seeded();
+    const { git, calls } = fakeGit();
+    const writes = h.tracker.writes;
+
+    await statusReport(h.ctx, { staleDays: 7, git, repoRoot: '/repo' });
+
+    expect(calls.every(call => call[0] === 'worktree' && call[1] === 'list')).toBe(true);
+    expect(h.tracker.writes).toBe(writes);
   });
 });

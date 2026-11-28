@@ -150,6 +150,7 @@ describe('FakeTracker state', () => {
       state,
       stateCommentId: tracker.comments[0]!.id,
       stateCommentUpdatedAt: tracker.comments[0]!.updatedAt,
+      stateCommentBody: tracker.comments[0]!.body,
     });
     // Reads return copies, not live references.
     got.state.summary = 'mutated';
@@ -172,7 +173,7 @@ describe('FakeTracker state', () => {
     const { number } = await tracker.createIssue('T', '', ['sdlc:task']);
     await tracker.writeState(number, task(number));
     const read = await tracker.getTask(number);
-    const expected = { id: read.stateCommentId, updatedAt: read.stateCommentUpdatedAt };
+    const expected = { id: read.stateCommentId, updatedAt: read.stateCommentUpdatedAt, body: read.stateCommentBody };
 
     tracker.concurrentWriteBeforeNextWriteState(number);
     await expect(tracker.writeState(number, { ...task(number), summary: 'Lost?' }, expected)).rejects.toThrow(
@@ -184,7 +185,26 @@ describe('FakeTracker state', () => {
     await tracker.writeState(number, { ...task(number), summary: 'Now' }, {
       id: fresh.stateCommentId,
       updatedAt: fresh.stateCommentUpdatedAt,
+      body: fresh.stateCommentBody,
     });
+    expect((await tracker.getTask(number)).state.summary).toBe('Now');
+  });
+
+  it('refuses a write when the body changed although id and updatedAt did not (same-second race)', async () => {
+    const tracker = new FakeTracker();
+    const { number } = await tracker.createIssue('T', '', ['sdlc:task']);
+    await tracker.writeState(number, task(number));
+    const read = await tracker.getTask(number);
+    const expected = { id: read.stateCommentId, updatedAt: read.stateCommentUpdatedAt, body: read.stateCommentBody };
+
+    tracker.comments[0]!.body = `${tracker.comments[0]!.body}\n<!-- edited -->`;
+    await expect(tracker.writeState(number, { ...task(number), summary: 'Lost?' }, expected)).rejects.toThrow(
+      `state of #${number} changed since it was read; re-run`,
+    );
+
+    // Padding alone is no change.
+    tracker.comments[0]!.body = `\n${read.stateCommentBody}  \n`;
+    await tracker.writeState(number, { ...task(number), summary: 'Now' }, expected);
     expect((await tracker.getTask(number)).state.summary).toBe('Now');
   });
 

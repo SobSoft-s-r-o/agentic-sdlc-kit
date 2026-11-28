@@ -69,6 +69,35 @@ export interface TypeChange {
   source: Approval['source'];
 }
 
+/** The harness-hook rules whose violations are recorded as gaps. */
+export type GapRule =
+  | 'no-task'
+  | 'plan-not-approved'
+  | 'task-done'
+  | 'protected-path'
+  | 'subagent-role'
+  | 'subagent-tier'
+  | 'admin-merge'
+  | 'ai-cli'
+  | 'mode-change'
+  | 'hook-spoof'
+  | 'kit-removal'
+  | 'no-verify'
+  | 'force-push'
+  | 'worktree-prune'
+  | 'rm-rf';
+
+/** A rule an agent broke, or was stopped from breaking, as seen by a harness hook. */
+export interface Gap {
+  at: string;
+  rule: GapRule;
+  text: string;
+  /** The harness that ran the hook (`claude`, `codex`, `gemini`). */
+  harness: string;
+  /** True when enforce mode refused the action, false when observe mode only warned. */
+  blocked: boolean;
+}
+
 export interface TaskState {
   schema: 1;
   issue: number;
@@ -97,6 +126,8 @@ export interface TaskState {
   deliveredBy?: string[];
   /** Weakening type changes and their approvals; absent in state written before it existed. */
   typeChanges?: TypeChange[];
+  /** Rule gaps recorded by the harness hooks, newest last, capped; absent in state written before it existed. */
+  gaps?: Gap[];
   updatedAt: string;
 }
 
@@ -119,6 +150,7 @@ export type TaskEvent =
   | { kind: 'confirmed_ran'; approval: Approval }
   | { kind: 'cancelled'; reason: string; approval: Approval }
   | { kind: 'reopened' }
+  | { kind: 'gap_recorded'; gaps: Gap[] }
   | {
       kind: 'checkpoint';
       currentStep?: string;

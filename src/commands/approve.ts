@@ -11,7 +11,7 @@ import {
 } from '../core/approvals.js';
 import { parsePrBody } from '../core/prBody.js';
 import { renderCancelReport } from '../core/summary.js';
-import type { Approval, Phase, TaskEvent, TaskState } from '../core/types.js';
+import type { Approval, Phase, TaskState } from '../core/types.js';
 import type { IssueComment, PrInfo } from '../tracker/types.js';
 import {
   commitLoaded,
@@ -24,6 +24,7 @@ import {
   trackerStep,
   type CommandContext,
   type ContextFactory,
+  type LoadedTask,
 } from './context.js';
 
 export { APPROVAL_ACTIONS, type ApprovalAction };
@@ -102,6 +103,39 @@ export async function findComment(
 }
 
 /**
+ * Records `approval` as the owner's decision `input.action` on the task: the state-machine event,
+ * written like any other (`commitLoaded`). The caller has already established where the approval
+ * comes from and that it is genuine; this only applies it. The task is read here unless the caller
+ * already has it (`loaded`, so a caller that looked at the state first does not read it twice).
+ * `phase` defaults to the task's current phase and only matters for `approve`; `cancel` needs a
+ * reason and posts the cancel report before the state is written.
+ */
+export async function applyApproval(
+  ctx: CommandContext,
+  issue: number,
+  input: { action: ApprovalAction; phase?: Phase; reason?: string },
+  approval: Approval,
+  loaded?: LoadedTask,
+): Promise<TaskState> {
+  const { action } = input;
+  const task = loaded ?? (await loadTask(ctx, issue));
+  const phase = input.phase ?? task.task.state.phase;
+  const reason = input.reason?.trim() ?? '';
+  if (action === 'cancel' && !reason) throw new Error('cancel needs a reason (--reason <text>)');
+
+  return commitLoaded(ctx, task, approvalEvent(action, phase, reason, approval), {
+    beforeWrite:
+      action === 'cancel'
+        ? async next => {
+            const report = renderCancelReport(next);
+            await trackerStep('postComment', issue, () => ctx.tracker.postComment(issue, report), 'the state was not changed');
+          }
+        : undefined,
+    writeHint: action === 'cancel' ? 'the cancel report was posted; the state was not changed' : undefined,
+  });
+}
+
+/**
  * Records an owner decision on the task: `approve` a published stage, `accept` the published result,
  * confirm the production-data run (`ran`) or `cancel`. The decision needs a source: an owner's
  * `commentUrl`, or `unverified` (observe mode only). The comment must be that command (`/approve`,
@@ -124,7 +158,6 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
   const { state } = loaded.task;
   const phase = input.phase ?? state.phase;
   let reason = input.reason?.trim() ?? '';
-  const eventWith = (approval: Approval): TaskEvent => approvalEvent(action, phase, reason, approval);
 
   // Fail on anything but timing (not published, wrong task type, done) before looking up comments.
   assertApprovalFits(state, loaded.type, action, phase, reason);
@@ -156,18 +189,7 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
     if (!reason) reason = checked.command.reason ?? '';
   }
 
-  if (action === 'cancel' && !reason) throw new Error('cancel needs a reason (--reason <text>)');
-
-  return commitLoaded(ctx, loaded, eventWith(approval), {
-    beforeWrite:
-      action === 'cancel'
-        ? async next => {
-            const report = renderCancelReport(next);
-            await trackerStep('postComment', issue, () => ctx.tracker.postComment(issue, report), 'the state was not changed');
-          }
-        : undefined,
-    writeHint: action === 'cancel' ? 'the cancel report was posted; the state was not changed' : undefined,
-  });
+  return applyApproval(ctx, issue, { action, phase, reason }, approval, loaded);
 }
 
 /** Registers `sdlc approve <issue> <action>`. */

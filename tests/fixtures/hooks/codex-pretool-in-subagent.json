@@ -1,0 +1,10 @@
+{
+  "session_id": "thr_123",
+  "cwd": "/work/proj",
+  "hook_event_name": "PreToolUse",
+  "agent_id": "agent_9",
+  "agent_type": "explorer",
+  "tool_name": "Bash",
+  "tool_use_id": "call_4",
+  "tool_input": { "command": "ls" }
+}

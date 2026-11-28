@@ -6,7 +6,7 @@ import { loadConfigFromString, type Config } from '../../src/config/schema.js';
 import { readManifest } from '../../src/install/manifest.js';
 import type { GitRunner, HookFileState } from '../../src/install/provision.js';
 import type { RepoFs } from '../../src/install/repoFs.js';
-import type { Change } from '../../src/render/changes.js';
+import type { Change, JsonKeysChange } from '../../src/render/changes.js';
 import { mergeChanges, renderAll } from '../../src/render/plan.js';
 import { packageVersion } from '../../src/version.js';
 import { fakeGh, type FakeGh, type FakeGhStep } from '../support/fakeGh.js';
@@ -47,13 +47,16 @@ const INIT_PATHS = [
   '.agents/skills/sdlc-task-tracking/SKILL.md',
   ...ROLES.map(role => `.claude/agents/sdlc-${role}.md`),
   ...SKILLS.map(skill => `.claude/skills/${skill}/SKILL.md`),
+  '.claude/settings.json',
   ...ROLES.map(role => `.codex/agents/sdlc-${role}.toml`),
   '.codex/config.toml',
+  '.codex/hooks.json',
   '.github/pull_request_template.md',
   '.github/workflows/sdlc-reconcile.yml',
   '.gitignore',
   '.mcp.json',
   ...GITHOOKS,
+  '.sdlc/hooks/run.sh',
   '.sdlc/manifest.json',
   'AGENTS.md',
   'CLAUDE.md',
@@ -257,6 +260,8 @@ async function installed(files: Record<string, string> = {}, config = CONFIG): P
 
 // --- renderAll ------------------------------------------------------------------------------------
 
+const STACK_OFF = 'stack: { superpowers: false, graphify: false }';
+
 describe('renderAll', () => {
   const all = (text: string, fs: RepoFs = memoryFs()) => renderAll(cfgOf(text), fs);
 
@@ -273,10 +278,89 @@ describe('renderAll', () => {
     expect(paths).toContain('.gitignore');
   });
 
+  it('renders the hook files of each hook harness and the launcher once; agents-md alone gets none', () => {
+    const { changes } = all(configWith('', '[claude, codex, gemini, agents-md]'));
+    const paths = changes.map(c => c.path);
+    expect(paths).toContain('.claude/settings.json');
+    expect(paths).toContain('.codex/hooks.json');
+    expect(paths.filter(p => p === '.sdlc/hooks/run.sh')).toHaveLength(1);
+    expect(changes.find(c => c.path === '.sdlc/hooks/run.sh')).toMatchObject({ kind: 'file', mode: 0o755 });
+
+    const agentsOnly = all(configWith('', '[agents-md]')).changes.map(c => c.path);
+    expect(agentsOnly).not.toContain('.sdlc/hooks/run.sh');
+    expect(agentsOnly.filter(p => p.endsWith('settings.json') || p.endsWith('hooks.json'))).toEqual([]);
+  });
+
+  it('fuses the Gemini hooks with its MCP servers in one .gemini/settings.json change', () => {
+    const { changes } = all(configWith('', '[gemini]'));
+    const settings = changes.filter(c => c.path === '.gemini/settings.json');
+    expect(settings).toHaveLength(1);
+    const [change] = settings as JsonKeysChange[];
+    expect(change?.entries.map(e => e.pointer.join('/'))).toEqual([
+      'mcpServers/github',
+      'hooks/SessionStart',
+      'hooks/BeforeAgent',
+      'hooks/BeforeTool',
+    ]);
+  });
+
+  it('names how to trust the Codex and Gemini hooks in the notes', () => {
+    const { notes } = all(configWith('', '[claude, codex, gemini]'));
+    expect(notes).toContain(
+      'Codex runs project hooks only in a trusted project after you review them: open codex in this repository, trust it, then run /hooks and approve the sdlc hooks.',
+    );
+    expect(notes).toContain(
+      'Gemini CLI loads project hooks only in a trusted folder: run gemini in this repository and trust the folder.',
+    );
+    expect(all(configWith('', '[claude]')).notes.filter(note => note.includes('hooks'))).toEqual([]);
+  });
+
+  describe('the stack commands', () => {
+    const SUPERPOWERS_CLAUDE = 'claude plugin install superpowers@claude-plugins-official';
+    const SUPERPOWERS_GEMINI = 'gemini extensions install https://github.com/obra/superpowers --consent';
+
+    it('puts the Superpowers command of each hook harness, then the graphify commands, in userCommands', () => {
+      const { userCommands } = all(configWith('stack: { superpowers: true, graphify: true }', '[claude, gemini]'));
+      expect(userCommands).toEqual([
+        SUPERPOWERS_CLAUDE,
+        SUPERPOWERS_GEMINI,
+        'uv tool install graphifyy',
+        'graphify install',
+        'graphify install --platform gemini',
+      ]);
+    });
+
+    it('follows the commands of the MCP servers, and each stack part has its own switch', () => {
+      const mcp = all(configWith(`mcp: { scope: user }\n${STACK_OFF}`, '[claude, codex]')).userCommands;
+      expect(mcp).toHaveLength(2);
+
+      const both = all(configWith('mcp: { scope: user }', '[claude, codex]')).userCommands;
+      expect(both.slice(0, 2)).toEqual(mcp);
+      expect(both.slice(2)).toEqual([
+        SUPERPOWERS_CLAUDE,
+        'codex plugin add superpowers@openai-curated',
+        'uv tool install graphifyy',
+        'graphify install',
+        'graphify install --platform codex',
+      ]);
+
+      expect(all(configWith('stack: { graphify: false }', '[claude]')).userCommands).toEqual([SUPERPOWERS_CLAUDE]);
+      expect(all(configWith('stack: { superpowers: false }', '[claude]')).userCommands).toEqual([
+        'uv tool install graphifyy',
+        'graphify install',
+      ]);
+      expect(all(configWith(STACK_OFF, '[claude, codex, gemini]')).userCommands).toEqual([]);
+    });
+
+    it('has no plugin for AGENTS.md alone, which still gets the graphify tool', () => {
+      expect(all(configWith('', '[agents-md]')).userCommands).toEqual(['uv tool install graphifyy']);
+    });
+  });
+
   it('returns the user-scope commands and the notes, with the notices of custom roles first', () => {
     const custom = '---\nrole: developer\ndescription: Ours.\ntier: standard\ncan_edit: true\nreturns: a report\nescalate_when: unsure\n---\nYou build.\n';
     const fs = memoryFs({ '.sdlc/agents/custom/developer.md': custom });
-    const { userCommands, notes, changes } = all(configWith('mcp: { scope: user }'), fs);
+    const { userCommands, notes, changes } = all(configWith(`mcp: { scope: user }\n${STACK_OFF}`), fs);
     expect(userCommands).toHaveLength(2);
     expect(userCommands[0]).toMatch(/^claude mcp add /);
     expect(userCommands[1]).toMatch(/^codex mcp add /);
@@ -306,6 +390,28 @@ describe('mergeChanges', () => {
     expect(() => mergeChanges([json([['mcpServers', 'a'], { url: 'u' }]), json([['mcpServers', 'a'], { url: 'w' }])])).toThrow(
       /mcpServers\/a/,
     );
+  });
+
+  describe('items entries', () => {
+    const hook = (command: string) => ({ matcher: 'Bash', hooks: [{ type: 'command', command }] });
+    const items = (event: string, value: unknown[], marker = 'sdlc hook') => ({ pointer: ['hooks', event], value, items: { marker } });
+    const gemini = (...entries: JsonKeysChange['entries']): Change => ({ kind: 'json-keys', path: '.gemini/settings.json', entries });
+    const server = { pointer: ['mcpServers', 'github'], value: { httpUrl: 'u' } };
+
+    it('fuses a plain mcpServers entry and a hooks items entry of one file into one change, items intact', () => {
+      const mcp = gemini(server);
+      const hooks = gemini(items('BeforeTool', [hook('sdlc hook before-tool')]));
+      expect(mergeChanges([mcp, hooks])).toEqual([gemini(server, items('BeforeTool', [hook('sdlc hook before-tool')]))]);
+      expect(mergeChanges([hooks, mcp])).toEqual([gemini(items('BeforeTool', [hook('sdlc hook before-tool')]), server)]);
+    });
+
+    it('keeps an identical items entry once and throws when the items or the marker differ', () => {
+      const a = gemini(items('BeforeTool', [hook('sdlc hook a')]));
+      expect(mergeChanges([a, a])).toEqual([a]);
+      expect(() => mergeChanges([a, gemini(items('BeforeTool', [hook('sdlc hook b')]))])).toThrow(/hooks\/BeforeTool/);
+      expect(() => mergeChanges([a, gemini(items('BeforeTool', [hook('sdlc hook a')], 'sdlc hook a'))])).toThrow(/hooks\/BeforeTool/);
+      expect(() => mergeChanges([a, gemini({ pointer: ['hooks', 'BeforeTool'], value: [hook('sdlc hook a')] })])).toThrow(/hooks\/BeforeTool/);
+    });
   });
 
   it('joins toml-block bodies of one path with a blank line and lists every table', () => {
@@ -352,6 +458,7 @@ describe('sdlc init', () => {
 
     // hooks are executable, the manifest lists what was written, and git points at the hooks
     expect(h.fs.modes.get('.sdlc/githooks/pre-commit')).toBe(0o755);
+    expect(h.fs.modes.get('.sdlc/hooks/run.sh')).toBe(0o755);
     expect(readManifest(h.fs)?.kit).toBe(packageVersion());
     expect(h.git.hooksPath()).toBe('.sdlc/githooks');
     // GitHub was provisioned: labels, branch protection and push protection
@@ -363,6 +470,42 @@ describe('sdlc init', () => {
       'api -X',
       'api -X',
     ]);
+  });
+
+  it('init merges hooks into customized settings', async () => {
+    const original =
+      '{\n' +
+      '  "permissions": {\n    "allow": ["Bash(npm test)"]\n  },\n' +
+      '  "hooks": {\n' +
+      '    "PreToolUse": [\n' +
+      '      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "./scripts/our-check.sh" }] }\n' +
+      '    ]\n' +
+      '  }\n' +
+      '}\n';
+    const mine = { matcher: 'Bash', hooks: [{ type: 'command', command: './scripts/our-check.sh' }] };
+    const h = await installed({ '.claude/settings.json': original });
+
+    const settings = JSON.parse(h.fs.files.get('.claude/settings.json') as string) as {
+      permissions: unknown;
+      hooks: Record<string, unknown[]>;
+    };
+    // the user's permissions and their own PreToolUse hook are kept; ours are appended after theirs
+    expect(settings.permissions).toEqual({ allow: ['Bash(npm test)'] });
+    expect(Object.keys(settings.hooks)).toEqual(['PreToolUse', 'SessionStart', 'UserPromptSubmit']);
+    expect(settings.hooks.PreToolUse).toHaveLength(2);
+    expect(settings.hooks.PreToolUse?.[0]).toEqual(mine);
+    expect(JSON.stringify(settings.hooks.PreToolUse?.[1])).toContain('.sdlc/hooks/run.sh');
+    expect(settings.hooks.SessionStart).toHaveLength(1);
+    expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
+
+    // a second init changes nothing
+    await h.go(['init']);
+    expect(JSON.parse(h.fs.files.get('.claude/settings.json') as string)).toEqual(settings);
+
+    await h.go(['uninstall']);
+
+    expect(h.fs.files.get('.claude/settings.json')).toBe(original);
+    expect(h.fs.files.has('.sdlc/hooks/run.sh')).toBe(false);
   });
 
   it('prints the plan, the steps, the user commands, the notes and the next steps for a person', async () => {
@@ -388,7 +531,7 @@ describe('sdlc init', () => {
   });
 
   it('prints the commands the owner runs themselves for user-scope MCP servers, in the report and the JSON', async () => {
-    const config = configWith('stack: { actions: true }\nmcp: { scope: user }');
+    const config = configWith(`stack: { actions: true, superpowers: false, graphify: false }\nmcp: { scope: user }`);
     const { userCommands } = renderAll(cfgOf(config), memoryFs());
     expect(userCommands).toHaveLength(2);
     const h = setup({ config });
@@ -406,6 +549,19 @@ describe('sdlc init', () => {
     await json.go(['init', '--json']);
     const next = json.report().steps.find(step => step.name === 'next steps');
     expect(next?.details.filter(line => line.startsWith('run yourself: '))).toEqual(userCommands.map(c => `run yourself: ${c}`));
+  });
+
+  it('lists the stack install commands among the steps the owner runs themselves', async () => {
+    const config = configWith('stack: { actions: true }');
+    const h = setup({ config });
+    h.useGh(emptyGithub(cfgOf(config), false));
+
+    await h.go(['init']);
+
+    expect(h.text()).toContain('  run yourself: claude plugin install superpowers@claude-plugins-official');
+    expect(h.text()).toContain('  run yourself: codex plugin add superpowers@openai-curated');
+    expect(h.text()).toContain('  run yourself: uv tool install graphifyy');
+    expect(h.text()).toContain('  run yourself: graphify install --platform codex');
   });
 
   it('leaves out the SDLC_TOKEN step when Actions are off', async () => {
@@ -824,6 +980,33 @@ describe('sdlc upgrade', () => {
     expect(gh.calls).toEqual([]);
   });
 
+  it('dropping codex removes only our hooks from a .codex/hooks.json the user already had, and restores it byte for byte', async () => {
+    const original =
+      '{\n' +
+      '  "hooks": {\n' +
+      '    "PreToolUse": [\n' +
+      '      { "matcher": "^Bash$", "hooks": [{ "type": "command", "command": "./scripts/our-check.sh", "timeout": 5 }] }\n' +
+      '    ]\n' +
+      '  }\n' +
+      '}\n';
+    const h = await installed({ '.codex/hooks.json': original });
+    const hooks = (JSON.parse(h.fs.files.get('.codex/hooks.json') as string) as { hooks: Record<string, unknown[]> }).hooks;
+    // their hook first, ours after it; the events they did not use were added whole
+    expect(Object.keys(hooks)).toEqual(['PreToolUse', 'SessionStart', 'UserPromptSubmit']);
+    expect(hooks.PreToolUse).toHaveLength(2);
+    expect(JSON.stringify(hooks.PreToolUse?.[0])).toContain('our-check.sh');
+    expect(JSON.stringify(hooks.PreToolUse?.[1])).toContain('.sdlc/hooks/run.sh');
+    h.setConfig(configWith('stack: { actions: true }', '[claude]'));
+
+    await h.go(['upgrade']);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(h.fs.files.get('.codex/hooks.json')).toBe(original);
+    // claude is still configured: its hooks and the launcher stay
+    expect(JSON.stringify(h.fs.files.get('.claude/settings.json'))).toContain('.sdlc/hooks/run.sh');
+    expect(h.fs.files.has('.sdlc/hooks/run.sh')).toBe(true);
+  });
+
   it('--dry-run lists the update and the removals and changes nothing', async () => {
     const h = await installed({}, TWO_SERVERS);
     const before = h.fs.snapshot();
@@ -865,7 +1048,9 @@ describe('sdlc upgrade', () => {
       expect(details).toContain('remove .codex/agents/sdlc-analyst.toml (no longer generated)');
       expect(details.split('\n').at(-1)).toBe(count(details));
       // 10 codex agents (not the modified one) + .codex/config.toml + the AGENTS.md block + 3 .agents skills
-      expect(count(details)).toBe('15 changes');
+      // + the 3 hook events of .codex/hooks.json, which goes away with them
+      expect(count(details)).toBe('18 changes');
+      expect(h.fs.files.has('.codex/hooks.json')).toBe(false);
       expect(h.fs.files.has('.codex/agents/sdlc-analyst.toml')).toBe(false);
       expect(process.exitCode).toBeUndefined();
     });

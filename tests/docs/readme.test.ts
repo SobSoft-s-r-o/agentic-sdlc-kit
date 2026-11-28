@@ -130,9 +130,9 @@ describe('the command extractor', () => {
 // --- README ---------------------------------------------------------------------------------------------
 
 describe('README', () => {
-  it('states the current status: the core CLI and the installer are available, the harness hooks are next', () => {
+  it('states the current status: the core CLI, the installer and the harness hooks are available, the npm package is next', () => {
     const status = readme.split('\n').find(line => line.startsWith('> Status:'));
-    expect(status).toBe('> Status: core CLI and installer available; harness hooks next');
+    expect(status).toBe('> Status: core CLI, installer and harness hooks available; npm package next');
   });
 
   it('gives the bootstrap prompt, exactly, in a code block', () => {
@@ -157,9 +157,33 @@ describe('README', () => {
     expect(unknownMentions(readme)).toEqual([]);
   });
 
+  it('lists every command that sdlc registers, and every subcommand', () => {
+    const words = mentioned(readme);
+    // The command list writes sibling subcommands as one span: `sdlc worktree start | finish`.
+    for (const snippet of codeSnippets(readme)) {
+      const span = /^sdlc\s+([a-z][a-z-]*)\s+(.*)$/.exec(snippet);
+      if (span === null) continue;
+      for (const alternative of (span[2] ?? '').split('|')) {
+        const name = /^\s*([a-z][a-z-]*)(?:\s|$)/.exec(alternative)?.[1];
+        if (name !== undefined) words.add(`${span[1] ?? ''} ${name}`);
+      }
+    }
+    const missing: string[] = [];
+    for (const command of program.commands) {
+      if (command.commands.length === 0) {
+        if (!words.has(command.name())) missing.push(command.name());
+        continue;
+      }
+      for (const sub of command.commands) {
+        if (!words.has(`${command.name()} ${sub.name()}`)) missing.push(`${command.name()} ${sub.name()}`);
+      }
+    }
+    expect(missing, 'commands the README does not mention').toEqual([]);
+  });
+
   it('walks through the install in the order that works', () => {
     const walkthrough = readme.slice(readme.search(/^## Two-minute walkthrough/m), readme.search(/^## CLI/m));
-    expect(walkthrough).toContain('`<ref>` is the kit version: a release tag such as `v0.1.0`, or `main`');
+    expect(walkthrough).toContain('`<ref>` is the kit version: a release tag such as `v0.2.0`, or `main`');
     const steps = ['doctor --preflight', 'config suggest --write', 'set kit_ref to <ref>', 'init --dry-run', 'init  ', 'set github.project.number to N', 'npm install --save-dev', 'npx --no-install sdlc doctor'];
     const positions = steps.map(step => walkthrough.indexOf(step));
     expect(positions.map((position, index) => (position < 0 ? steps[index] : ''))).toEqual(steps.map(() => ''));

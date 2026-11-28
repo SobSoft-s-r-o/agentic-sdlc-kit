@@ -4,11 +4,29 @@
  *
  * - Markdown (`<!-- sdlc:begin -->` / `<!-- sdlc:end -->`), line files such as `.gitignore`
  *   (`# sdlc:begin` / `# sdlc:end`) and `.codex/config.toml` share one block engine.
- * - JSON files only get the keys the caller says the kit owns.
+ * - JSON files only get the keys the caller says the kit owns, spliced into the user's text (see
+ *   `jsonText.ts`): what the user wrote around them is never re-formatted.
  *
  * A marker is a whole line (surrounding whitespace is ignored). Damaged markers are never repaired
  * or guessed at: the merge throws a `MergeError` that names the markers and the line.
  */
+
+import { HOOK_MARKER, isKitHookItem } from '../render/hooks.js';
+import {
+  appendEntry,
+  applySplice,
+  findMember,
+  locate as locateJson,
+  ownLineIndent,
+  removeEntry,
+  renderValue,
+  replaceMemberValue,
+  scanJsonObject,
+  type ArrayNode,
+  type JsonMember,
+  type Layout,
+  type ObjectNode,
+} from './jsonText.js';
 
 export class MergeError extends Error {
   constructor(message: string) {
@@ -156,6 +174,19 @@ export const removeTomlBlock = (existing: string): string => removeBlock(existin
 export interface JsonEntry {
   pointer: string[];
   value: unknown;
+  /**
+   * Set when the entry owns only some elements of the array at `pointer`: those whose
+   * `JSON.stringify` contains `marker`. `value` is then the array of items to keep there.
+   * `previousMarker` is the marker an earlier kit version used: its elements are the kit's too and go
+   * with the others.
+   */
+  items?: { marker: string; previousMarker?: string };
+}
+
+/** An owned element to remove: the elements of the array at `pointer` that contain `marker`. */
+export interface JsonItemsRemoval {
+  pointer: string[];
+  marker: string;
 }
 
 /** The manifest key of a JSON pointer: its segments joined by `/`. */
@@ -195,6 +226,17 @@ export function jsonValueAt(root: JsonObject, pointer: string[]): { found: boole
   return { found: true, value: node };
 }
 
+/**
+ * Whether an array element is one of the kit's items: its JSON text contains the marker. The hook
+ * launcher's marker asks for more: a handler must run a command the kit rendered (`isKitHookItem`),
+ * so a user hook that merely mentions the launcher path stays the user's.
+ */
+const hasMarker = (element: unknown, marker: string): boolean =>
+  marker === HOOK_MARKER ? isKitHookItem(element) : (JSON.stringify(element) ?? '').includes(marker);
+
+/** The elements of `array` that contain `marker`, in order. */
+export const ownedItems = (array: unknown[], marker: string): unknown[] => array.filter(element => hasMarker(element, marker));
+
 /** `JSON.stringify` with the keys of every object sorted, so equal values give equal text. */
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(sortKeys(value)) ?? 'null';
@@ -210,34 +252,28 @@ function sortKeys(value: unknown): unknown {
   return value;
 }
 
-/** How the user's JSON file is laid out, so a rewrite does not reformat it. */
-interface JsonFormat {
-  indent: string;
-  finalNewline: boolean;
-  eol: string;
-}
-
-const DEFAULT_JSON_FORMAT: JsonFormat = { indent: '  ', finalNewline: true, eol: '\n' };
+const DEFAULT_LAYOUT: Layout = { indent: '  ', eol: '\n' };
 
 /**
- * Indentation from the first indented line (a tab, or that line's spaces; two spaces when nothing is
- * indented), the line ending, and whether the text ends with a newline. A new or empty file gets the
- * default: two spaces and a final newline.
+ * The indentation unit for what the kit adds (a tab, or the spaces of the first indented line; two
+ * spaces when nothing is indented) and the file's line ending. A new or empty file gets two spaces.
  */
-function detectJsonFormat(existing: string | undefined): JsonFormat {
-  if (existing === undefined || existing.trim() === '') return DEFAULT_JSON_FORMAT;
-  const indented = /^([ \t]+)\S/m.exec(existing);
-  const lead = indented?.[1];
+function detectLayout(existing: string | undefined): Layout {
+  if (existing === undefined || existing.trim() === '') return DEFAULT_LAYOUT;
+  const lead = /^([ \t]+)\S/m.exec(existing)?.[1];
   return {
-    indent: lead === undefined ? DEFAULT_JSON_FORMAT.indent : lead.startsWith('\t') ? '\t' : lead.slice(0, 10),
-    finalNewline: existing.endsWith('\n'),
+    indent: lead === undefined ? DEFAULT_LAYOUT.indent : lead.startsWith('\t') ? '\t' : lead.slice(0, 10),
     eol: eolOf(existing),
   };
 }
 
-function serialize(value: unknown, format: JsonFormat): string {
-  const text = JSON.stringify(value, null, format.indent).split('\n').join(format.eol);
-  return format.finalNewline ? text + format.eol : text;
+/** The text is valid JSON (the caller parsed it), so a scan that fails is an error in the file for us. */
+function scan(text: string, path: string): ObjectNode {
+  try {
+    return scanJsonObject(text);
+  } catch {
+    throw new MergeError(`${path} is not valid JSON; fix or remove it`);
+  }
 }
 
 /** A pointer segment becomes part of the manifest key, which joins segments with `/`. */
@@ -247,14 +283,178 @@ export function assertJsonPointer(pointer: string[], path = 'file'): void {
   }
 }
 
+/** An entry with `items` needs a marker and a non-empty array of items that all contain it. */
+export function assertJsonEntry(entry: JsonEntry, path = 'file'): void {
+  assertJsonPointer(entry.pointer, path);
+  if (entry.items === undefined) return;
+  const where = `${path}: ${jsonKey(entry.pointer)}`;
+  const { marker } = entry.items;
+  if (marker === '') throw new MergeError(`${where}: the marker must not be empty`);
+  if (!Array.isArray(entry.value) || entry.value.length === 0) {
+    throw new MergeError(`${where}: the value must be a non-empty array`);
+  }
+  if (!entry.value.every(item => hasMarker(item, marker))) {
+    throw new MergeError(`${where}: every item must contain "${marker}"`);
+  }
+}
+
+const notAnArray = (pointer: string[]): MergeError => new MergeError(`expected an array at ${jsonKey(pointer)}`);
+
+/** Items go into an array: the key may be absent, but a value that is not an array is the user's to fix. */
+export function assertItemsTarget(current: { found: boolean; value?: unknown }, pointer: string[]): void {
+  if (current.found && !Array.isArray(current.value)) throw notAnArray(pointer);
+}
+
+/** The array at `pointer` as a node together with the member that holds it. */
+function arrayAt(text: string, pointer: string[], path: string): { member: JsonMember; array: ArrayNode } {
+  const member = locateJson(scan(text, path), pointer).leaf;
+  if (member === undefined || member.value.kind !== 'array') throw notAnArray(pointer);
+  return { member, array: member.value };
+}
+
+/** The parsed elements of an array node. */
+const elementsOf = (text: string, array: ArrayNode): unknown[] => JSON.parse(text.slice(array.start, array.end)) as unknown[];
+
+/** Removes the elements of the array at `pointer` that `isOurs` accepts, one splice each, last first. */
+function removeElements(text: string, pointer: string[], isOurs: (element: unknown) => boolean, path: string): string {
+  let out = text;
+  for (;;) {
+    const { array } = arrayAt(out, pointer, path);
+    const elements = elementsOf(out, array);
+    let index = elements.length - 1;
+    while (index >= 0 && !isOurs(elements[index])) index -= 1;
+    if (index < 0) return out;
+    out = applySplice(out, removeEntry(array, index));
+  }
+}
+
+/** Adds `key: value` to `holder`, an empty one in the layout of the line `holderMember` is on. */
+function insertMember(
+  text: string,
+  holder: ObjectNode,
+  holderMember: JsonMember | undefined,
+  key: string,
+  value: unknown,
+  layout: Layout,
+): string {
+  const multilineWhenEmpty = holderMember === undefined || ownLineIndent(text, holderMember.start) !== undefined;
+  return applySplice(
+    text,
+    appendEntry(text, holder, layout, multilineWhenEmpty, (multiline, indent) =>
+      `${JSON.stringify(key)}: ${renderValue(value, layout, indent, multiline)}`,
+    ),
+  );
+}
+
+/** `{ rest[0]: { rest[1]: ... value } }`, the objects that have to be created below a new key. */
+function nest(rest: string[], value: unknown): unknown {
+  const [first, ...others] = rest;
+  if (first === undefined) return value;
+  const object: JsonObject = {};
+  setOwn(object, first, nest(others, value));
+  return object;
+}
+
+/**
+ * Puts `items` into the array at `pointer`: removes its elements that contain a marker and appends
+ * `items`, so the user's other elements stay where they are and ours come last. An array whose owned
+ * items already equal `items` is left as it is. Returns `undefined` for that no-op.
+ */
+function mergeOwnedItems(
+  text: string,
+  pointer: string[],
+  items: unknown[],
+  markers: string[],
+  layout: Layout,
+  path: string,
+): string | undefined {
+  const isOurs = (element: unknown): boolean => markers.some(marker => hasMarker(element, marker));
+  const { array } = arrayAt(text, pointer, path);
+  if (canonicalJson(elementsOf(text, array).filter(isOurs)) === canonicalJson(items)) return undefined;
+
+  let out = removeElements(text, pointer, isOurs, path);
+  for (const item of items) {
+    const { member, array: target } = arrayAt(out, pointer, path);
+    const multilineWhenEmpty = ownLineIndent(out, member.start) !== undefined;
+    out = applySplice(
+      out,
+      appendEntry(out, target, layout, multilineWhenEmpty, (multiline, indent) => renderValue(item, layout, indent, multiline)),
+    );
+  }
+  return out;
+}
+
+interface MergeState {
+  skipped: string[];
+  createdParents: string[];
+  changed: boolean;
+}
+
+/** Merges one entry into `text`; returns the new text. */
+function mergeEntry(text: string, entry: JsonEntry, owned: Set<string>, layout: Layout, path: string, state: MergeState): string {
+  const { pointer, value, items } = entry;
+  const leaf = pointer[pointer.length - 1];
+  if (leaf === undefined) throw new Error('a JSON pointer needs at least one segment');
+  const key = jsonKey(pointer);
+
+  let holder = scan(text, path);
+  let holderMember: JsonMember | undefined;
+  for (let i = 0; i < pointer.length - 1; i++) {
+    const member = findMember(holder, pointer[i] as string);
+    if (member === undefined) {
+      // From here down nothing exists: add one member that holds the rest of the path.
+      for (let j = i; j < pointer.length - 1; j++) state.createdParents.push(jsonKey(pointer.slice(0, j + 1)));
+      if (items !== undefined) state.createdParents.push(key);
+      state.changed = true;
+      return insertMember(text, holder, holderMember, pointer[i] as string, nest(pointer.slice(i + 1), value), layout);
+    }
+    if (member.value.kind !== 'object') {
+      throw new MergeError(`${path}: "${jsonKey(pointer.slice(0, i + 1))}" is not an object; fix or remove it`);
+    }
+    holder = member.value;
+    holderMember = member;
+  }
+
+  const current = findMember(holder, leaf);
+  if (current === undefined) {
+    if (items !== undefined) state.createdParents.push(key);
+    state.changed = true;
+    return insertMember(text, holder, holderMember, leaf, value, layout);
+  }
+  if (items !== undefined) {
+    if (current.value.kind !== 'array') throw notAnArray(pointer);
+    const markers = [items.marker, ...(items.previousMarker === undefined || items.previousMarker === items.marker ? [] : [items.previousMarker])];
+    const merged = mergeOwnedItems(text, pointer, value as unknown[], markers, layout, path);
+    if (merged === undefined) return text;
+    state.changed = true;
+    return merged;
+  }
+  if (!owned.has(key)) {
+    state.skipped.push(key);
+    return text;
+  }
+  const onDisk: unknown = JSON.parse(text.slice(current.value.start, current.value.end));
+  if (canonicalJson(onDisk) === canonicalJson(value)) return text;
+  state.changed = true;
+  return applySplice(text, replaceMemberValue(text, current, value, layout));
+}
+
 /**
  * Sets each entry whose key is absent or in `owned` (manifest keys, see `jsonKey`). A present key
- * that is not owned belongs to the user: it is left alone and reported in `skipped`. The file keeps
- * its key order (new keys go last), its indentation (a tab or N spaces; two spaces for a new file or
- * one with no indentation), its line endings and whether it ends with a newline. When no key is
+ * that is not owned belongs to the user: it is left alone and reported in `skipped`. An entry with
+ * `items` is different: the array is the user's, only the elements that contain its marker are the
+ * kit's, so they are replaced whatever `owned` says (the caller decides whether that is allowed); the
+ * array must be absent or an array, else this throws.
+ *
+ * The edits are spliced into `existing`, so everything the user wrote stays byte for byte: key order,
+ * indentation, line endings, inline arrays, blank lines, number spellings, the final newline. What
+ * the kit adds follows the layout around it: a new member goes after the last one with the indentation
+ * of its siblings (on the same line in a file written on one line), a new nested value is indented with
+ * a tab or the spaces of the file's first indented line (two spaces for a new file). When no key is
  * actually set or changed, `existing` is returned as it is. `createdParents` lists the objects this
  * call had to create on the way to the keys (manifest keys, outermost first): `mcpServers` in a file
- * that had none. Uninstall may take those back once they are empty; objects that were there are not listed.
+ * that had none, and the array of an `items` entry that did not exist. Uninstall may take those back
+ * once they are empty; objects and arrays that were there are not listed.
  */
 export function mergeJsonKeys(
   existing: string | undefined,
@@ -262,83 +462,67 @@ export function mergeJsonKeys(
   owned: Set<string>,
   path = 'file',
 ): { text: string; skipped: string[]; createdParents: string[] } {
-  const root = parseJsonObject(existing, path);
-  const skipped: string[] = [];
-  const createdParents: string[] = [];
-  let changed = false;
-  for (const { pointer, value } of entries) {
-    assertJsonPointer(pointer, path);
-    const leaf = pointer[pointer.length - 1];
-    if (leaf === undefined) throw new Error('a JSON pointer needs at least one segment');
-    let node = root;
-    for (let i = 0; i < pointer.length - 1; i++) {
-      const segment = pointer[i] as string;
-      const next = hasOwn(node, segment) ? node[segment] : undefined;
-      if (next === undefined) {
-        const created: JsonObject = {};
-        setOwn(node, segment, created);
-        node = created;
-        createdParents.push(jsonKey(pointer.slice(0, i + 1)));
-        changed = true;
-      } else if (isObject(next)) {
-        node = next;
-      } else {
-        throw new MergeError(`${path}: "${jsonKey(pointer.slice(0, i + 1))}" is not an object; fix or remove it`);
-      }
-    }
-    const key = jsonKey(pointer);
-    if (!hasOwn(node, leaf)) {
-      setOwn(node, leaf, value);
-      changed = true;
-    } else if (!owned.has(key)) {
-      skipped.push(key);
-    } else if (canonicalJson(node[leaf]) !== canonicalJson(value)) {
-      setOwn(node, leaf, value);
-      changed = true;
-    }
+  parseJsonObject(existing, path);
+  const layout = detectLayout(existing);
+  const blank = existing === undefined || existing.trim() === '';
+  const state: MergeState = { skipped: [], createdParents: [], changed: false };
+  let text = blank ? `{}${layout.eol}` : existing;
+  for (const entry of entries) {
+    assertJsonEntry(entry, path);
+    text = mergeEntry(text, entry, owned, layout, path, state);
   }
-  if (!changed && existing !== undefined) return { text: existing, skipped, createdParents };
-  return { text: serialize(root, detectJsonFormat(existing)), skipped, createdParents };
+  const { skipped, createdParents } = state;
+  if (!state.changed && existing !== undefined) return { text: existing, skipped, createdParents };
+  return { text, skipped, createdParents };
 }
 
 /**
- * Deletes the keys. `pruneEmpty` says which objects on their path may go once they are left empty
- * (for us that is `mcpServers`): `true` (the default) every one, `false` none, or a list of manifest
- * keys (`['mcpServers']`) for exactly those the kit created. An object that still holds something is
- * never removed. Text without those keys is returned unchanged; otherwise the file keeps its
- * indentation, line endings and final newline. A document left as `{}` is the caller's to delete.
+ * Deletes the keys. A `{ pointer, marker }` removal deletes only the elements of the array at that
+ * pointer that contain the marker; the array itself goes when none is left and `pruneEmpty` allows
+ * it. `pruneEmpty` says which objects (and owned arrays) on the way may go once they are left empty
+ * (for us that is `mcpServers`, or `hooks/SessionStart`): `true` (the default) every one, `false`
+ * none, or a list of manifest keys (`['mcpServers']`) for exactly those the kit created. An object
+ * or array that still holds something is never removed. The edits are spliced into `existing` like
+ * those of `mergeJsonKeys`: text without those keys is returned unchanged, and the rest of the file
+ * keeps its bytes. A container left empty becomes `{}` or `[]`. A document left as `{}` is the
+ * caller's to delete.
  */
 export function removeJsonKeys(
   existing: string,
-  pointers: string[][],
+  removals: Array<string[] | JsonItemsRemoval>,
   path = 'file',
   opts: { pruneEmpty?: boolean | string[] } = {},
 ): string {
   const prune = opts.pruneEmpty ?? true;
   const mayPrune = (pointer: string[], depth: number): boolean =>
     prune === true || (prune !== false && prune.includes(jsonKey(pointer.slice(0, depth))));
-  const root = parseJsonObject(existing, path);
-  let changed = false;
-  for (const pointer of pointers) {
-    const chain: JsonObject[] = [root];
-    let node: unknown = root;
-    for (let i = 0; i < pointer.length - 1; i++) {
-      node = isObject(node) && hasOwn(node, pointer[i] as string) ? node[pointer[i] as string] : undefined;
-      if (!isObject(node)) break;
-      chain.push(node);
+  parseJsonObject(existing, path);
+  let text = existing;
+  for (const removal of removals) {
+    const { pointer, marker } = Array.isArray(removal) ? { pointer: removal, marker: undefined } : removal;
+    const { chain, holders, leaf } = locateJson(scan(text, path), pointer);
+    if (leaf === undefined) continue;
+    if (marker !== undefined) {
+      if (leaf.value.kind !== 'array') continue;
+      const elements = elementsOf(text, leaf.value);
+      const ours = elements.filter(element => hasMarker(element, marker));
+      if (ours.length === 0) continue;
+      if (ours.length < elements.length || !mayPrune(pointer, pointer.length)) {
+        text = removeElements(text, pointer, element => hasMarker(element, marker), path);
+        continue;
+      }
     }
-    const leaf = pointer[pointer.length - 1];
-    const parent = chain[pointer.length - 1];
-    if (leaf === undefined || parent === undefined || !hasOwn(parent, leaf)) continue;
-    delete parent[leaf];
-    changed = true;
+    // Remove the member, and every object above it that this leaves empty and may go.
+    let container = chain[pointer.length - 1] as ObjectNode;
+    let member = leaf;
     for (let depth = pointer.length - 1; depth > 0; depth--) {
-      const holder = chain[depth];
-      if (holder === undefined || Object.keys(holder).length > 0 || !mayPrune(pointer, depth)) break;
-      delete (chain[depth - 1] as JsonObject)[pointer[depth - 1] as string];
+      if (container.members.length !== 1 || !mayPrune(pointer, depth)) break;
+      member = holders[depth - 1] as JsonMember;
+      container = chain[depth - 1] as ObjectNode;
     }
+    text = applySplice(text, removeEntry(container, container.members.indexOf(member)));
   }
-  return changed ? serialize(root, detectJsonFormat(existing)) : existing;
+  return text;
 }
 
 // --- TOML -----------------------------------------------------------------------------------------

@@ -1,0 +1,8 @@
+{
+  "session_id": "thr_123",
+  "cwd": "/work/proj",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "spawn_agent",
+  "tool_use_id": "call_3",
+  "tool_input": { "message": "inspect this repo", "agent_type": "explorer" }
+}

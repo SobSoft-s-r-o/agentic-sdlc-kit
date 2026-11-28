@@ -33,6 +33,13 @@ const LOCAL_GITHUB = 'mcp:\n  servers: [github]\n  github_transport: local\n';
 const USER_SCOPE = (servers: string, transport = 'remote'): string =>
   `mcp:\n  servers: [${servers}]\n  scope: user\n  github_transport: ${transport}\n`;
 
+/**
+ * The catalog pins both npx packages to the exact version `npm view <package> version` printed when
+ * it was last refreshed (2026-11-28); bump them here and in templates/mcp/catalog.yaml together.
+ */
+const PLAYWRIGHT_PKG = '@playwright/mcp@0.0.86';
+const CONTEXT7_PKG = '@upstash/context7-mcp@4.9.1';
+
 const TOKEN_NAME = 'GITHUB_PERSONAL_ACCESS_TOKEN';
 const GITHUB_URL = 'https://api.githubcopilot.com/mcp/';
 const DOCKER_ARGS = ['run', '-i', '--rm', '-e', TOKEN_NAME, 'ghcr.io/github/github-mcp-server'];
@@ -64,6 +71,13 @@ const servers = (change: JsonKeysChange): Record<string, unknown> =>
   );
 
 describe('MCP catalog', () => {
+  it('pins every npx package to an exact version, never @latest or a range', () => {
+    const packages = loadMcpCatalog().flatMap(server => (server.local?.command === 'npx' ? [server.local.args.at(-1)!] : []));
+    expect(packages).toEqual([CONTEXT7_PKG, PLAYWRIGHT_PKG]);
+    for (const spec of packages) expect(spec).toMatch(/^@[a-z0-9-]+\/[a-z0-9-]+@\d+\.\d+\.\d+$/);
+    for (const server of loadMcpCatalog()) expect(JSON.stringify(server)).not.toContain('@latest');
+  });
+
   it('lists github, context7 and playwright with the verified endpoints and commands', () => {
     expect(loadMcpCatalog()).toEqual([
       {
@@ -77,13 +91,13 @@ describe('MCP catalog', () => {
         id: 'context7',
         description: 'Up-to-date library documentation for the agent to look things up in.',
         default: false,
-        local: { command: 'npx', args: ['-y', '@upstash/context7-mcp'] },
+        local: { command: 'npx', args: ['-y', CONTEXT7_PKG] },
       },
       {
         id: 'playwright',
         description: 'Browser automation and page inspection through Playwright.',
         default: false,
-        local: { command: 'npx', args: ['@playwright/mcp@latest'] },
+        local: { command: 'npx', args: [PLAYWRIGHT_PKG] },
       },
     ]);
   });
@@ -130,8 +144,8 @@ describe('renderMcp, project scope, claude (.mcp.json)', () => {
   it('writes context7 and playwright as stdio servers with no env and no type', () => {
     const change = only(renderMcp(cfgWith(ALL), 'claude').changes, 'json-keys');
     expect(Object.keys(servers(change))).toEqual(['github', 'context7', 'playwright']);
-    expect(servers(change)['context7']).toEqual({ command: 'npx', args: ['-y', '@upstash/context7-mcp'] });
-    expect(servers(change)['playwright']).toEqual({ command: 'npx', args: ['@playwright/mcp@latest'] });
+    expect(servers(change)['context7']).toEqual({ command: 'npx', args: ['-y', CONTEXT7_PKG] });
+    expect(servers(change)['playwright']).toEqual({ command: 'npx', args: [PLAYWRIGHT_PKG] });
   });
 });
 
@@ -171,11 +185,11 @@ describe('renderMcp, project scope, codex (.codex/config.toml)', () => {
         '',
         '[mcp_servers.context7]',
         'command = "npx"',
-        'args = ["-y", "@upstash/context7-mcp"]',
+        `args = ["-y", "${CONTEXT7_PKG}"]`,
         '',
         '[mcp_servers.playwright]',
         'command = "npx"',
-        'args = ["@playwright/mcp@latest"]',
+        `args = ["${PLAYWRIGHT_PKG}"]`,
       ].join('\n'),
     );
   });
@@ -201,7 +215,7 @@ describe('renderMcp, project scope, gemini (.gemini/settings.json)', () => {
       github: { command: 'docker', args: DOCKER_ARGS, env: { [TOKEN_NAME]: '$GITHUB_PERSONAL_ACCESS_TOKEN' } },
     });
     const all = only(renderMcp(cfgWith(ALL), 'gemini').changes, 'json-keys');
-    expect(servers(all)['context7']).toEqual({ command: 'npx', args: ['-y', '@upstash/context7-mcp'] });
+    expect(servers(all)['context7']).toEqual({ command: 'npx', args: ['-y', CONTEXT7_PKG] });
   });
 });
 
@@ -326,8 +340,8 @@ describe('renderMcp, user scope', () => {
             : `claude mcp add --scope user ${name} -- ${command} ${args}`;
       expect(remote.userCommands).toEqual([
         COMMANDS[harness].remote,
-        stdio('context7', 'npx', '-y @upstash/context7-mcp'),
-        stdio('playwright', 'npx', '@playwright/mcp@latest'),
+        stdio('context7', 'npx', `-y ${CONTEXT7_PKG}`),
+        stdio('playwright', 'npx', PLAYWRIGHT_PKG),
       ]);
 
       const local = renderMcp(cfgWith(USER_SCOPE('github', 'local')), harness);

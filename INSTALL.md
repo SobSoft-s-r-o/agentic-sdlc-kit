@@ -7,7 +7,7 @@ Rules for the whole install:
 - Ask the install questions one topic at a time, each with the default you detected, and wait for the answer. Do not batch them.
 - The installer never commits, pushes or writes outside the repository. You commit; the owner runs the steps in Step 7.
 - No secret goes into a file, a commit, a chat message or a log. Never ask the owner to paste a token to you.
-- `<ref>` is the kit version to install: a release tag such as `v0.1.0`, or `main`.
+- `<ref>` is the kit version to install: a release tag such as `v0.2.0`, or `main`.
 - How to run `sdlc`: until it is installed (Step 4), as `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> <command>`. After the project dependency of Step 4, as `npx --no-install sdlc <command>`: a dev dependency lives in `node_modules/.bin`, which is not on the PATH, so plain `sdlc` works only after a global install. Elsewhere in this document `sdlc <command>` in running text means whichever form applies.
 
 ## Step 1: Preflight
@@ -50,7 +50,7 @@ Use an existing GitHub Project or create one? Key `github.project`: `owner` (the
 
 #### 3. Enforcement mode
 
-Key `mode`: `observe` (default) records gaps and warns; `enforce` blocks. In `enforce` the git hooks refuse commits to the default branch, pushes to it, and pushes of a `task/<n>-...` branch whose task is not tracked, and owner approvals need the account setup in "Owner, agents and tokens". The secret guard blocks in both modes.
+Key `mode`: `observe` (default) records gaps and warns; `enforce` blocks. In `enforce` the git hooks refuse commits to the default branch, pushes to it, and pushes of a `task/<n>-...` branch whose task is not tracked; the harness hooks refuse file edits before the plan is approved, subagents without a role and model tier, `gh pr merge --admin`, other AI CLIs and `sdlc config set` (see "Harness hooks and trust"); and owner approvals need the account setup in "Owner, agents and tokens". The secret guard blocks in both modes. The owner can change the mode later with `sdlc config set mode enforce` (Step 7), so `observe` is a safe first answer.
 
 #### 4. Task types
 
@@ -95,8 +95,14 @@ Key `models.<harness>`, each `{ deep, standard, fast }`. Claude defaults to `opu
 
 Keys `stack.superpowers`, `stack.graphify`, `stack.branch_protection` and `stack.actions`, all default `true`.
 
-- `stack.superpowers`: adds the Superpowers skill route to the instructions. The kit does not install the plugin; the owner does, per harness (Step 7): in Claude Code `/plugin install superpowers@claude-plugins-official`, for Gemini CLI `gemini extensions install https://github.com/obra/superpowers`, for Codex the Superpowers entry in its plugin marketplace (`/plugins`). Other harnesses: see https://github.com/obra/superpowers.
-- `stack.graphify`: adds the graphify rules and `graphify-out/` to `.gitignore`. The kit does not install graphify either: `uv tool install graphifyy` (or `pipx install graphifyy`; the package name has two `y`), then build the graph once as its documentation says.
+- `stack.superpowers`: adds the Superpowers skill route to the instructions. The kit does not install the plugin; the owner does, per harness (Step 7):
+  - Claude Code: `/plugin install superpowers@claude-plugins-official` inside Claude Code, or `claude plugin install superpowers@claude-plugins-official` from a shell.
+  - Gemini CLI: `gemini extensions install https://github.com/obra/superpowers --consent` (from the Superpowers README; not run by the kit).
+  - Codex: open `/plugins` in the Codex terminal UI and install Superpowers from its plugin marketplace. `codex plugin add superpowers@openai-curated` is the command `init` prints, but the kit has not verified it against a real Codex, so trust the `/plugins` route if the command fails.
+  - Other harnesses: see https://github.com/obra/superpowers.
+
+  `init` prints the commands for the configured harnesses as `run yourself:` lines, and `doctor` (`stack.superpowers`) checks that the plugin is listed.
+- `stack.graphify`: adds the graphify rules and `graphify-out/` to `.gitignore`. The kit does not install graphify either: `uv tool install graphifyy` (or `pipx install graphifyy`; the package name has two `y`), then register its skill for each harness: `graphify install` for Claude Code, `graphify install --platform codex` for Codex, `graphify install --platform gemini` for Gemini CLI (`init` prints the ones that apply). Build the graph once as its documentation says. `doctor` (`stack.graphify`) checks that `graphify --version` runs.
 - `stack.branch_protection`: `init` protects the default branch (pull request required, no force pushes or deletions).
 - `stack.actions`: renders `.github/workflows/sdlc-reconcile.yml`, which needs the `SDLC_TOKEN` secret. Without it the board updates only from local commands and hooks.
 
@@ -122,7 +128,7 @@ Set `kit_ref` to the `<ref>` you installed from: the generated instructions and 
 version: 1
 harnesses: [claude, codex]
 mode: observe                 # observe | enforce
-kit_ref: v0.1.0               # the ref you installed from
+kit_ref: v0.2.0               # the ref you installed from
 github:
   repo: owner/name
   default_branch: main
@@ -159,6 +165,8 @@ npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init --dry-run
 ```
 
 Show the plan to the owner, then run `init` without `--dry-run`. It writes the managed files (instruction blocks, agent roles, skills, MCP config, the PR template, the reconcile workflow, `.sdlc/manifest.json`, the git hooks and `.gitignore` lines), sets `core.hooksPath` to `.sdlc/githooks` (the hooks `pre-commit` and `pre-push`, which run the secret guard and the branch rules, then `post-merge` and `post-checkout`), and provisions the board, labels, default-branch protection and secret scanning push protection. It commits nothing. `init` is idempotent: run it again and nothing changes.
+
+`init` also writes the harness hooks: the launcher `.sdlc/hooks/run.sh` (executable) and, for each configured harness, `.claude/settings.json`, `.codex/hooks.json` or `.gemini/settings.json` with a hook for session start, prompt and pre-tool. It adds `.worktrees/` and `.sdlc/cache/` to the managed `.gitignore` block. **Commit `.sdlc/hooks/run.sh`** (Step 5). The settings files run `"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" <harness> <event>`, so a worktree or a clone that does not have the launcher committed runs no hooks: the command exits 127 and the harness carries on, fail open. Codex and Gemini also need the owner's trust before they run the hooks (see "Harness hooks and trust").
 
 - Hooks the repository already has in `.git/hooks` (a hand-written hook, the pre-commit framework, lefthook) keep running: with `core.hooksPath` set git no longer calls them itself, so each kit hook runs the one of the same name after its own step, with the same arguments and input, and its exit code counts. `init` lists the hooks it chains, and the ones it cannot run because they are not executable (`chmod +x` them). `doctor` reports them as `git.legacyHooks`.
 
@@ -207,13 +215,14 @@ It prints `Created #<n>: <url>`. Then:
 
 ```sh
 git switch -c task/<n>-install-agentic-sdlc-kit
-git add sdlc.config.yaml .sdlc .github .gitignore   # plus the instruction files, agent folders, MCP files, package.json and the lockfile that init and npm changed
+git add sdlc.config.yaml .sdlc .github .gitignore   # .sdlc includes .sdlc/hooks/run.sh; add the instruction files, agent folders, the hook settings (.claude/settings.json, .codex/hooks.json, .gemini/settings.json), MCP files, package.json and the lockfile that init and npm changed
+git ls-files -s .sdlc/hooks/run.sh   # must start with 100755: the launcher has to be committed and executable
 git commit -m "chore: install agentic-sdlc-kit"
 git push -u origin task/<n>-install-agentic-sdlc-kit
 gh pr create --title "chore: install agentic-sdlc-kit" --body-file <body>
 ```
 
-The PR body says `Related to #<n>` (never `Fixes` or `Closes`) and `Scope: final`, and lists what the install added, including the dev dependency of Step 4. Then hand it over: `npx --no-install sdlc review handoff <n> --pr <pr-number>`. The owner reviews and merges.
+The PR body says `Related to #<n>` (never `Fixes` or `Closes`) and `Scope: final`, and lists what the install added, including the dev dependency of Step 4 and the harness hooks. Then hand it over: `npx --no-install sdlc review handoff <n> --pr <pr-number>`. The owner reviews and merges.
 
 If the commit is blocked, the secret guard found something: see "Secret guard". Never use `--no-verify`.
 
@@ -223,7 +232,9 @@ If the commit is blocked, the secret guard found something: see "Secret guard". 
 npx --no-install sdlc doctor
 ```
 
-Each line starts with `✓` (ok), `!` (warning) or `✗` (failure), and a failure exits non-zero. Until the owner finishes Step 7, expect `actions.secret` to fail (`SDLC_TOKEN` is not set) and `mcp.token` to warn (the variable is not exported); `secrets.pushProtection` may warn (no admin rights, or the plan has none) and `mcp.claude` may warn until the owner approves or adds the server. A failing `secrets.guard` means `sdlc` is not installed yet (Step 4): an `npm error npx canceled due to missing packages` from `npx --no-install sdlc` means the same, Step 4 was skipped. `doctor` run through `npx -y github:...` reports this correctly too: it ignores the temporary package npx put on its own PATH. `kit.ref` warns when `kit_ref` does not exist in the kit's repository, or when it cannot be checked (no network). Report anything else to the owner instead of hiding it. The checks and their fixes are in "Troubleshooting".
+Each line starts with `✓` (ok), `!` (warning) or `✗` (failure), and a failure exits non-zero. Until the owner finishes Step 7, expect `actions.secret` to fail (`SDLC_TOKEN` is not set) and `mcp.token` to warn (the variable is not exported); `secrets.pushProtection` may warn (no admin rights, or the plan has none) and `mcp.claude` may warn until the owner approves or adds the server. A failing `secrets.guard` means `sdlc` is not installed yet (Step 4): an `npm error npx canceled due to missing packages` from `npx --no-install sdlc` means the same, Step 4 was skipped. `doctor` run through `npx -y github:...` reports this correctly too: it ignores the temporary package npx put on its own PATH. `kit.ref` warns when `kit_ref` does not exist in the kit's repository, or when it cannot be checked (no network). The hook checks warn until things are done that only a person can do: `hooks.<harness>` warns while the launcher is not committed (Step 5), `stack.superpowers` and `stack.graphify` warn until the owner installs them (Step 7), and `mcp.<harness>` can warn until the project is trusted. `hooks.roundtrip` runs the hook code on a command it must refuse and fails when it does not answer as it should; it touches neither GitHub nor your logs. Report anything else to the owner instead of hiding it. The checks and their fixes are in "Troubleshooting".
+
+Doctor cannot tell whether a harness actually runs the hooks. Check that once, in `enforce` mode, from inside the harness: start it in the repository, ask it to run `npx --no-install sdlc config set mode observe --dry-run`, and see it refused with a message that names the rule (`mode-change`). If it prints the dry-run plan instead, the hooks are not running (see "Harness hooks and trust"). The command is safe either way: with `--dry-run` it writes nothing.
 
 ## Step 7: Owner-only steps
 
@@ -234,7 +245,10 @@ Give the owner this list; do not do these yourself and do not ask for any value.
 3. Approve the project's MCP servers when Claude Code asks, and trust the project in Codex (it loads `.codex/config.toml` only for trusted projects).
 4. Run the user-scope commands `init` printed (`mcp.scope: user`), then check them as described in "MCP servers".
 5. Turn on secret scanning push protection if `doctor` warns that it is off (repository settings, Code security).
-6. Install the Superpowers plugin for each harness if `stack.superpowers` is on, and graphify if `stack.graphify` is on (commands under question 11).
+6. Install the Superpowers plugin for each harness if `stack.superpowers` is on, and graphify if `stack.graphify` is on (commands under question 11, including Codex's `/plugins` route).
+7. Trust the project in each harness so that it runs the hooks: Claude Code's workspace trust dialog, Codex's project trust and the `/hooks` review, Gemini CLI's folder trust (see "Harness hooks and trust"). Make sure `.sdlc/hooks/run.sh` is committed and merged.
+8. When the owner works through an agent session under the account the agents use, approve by typing the command as the first line of a prompt (see "Owner, agents and tokens").
+9. When the rules should block instead of warn, switch the mode: `npx --no-install sdlc config set mode enforce` (an owner login only: an agent login is refused, and the hooks refuse an agent that tries), then `npx --no-install sdlc upgrade` so the instruction blocks and hooks match. Commit the result through a task PR. The mode is per checkout: each task worktree reads it from its own `sdlc.config.yaml`, so existing worktrees change mode only once the commit reaches their branch. Run the check at the end of Step 6.
 
 ## Secrets
 
@@ -305,11 +319,36 @@ Limits you must tell the owner:
 `sdlc` has to tell what the owner decided from what an agent wrote. It does that by GitHub login.
 
 - **Agents should write under a separate account**, listed under `agents` in the config (a bot or machine account, or a GitHub App's `<app>[bot]` login). The state comments of the logins in `agents` are trusted like the owners', but their comments never count as an owner approval. A login cannot be both an owner and an agent (config error).
-- **If they do not**, because the agents run `gh` with the owner's own account, an owner's `/approve` comment is written by the same login `sdlc` acts as, and the tool cannot tell it from the agent approving its own work. In `enforce` mode it is refused ("authored by the agent's own login"); in `observe` mode it is recorded as `unverified`. The same happens in `enforce` when the tool's login cannot be read (an Actions `GITHUB_TOKEN` or an App token) and `agents` is empty: owner comments are refused as indistinguishable. `doctor` warns about that case (`approvals.trust`, in `enforce` mode with `stack.actions` on and `agents` empty).
+- **If they do not**, because the agents run `gh` with the owner's own account, an owner's `/approve` comment is written by the same login `sdlc` acts as, and the tool cannot tell it from the agent approving its own work. In `enforce` mode it is refused ("authored by the agent's own login"); in `observe` mode it is recorded as `unverified`. The way out for an owner who uses one login is the **prompt approval**: type the command as the first non-empty line of a prompt in the agent session (`/approve`, `/accept`, `/ran` or `/cancel <reason>`). The prompt hook sees what the human typed, not what the agent did, and records it on the task of the current branch as an approval from the prompt. With a single owner it is recorded for that owner whichever login `gh` runs as; with several owners, the login `gh` runs as must be one of them. `/approve` covers the current phase; the other commands apply to the task. The prompt text is never stored, only a hash. A subagent's prompt is ignored, a quoted or later line is not a command, and `/approve type <id>` still needs a comment. A prompt approval is only as good as the hook: see "Harness hooks and trust" and the threat model for what an agent with a shell can still forge. The same happens in `enforce` when the tool's login cannot be read (an Actions `GITHUB_TOKEN` or an App token) and `agents` is empty: owner comments are refused as indistinguishable. `doctor` warns about that case (`approvals.trust`, in `enforce` mode with `stack.actions` on and `agents` empty).
 - **The workflow token.** The reconcile workflow reads the secret `SDLC_TOKEN` (set with `gh secret set SDLC_TOKEN`) and fails with a message when it is missing. Use a token with the scopes `repo` and `project` for an account that can write to the repository and the board. The Actions-provided `GITHUB_TOKEN` is not enough for the board. Make that account the one listed under `agents`, not the owner's: with the owner's token the workflow runs as the owner, and in `enforce` mode the owner's own `/approve` comments are then refused as the tool's login. The workflow installs the kit in a step without the token, pins its actions by commit SHA and skips Dependabot runs.
 - **Actions minutes.** The workflow also runs every hour. On a private repository each run counts against the account's Actions minutes (on a public repository it is free): roughly 720 short runs a month, each billed as at least one minute. Tell the owner; to save minutes, lower the frequency in the `cron:` line, keeping at least one run per `reconcile.closed_lookback_days`.
 
 In short: owner decides under the owner login; agents and the workflow act under the agent account listed in `agents`.
+
+## Harness hooks and trust
+
+`init` and `upgrade` write the harness hooks for each configured harness: Claude Code (`.claude/settings.json`), Codex (`.codex/hooks.json`) and Gemini CLI (`.gemini/settings.json`); `agents-md` has none. Each runs the launcher `.sdlc/hooks/run.sh <harness> <event>` on session start, on every prompt and before every tool call. The launcher runs `sdlc hook <harness> <event>` (the `sdlc` on the PATH, or `npx --no-install sdlc`), prints its answer and always exits 0. What the hooks do:
+
+- Session start tells the agent which task its branch has, and starts `sdlc sync` in the background when something is queued.
+- Every prompt is read for the owner's first-line command (see "Owner, agents and tokens").
+- Before a tool call, `enforce` blocks and `observe` only warns, and both record a gap on the task, for: a file edit before the plan is approved (docs, `*.md`, debugging repro and task types without a planning phase are excepted; in `enforce` the agent may not edit `sdlc.config.yaml`, `.git`, `.sdlc/` apart from `.sdlc/agents/custom/`, or the harness settings: `.claude/settings.json`, `.claude/settings.local.json`, `.codex/hooks.json`, `.codex/config.toml` and `.gemini/settings.json` at any depth, `.mcp.json` at the root, and the same files plus `.claude.json` in the home directory), a subagent without a role and model tier, `gh pr merge --admin`, another AI CLI (`claude`, `codex`, `gemini`, `aider`, and the like; `--version` and `mcp`, `plugin` or `extensions` `list` are allowed), `--no-verify`, turning the git hooks off through git config (`core.hooksPath`, `include.path`), force pushes, `git worktree prune` and forced `git worktree remove`, `rm -rf`, `sdlc config set`, `sdlc uninstall` and `sdlc init --overwrite-modified` (`kit-removal`; `--dry-run` of uninstall and `sdlc upgrade` are allowed) and running the hooks by hand. Running `sdlc hook` or the launcher by hand, and `kit-removal`, block in both modes.
+- **The hooks fail open.** Any error of their own (no `sdlc` found, GitHub unreachable, a malformed payload, a timeout) lets the action through, with one line `sdlc: hook skipped: <reason>` on stderr. A hook is a guardrail for an agent that follows the rules, not a wall against one that does not: the threat model (`docs/threat-model.md`) lists what it does not stop.
+
+**Commit the launcher.** The settings files find it through `git rev-parse --show-toplevel` (Claude Code's first changes to `$CLAUDE_PROJECT_DIR`), so a clone or a new worktree runs the hooks only when `.sdlc/hooks/run.sh` is committed, with mode 100755. Without it the command exits 127, the harness shows an error, and nothing is checked. `doctor` (`hooks.<harness>`) warns when it is not committed or not executable (`git update-index --chmod=+x .sdlc/hooks/run.sh` fixes the mode). A worktree made before the launcher was merged needs the branch updated first. The hook commands also need git 2.31 or later (`doctor` checks `git.version`).
+
+**Trust, per harness.** Each harness loads project hooks only after a person says the project may be trusted. The owner does this once per machine and project; nothing in the repository can do it for them.
+
+- **Claude Code:** holds hooks back until the workspace trust dialog is accepted, the first time it starts in the project. In print mode (`claude -p`) and the SDK the folder counts as trusted. Edits to the settings are picked up while it runs.
+- **Codex:** needs the project trusted, and then each hook reviewed: start `codex` in the repository, trust the project, run `/hooks` and approve the sdlc hooks. A new or changed hook is skipped until it is reviewed again, so `upgrade` can require a new review. `--dangerously-bypass-hook-trust` runs hooks without review, which is the owner's call, not the agent's. Codex's own documentation calls its hooks "a useful guardrail, not a complete enforcement boundary".
+- **Gemini CLI:** loads project hooks only in a trusted folder: start `gemini` in the repository and trust it (decisions are kept in `~/.gemini/trustedFolders.json`). A headless run (`gemini -p`, CI) needs `--skip-trust` or `GEMINI_CLI_TRUST_WORKSPACE=true`, or it stops with an untrusted-workspace error. Gemini only warns once about a project hook it has not seen, then runs it. On Windows, Gemini runs hooks through PowerShell and the sdlc hooks need a POSIX shell, so they are not supported there (`doctor` warns).
+
+**Switches.** Each harness can turn all hooks off: `disableAllHooks` in Claude Code settings, `[features] hooks = false` in the Codex config, `hooksConfig.enabled: false` (or the sdlc hooks listed in `hooksConfig.disabled`) in Gemini CLI settings. `doctor` (`hooks.switches`) reads them in the project files (failure in `enforce`, warning in `observe`) and in your own home directory (warning only).
+
+`doctor` cannot read a harness's trust state (the `hooks.codex` line only reminds you), so a harness whose project is not trusted still looks installed. Use the check at the end of Step 6 in each harness the team uses.
+
+**Worktrees.** One worktree per task keeps edits out of the main checkout: `npx --no-install sdlc worktree start <issue>` creates `.worktrees/<issue>-<slug>` on the branch `task/<issue>-<slug>` from the freshly fetched default branch (`--dry-run` shows the plan). After the merge, run `npx --no-install sdlc worktree finish <issue>` from the main checkout, never from inside the worktree. It refuses while the worktree has uncommitted or untracked changes or an ignored `.env` or `.env.*` file, or when no pull request of the task has merged. Other ignored files, such as `node_modules` and build output, are deleted with the worktree. It fast-forwards the default branch when the main checkout is clean and on it, then runs `git worktree remove` and `git branch -d`, never forced. `sdlc status` lists orphan worktrees and `doctor` (`worktrees.orphans`) warns about them.
+
+**Offline.** When GitHub cannot be reached, the commands an agent needs to keep working are queued instead of failing: `stage start`, `stage publish`, `evidence add`, `review handoff`, `approve` and `task checkpoint`. A queued command prints ``queued for `sdlc sync` (GitHub unreachable): sdlc ...`` and exits 0. The queue is `.sdlc/cache/outbox.jsonl` in the main checkout (git ignores it), shared by all worktrees. The gaps recorded by the hooks wait in `.sdlc/cache/gaps.jsonl` and go into the task's state comment on the next sync (the newest 20 are kept). A gap belongs to a task: one logged where no task exists is dropped by the sync. Run `npx --no-install sdlc sync` when GitHub is back: it replays the queue in order (`--dry-run` only lists it) and exits 0 when it is done, 75 when GitHub is still unreachable (what is left stays queued), and 1 when a command failed for good (it moves to `.sdlc/cache/outbox-failed.jsonl` for the owner to look at). Session start runs a sync in the background, and `sdlc status` shows `Queued for sync: <n> write(s), <m> gap(s)`; `doctor` (`outbox.pending`) warns when writes are queued or failed. `task new` and `deploy record` are never queued: run them again once GitHub is back. With `SDLC_NO_QUEUE=1` a command that cannot reach GitHub exits 75 and queues nothing. A command that half-succeeded before the connection dropped can post its comment twice when it is replayed.
 
 ## MCP servers
 
@@ -344,7 +383,14 @@ Role files are templates: `{{...}}` is filled in when the file is rendered. To w
 | `kit.ref` | `kit_ref` does not exist in the kit's repository, so the generated `npx -y github:...#<kit_ref>` commands fail: set it to `main` or the ref you installed from. "cannot verify" means `git ls-remote` could not reach GitHub |
 | `board.fields`, `labels` | no board number in the config, or fields, options or views missing: `sdlc board ensure`; labels missing: `sdlc init`. A view the API cannot create is a warning and a manual step |
 | `actions.workflow`, `actions.secret` | the workflow file is missing (`sdlc init`) or `SDLC_TOKEN` is not set (`gh secret set SDLC_TOKEN`); without admin rights the secret cannot be checked and `doctor` only warns |
-| `mcp.token`, `mcp.claude` | export `GITHUB_PERSONAL_ACCESS_TOKEN` from the OS keystore in the shell profile ("Secrets"); approve or add the MCP server |
+| `mcp.token`, `mcp.<harness>` | export `GITHUB_PERSONAL_ACCESS_TOKEN` from the OS keystore in the shell profile ("Secrets"); `mcp.claude`, `mcp.codex` and `mcp.gemini` warn when `<harness> mcp list` does not show the configured servers: approve or add the server, and trust the project in Codex and Gemini |
+| `git.version` | git is older than 2.31, which the hooks and worktrees need: upgrade git |
+| `hooks.<harness>` | the settings file has no sdlc hook (`sdlc upgrade`), or `.sdlc/hooks/run.sh` is missing, not committed or not mode 100755: commit it, or `git update-index --chmod=+x .sdlc/hooks/run.sh`. When all is well, the Codex line adds that Codex runs the hooks only after you trust the project and approve them in `/hooks`. Gemini on Windows is a warning: not supported |
+| `hooks.switches` | a setting turns the hooks of a configured harness off: `disableAllHooks: true` in `.claude/settings.json` or `.claude/settings.local.json`, `hooksConfig.enabled: false` or an sdlc hook in `hooksConfig.disabled` in `.gemini/settings.json`, `hooks = false` (or `codex_hooks`) under `[features]` in `.codex/config.toml`. In the project it fails in `enforce` and warns in `observe`; in your home directory (`~/...`) it only warns. Remove the setting |
+| `hooks.roundtrip` | the hook code does not refuse `gh pr merge 1 --admin` as it should (failure): `sdlc upgrade`, then reinstall `sdlc` if it persists; do not rely on the hooks until it passes |
+| `stack.superpowers`, `stack.graphify` | a plugin or tool of the stack is not installed (warning): run the commands under question 11 |
+| `outbox.pending` | writes are queued or failed: `sdlc sync` (see "Harness hooks and trust") |
+| `worktrees.orphans` | a worktree under `.worktrees` that no live task needs: `sdlc worktree finish <issue>` for a done task, `git worktree remove <path>` for the others; "not checked" means GitHub could not be read |
 | `secrets.pushProtection` | enable secret scanning and push protection; a plan or account without admin rights cannot, and the local guard still works |
 | `secrets.trackedFiles` | a tracked file has a secret-looking name: `git rm --cached <file>`, rotate the secret, or allow its fingerprint |
 | `approvals.trust` | see "Owner, agents and tokens" |
@@ -354,3 +400,4 @@ Other limits:
 - Branch protection: `init` sets classic branch protection (a pull request is required, no approvals, no force pushes or deletions) and only when the branch has none. A repository that uses rulesets keeps its own rules: check them there, `init` does not read them.
 - A plan or account that cannot have branch protection or push protection (a free private repository, or a token without admin rights) is reported by `init` as unavailable, and `init` goes on.
 - `init` and `upgrade` write only inside the repository. User-scope MCP commands and the keystore are the owner's to run.
+- The harness hooks are a guardrail, not a security boundary, and they fail open. `docs/threat-model.md` lists what the layers guarantee and what an agent with a shell can still do. `sdlc: hook skipped: ...` on stderr means a hook did not run for that call; exit 127 on a hook command means the launcher is missing from that checkout or the command ran outside a git repository.

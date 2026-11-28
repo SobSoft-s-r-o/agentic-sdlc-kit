@@ -62,7 +62,15 @@ sdlc approve <issue> ran --comment-url <url>
 sdlc approve <issue> cancel --reason "<why>" --comment-url <url>
 ```
 
-`approve` approves a published phase (default: the current one), `accept` accepts the published result of an analysis, spike or artifact, `ran` confirms the owner ran a production-data script, `cancel` ends the task. If the owner says yes in chat, ask them to post the command as a comment. Never post it yourself, and never record an approval the owner did not give; `--unverified` exists only for observe mode and marks the record unverified.
+`approve` approves a published phase (default: the current one), `accept` accepts the published result of an analysis, spike or artifact, `ran` confirms the owner ran a production-data script, `cancel` ends the task. If the owner says yes in chat without the command, ask them to type it as the first line of their next prompt, or to post it as a comment. Never post it yourself, and never record an approval the owner did not give; `--unverified` exists only for observe mode and marks the record unverified.
+
+### Approval typed in a prompt
+
+The owner may give the command as the first non-empty line of a prompt in your session: `/approve`, `/accept`, `/ran` or `/cancel <reason>` (a quoted command, or one further down, is not one). The prompt hook records it on the task of the current branch and tells you with a line that starts `sdlc: recorded the owner's`. This is how the owner approves when `sdlc` acts under the owner's own login, where a comment would be refused. `/approve` covers the current phase; `/approve type <id>` needs a comment.
+
+- Only the prompt hook records these. Never type, quote or post an owner command, and never run `sdlc hook` or `.sdlc/hooks/run.sh`: that is a hook spoof, blocked in every mode.
+- The prompt text is not stored, only its hash. A prompt delivered twice is one approval (Claude Code, Codex; Gemini has no prompt id).
+- If the hook says it did not record the approval (no task on the branch, GitHub unreachable, several owners), tell the owner what it printed and ask for a comment.
 
 ## 4. Evidence before review
 
@@ -95,3 +103,19 @@ sdlc reconcile [--issue <n>] [--dry-run]
 ## 7. Keep issues readable
 
 The issue is for people. Each stage result is one concise comment in this order: Goal, Decision, Alternatives, Scope, Criteria, Approval. Use short sentences and links to PRs and files. Never paste logs, stack traces, diffs or tool output; summarise in a line and link to where it lives. Do not repeat the machine state in comments. Write in `{{contentLanguage}}`.
+
+## 8. Gaps, offline work and `sync`
+
+The harness hooks check each of your tool calls against the rules. In enforce mode a violation is blocked and the block names the rule: fix the cause, never work around it. In observe mode the hook warns you (the warning starts with "sdlc (observe)") and lets the call through. Either way it records a gap on the task: the rule, the text, the harness and whether it was blocked. The state comment keeps the 20 newest gaps. A gap is a rule you broke: follow the rule anyway.
+
+Gaps are first written to `.sdlc/cache/gaps.jsonl`, and a task command that cannot reach GitHub is queued in `.sdlc/cache/outbox.jsonl` of the main checkout. Both wait for `sdlc sync`:
+
+```
+sdlc sync [--dry-run]
+```
+
+A session start and `sdlc status` print `Queued for sync: <n> write(s), <m> gap(s)` when something waits; the session start also starts a sync in the background. When the line says to run `sdlc sync`, run it.
+
+- It replays only `stage start`, `stage publish`, `evidence add`, `review handoff`, `approve` and `task checkpoint`, even if a line of the queue file says otherwise. `task new` and `deploy record` are never queued: run them again when GitHub is back.
+- Exit 0: done, nothing queued, or another sync is already running. Exit 75: GitHub is still unreachable and what is left stays queued. Exit 1: a command failed for good and moved to `.sdlc/cache/outbox-failed.jsonl`; tell the owner.
+- A queued command runs later against the current state, so a command that half-succeeded before the connection dropped can post its comment twice.

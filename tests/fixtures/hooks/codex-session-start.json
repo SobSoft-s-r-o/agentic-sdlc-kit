@@ -1,0 +1,8 @@
+{
+  "session_id": "thr_123",
+  "cwd": "/work/proj",
+  "hook_event_name": "SessionStart",
+  "model": "gpt-5",
+  "permission_mode": "default",
+  "source": "resume"
+}

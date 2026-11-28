@@ -1,7 +1,9 @@
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import type { Command } from 'commander';
 import { ConfigValidationError, loadConfig } from '../config/schema.js';
+import { setConfigMode, type ConfigMode } from '../config/write.js';
+import { includesLogin, isOwner } from '../core/approvals.js';
 import type { GhRunner } from '../github/gh.js';
 import { detectConfig, probeRepo } from '../install/detect.js';
 import { errorAsJson, formatCliError } from './errors.js';
@@ -14,8 +16,10 @@ export interface ConfigCommandContext {
   run: GhRunner;
   /** Where the repository's files are read from (`probeRepo`). */
   repoRoot: string;
-  /** The config file `validate` reads and `suggest --write` creates. */
+  /** The config file `validate` reads, `suggest --write` creates and `set` edits. */
   configPath: string;
+  /** The GitHub login the tool runs as; `undefined` when GitHub cannot say (see `authenticatedLogin`). */
+  login: () => Promise<string | undefined>;
   out: (text: string) => void;
   err: (text: string) => void;
 }
@@ -93,9 +97,66 @@ async function suggest(
   if (write) ctx.err(written ? `Wrote ${name}` : `Would write ${name}`);
 }
 
-/** Registers `sdlc config validate` and `sdlc config suggest`. */
+const SETTABLE_MODES: readonly ConfigMode[] = ['observe', 'enforce'];
+
+/** Each checkout reads the mode from its own copy of the config, so a change reaches a task worktree only through git. */
+const PER_CHECKOUT_NOTE =
+  'Commit and push sdlc.config.yaml: existing task worktrees and new ones read the mode from their own checkout.';
+
+/**
+ * `sdlc config set mode <observe|enforce> [--dry-run]`: owners only. Edits the one line in
+ * `sdlc.config.yaml`, so its comments and layout stay. A config that does not load is refused with
+ * the usual load error (this command does not repair one).
+ */
+async function setMode(
+  ctx: ConfigCommandContext,
+  key: string,
+  value: string,
+  options: { dryRun?: boolean; json?: boolean },
+): Promise<void> {
+  if (key !== 'mode') throw new Error('only "mode" can be set');
+  if (!SETTABLE_MODES.includes(value as ConfigMode)) {
+    throw new Error(`mode must be observe or enforce, got "${value}"`);
+  }
+  const mode = value as ConfigMode;
+  const cfg = loadConfig(ctx.configPath);
+
+  const login = await ctx.login();
+  if (login === undefined) throw new Error("cannot confirm the owner's GitHub login; run gh auth login");
+  if (includesLogin(cfg.agents, login)) {
+    throw new Error(`config set must be run by an owner; ${login} is listed in agents`);
+  }
+  if (!isOwner(cfg.owners, login)) {
+    throw new Error(`config set must be run by an owner (owners: ${cfg.owners.join(', ')})`);
+  }
+
+  const dryRun = options.dryRun === true;
+  const changed = cfg.mode !== mode;
+  const written = changed && !dryRun;
+  if (written) {
+    writeFileSync(ctx.configPath, setConfigMode(readFileSync(ctx.configPath, 'utf8'), mode).text);
+  }
+  if (options.json) {
+    ctx.out(
+      JSON.stringify(
+        { mode, previous: cfg.mode, changed: written, dryRun, path: ctx.configPath, ...(written ? { note: PER_CHECKOUT_NOTE } : {}) },
+        null,
+        2,
+      ),
+    );
+  } else if (!changed) {
+    ctx.out(`mode is already ${mode}`);
+  } else if (dryRun) {
+    ctx.out(`mode: ${cfg.mode} -> ${mode} (dry run: nothing written)`);
+  } else {
+    ctx.out(`mode: ${cfg.mode} -> ${mode}. Run \`sdlc upgrade\` so the instructions and hooks match.`);
+    ctx.out(PER_CHECKOUT_NOTE);
+  }
+}
+
+/** Registers `sdlc config validate`, `sdlc config suggest` and `sdlc config set`. */
 export function registerConfigCommand(program: Command, makeContext: ConfigContextFactory): void {
-  const config = program.command('config').description('Check or suggest sdlc.config.yaml');
+  const config = program.command('config').description('Check, suggest or change sdlc.config.yaml');
   config
     .command('validate')
     .description('Check sdlc.config.yaml; prints "Config OK" or the issues (exit 1)')
@@ -111,5 +172,15 @@ export function registerConfigCommand(program: Command, makeContext: ConfigConte
     .option('--json', 'print machine-readable JSON')
     .action((options: { write?: boolean; dryRun?: boolean; json?: boolean }) =>
       runConfigAction(makeContext, options, ctx => suggest(ctx, options)),
+    );
+  config
+    .command('set')
+    .description('Set a config value (owners only; only "mode" can be set): sdlc config set mode <observe|enforce>')
+    .argument('<key>', 'the setting to change; only "mode"')
+    .argument('<value>', 'observe or enforce')
+    .option('--dry-run', 'report the change, write nothing')
+    .option('--json', 'print machine-readable JSON')
+    .action((key: string, value: string, options: { dryRun?: boolean; json?: boolean }) =>
+      runConfigAction(makeContext, options, ctx => setMode(ctx, key, value, options)),
     );
 }

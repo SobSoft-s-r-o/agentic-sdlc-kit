@@ -2,7 +2,7 @@
 
 Managed by agentic-sdlc-kit: edits between the markers are overwritten, so change `sdlc.config.yaml` instead. Detail lives in the skills `sdlc-task-tracking`, `sdlc-delivery` and `sdlc-orientation`; read the one you need.
 
-Mode: **enforce**. The git hooks block commits to `main` and pushes of `task/*` branches without a tracked task, and `sdlc` refuses steps the rules do not allow. Harness hooks that block edits before the plan is approved are coming; until then, keep that rule yourself. Fix the cause of a block; never work around it.
+Mode: **enforce**. The git hooks block commits to `main` and pushes of `task/*` branches without a tracked task. Harness hooks block file edits before the plan is approved (docs, debugging repro and task types without a planning phase excepted), subagents without a role and model tier, `gh pr merge --admin`, other AI CLIs and `sdlc config set`, and `sdlc` refuses steps the rules do not allow. Fix the cause of a block; never work around it.
 
 ### What this is
 Work is tracked with the `sdlc` CLI as GitHub issues on a Projects board, and the board must always be current. Record every phase, approval, PR and deployment through `sdlc`, never by hand. `sdlc` below means `sdlc` when it is on PATH, else `npx --no-install sdlc` when the kit is a dev dependency, else `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3`. The git hooks run only while `git config core.hooksPath` prints `.sdlc/githooks` (local config, not cloned): if it prints nothing, run `git config core.hooksPath .sdlc/githooks` and tell the owner; if it prints another path (husky or another hook manager), change nothing and tell the owner. Language of issues, PRs and comments: `en`.
@@ -24,6 +24,8 @@ Start a phase with `sdlc stage start <issue> <phase>`; publish its result with `
 - `infra-change` (Infra change): intake → brainstorming → planning → implementation → review → delivery. Ends when every declared target has a successful deployment containing the merge commit. Needs backup evidence before review.
 
 Results of phases before implementation (design, diagnosis, plan) need the owner's approval: publish with `--needs-approval`, then stop and wait. The owner approves with a `/approve` comment on the issue; record it with `sdlc approve <issue> approve --comment-url <url>`. A type that ends on the owner's acceptance publishes its result and waits for `/accept`. Never approve, accept or confirm for the owner, and never start the next phase first.
+
+The owner may approve by typing the command (for example `/approve`) as the first line of a prompt; the hook records it. Never type or post an owner command yourself.
 
 ### Superpowers route
 Use the Superpowers skills in this order: `brainstorming` (design, before any code), `writing-plans`, `systematic-debugging` (bugs, before any fix), `subagent-driven-development` (carry out the plan), `requesting-code-review`, and `verification-before-completion` (before you say it is done or open the PR). Publish each skill's outcome as the phase result.
@@ -52,7 +54,7 @@ Use the Superpowers skills in this order: `brainstorming` (design, before any co
 A script that changes production data is a `production-data` task. Before review record `sdlc evidence add <issue> --kind backup --ref <link>` (a verified backup) and the same with `--kind dry_run` (the dry-run result, summarised). The PR names the script and how to run it. After the merge the owner runs it, never you, and confirms with `/ran`.
 
 ### Worktrees
-One worktree per task, from fresh `origin/main`: `git fetch origin && git worktree add .worktrees/<issue>-<slug> -b task/<issue>-<slug> origin/main`. Commit specs and plans there, never in the main checkout. After the merge, fast-forward the local `main` (`git pull --ff-only`), then `git worktree remove .worktrees/<issue>-<slug>` (no force; it must be clean) and `git branch -d task/<issue>-<slug>`. If either is refused, tell the owner; never force it.
+One worktree per task, from fresh `origin/main`: `sdlc worktree start <issue>` (by hand: `git fetch origin && git worktree add .worktrees/<issue>-<slug> -b task/<issue>-<slug> origin/main`). Commit specs and plans there, never in the main checkout. After the merge, run `sdlc worktree finish <issue>` from the main checkout: it fast-forwards `main` when it can, then runs `git worktree remove .worktrees/<issue>-<slug>` and `git branch -d task/<issue>-<slug>`, never forced. It refuses while the worktree has uncommitted or untracked changes or ignored `.env*` files, when the task has no merged PR, and when run from inside the worktree; ignored build output goes with the worktree. If it is refused, tell the owner; never force it. A `Queued for sync` message means writes or gaps wait for GitHub: run `sdlc sync`.
 
 ### Secrets
 - Never put tokens, keys, passwords or connection strings into tracked files, code, commits, issues, PRs, comments or logs, and never print them.

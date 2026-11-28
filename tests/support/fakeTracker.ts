@@ -226,7 +226,13 @@ export class FakeTracker implements Tracker {
     const body = renderStateComment(state);
     const existing = this.findStateComment(issue);
     if (existing && this.concurrentWrites.delete(issue)) existing.updatedAt = this.tick();
-    if (expected && (!existing || existing.id !== expected.id || existing.updatedAt !== expected.updatedAt)) {
+    if (
+      expected &&
+      (!existing ||
+        existing.id !== expected.id ||
+        existing.updatedAt !== expected.updatedAt ||
+        existing.body.trim() !== expected.body.trim())
+    ) {
       throw new StateChangedError(issue);
     }
     if (existing) {
@@ -468,6 +474,7 @@ export class FakeTracker implements Tracker {
       state,
       stateCommentId: stateComment.id,
       stateCommentUpdatedAt: stateComment.updatedAt,
+      stateCommentBody: stateComment.body,
     };
   }
 }
