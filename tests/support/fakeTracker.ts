@@ -5,6 +5,7 @@ import {
   StateCommentError,
 } from '../../src/core/stateComment.js';
 import type { BoardFields } from '../../src/core/projection.js';
+import { ACTIONS_BOT, trustedLogins } from '../../src/core/trust.js';
 import type { TaskState } from '../../src/core/types.js';
 import {
   NoStateCommentError,
@@ -52,10 +53,7 @@ export type FakeDeployment = DeploymentInfo & { target?: string; description?: s
 const CLOCK_START = Date.UTC(2026, 0, 1);
 const MINUTE = 60_000;
 
-/** The login the Actions runner comments as; its state comments count like the tracker's own. */
-const ACTIONS_BOT = 'github-actions[bot]';
-
-const toPrInfo = ({ number, url, merged, mergeSha, mergedAt, baseRef, body }: FakePr): PrInfo => ({
+const toPrInfo = ({ number, url, merged, mergeSha, mergedAt, baseRef, body, bodyEditedAt }: FakePr): PrInfo => ({
   number,
   url,
   merged,
@@ -63,6 +61,7 @@ const toPrInfo = ({ number, url, merged, mergeSha, mergedAt, baseRef, body }: Fa
   ...(mergedAt !== undefined && { mergedAt }),
   baseRef,
   body,
+  ...(bodyEditedAt !== undefined && { bodyEditedAt }),
 });
 
 const maxOf = (numbers: number[]): number => numbers.reduce((max, n) => Math.max(max, n), 0);
@@ -72,8 +71,10 @@ const maxOf = (numbers: number[]): number => numbers.reduce((max, n) => Math.max
  * it directly. Task state is stored as the real hidden state comment, so the fake exercises the
  * same render/parse format as production. All timestamps come from one fake clock that advances
  * one minute per use, starting at 2026-01-01T00:01:00.000Z. As in production, only a state-marker
- * comment written by `login`, one of `owners` or `agents`, or the Actions bot (compared case-insensitively) holds
- * state, and when several do, the one updated last is the state; anyone else's is an ordinary comment.
+ * comment written by `login` (when it is defined), one of `owners` or `agents`, or the Actions bot
+ * (compared case-insensitively) holds state, and when several do, the one updated last is the state;
+ * anyone else's is an ordinary comment. With `login` undefined, as with the Actions `GITHUB_TOKEN`, the
+ * tracker comments as the Actions bot and no state comment is trusted on its account.
  */
 export class FakeTracker implements Tracker {
   issues: FakeIssue[] = [];
@@ -90,8 +91,12 @@ export class FakeTracker implements Tracker {
   defaultBranchShas = new Set<string>();
   /** Mutating calls that were attempted and not failed by `failNext`; reads are not counted. */
   writes = 0;
-  /** Author of the comments the tracker itself posts. */
-  login = 'sdlc-bot';
+  /**
+   * Author of the comments the tracker itself posts, and the answer of `authenticatedLogin`. `undefined`
+   * is a token that may not read its login (the Actions `GITHUB_TOKEN`): the tracker then comments as
+   * `github-actions[bot]`, and its own login vouches for no state comment.
+   */
+  login: string | undefined = 'sdlc-bot';
   /** The configured owners; their state comments are trusted as well. */
   owners: string[] = [];
   /** The configured agent logins; their state comments are trusted as well. */
@@ -147,7 +152,7 @@ export class FakeTracker implements Tracker {
       onBoard: options.onBoard ?? true,
       ...(options.updatedAt !== undefined && { updatedAt: options.updatedAt }),
     });
-    this.comments.push(this.newComment(state.issue, renderStateComment(state), this.login));
+    this.comments.push(this.newComment(state.issue, renderStateComment(state), this.ownAuthor));
   }
 
   /** Adds a comment on an issue or PR, bypassing the `Tracker` interface; returns its id. */
@@ -161,7 +166,7 @@ export class FakeTracker implements Tracker {
     return created.id;
   }
 
-  /** Always `login`; a failure can be injected like any other call. */
+  /** Always `login`, which may be `undefined`; a failure can be injected like any other call. */
   async authenticatedLogin(): Promise<string | undefined> {
     this.begin('authenticatedLogin');
     return this.login;
@@ -238,13 +243,13 @@ export class FakeTracker implements Tracker {
     if (existing) {
       existing.body = body;
       existing.updatedAt = this.tick();
-    } else this.comments.push(this.newComment(issue, body, this.login));
+    } else this.comments.push(this.newComment(issue, body, this.ownAuthor));
   }
 
   async postComment(issue: number, body: string): Promise<PostedComment> {
     this.begin('postComment', true);
     this.requireThread(issue);
-    const comment = this.newComment(issue, body, this.login);
+    const comment = this.newComment(issue, body, this.ownAuthor);
     this.comments.push(comment);
     return { id: comment.id, createdAt: comment.createdAt };
   }
@@ -363,6 +368,11 @@ export class FakeTracker implements Tracker {
     if (mutating) this.writes += 1;
   }
 
+  /** Who the tracker's own comments are by: its login, or the Actions bot when it has none. */
+  private get ownAuthor(): string {
+    return this.login ?? ACTIONS_BOT;
+  }
+
   private tick(): string {
     this.clock += 1;
     return new Date(this.clockStart + this.clock * MINUTE).toISOString();
@@ -414,7 +424,7 @@ export class FakeTracker implements Tracker {
    * agent or the Actions bot, in any letter case), the one updated last; the newer id wins a tie.
    */
   private findStateComment(issue: number): FakeComment | undefined {
-    const trusted = new Set([this.login, ...this.owners, ...this.agents, ACTIONS_BOT].map(name => name.toLowerCase()));
+    const trusted = trustedLogins({ owners: this.owners, agents: this.agents }, this.login);
     return this.comments
       .filter(
         c =>

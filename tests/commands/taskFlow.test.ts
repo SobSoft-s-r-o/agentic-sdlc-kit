@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyApproval, approve, registerApproveCommand } from '../../src/commands/approve.js';
+import { applyApproval, approve, assertPrSpeaksFor, registerApproveCommand, unverifiedAt } from '../../src/commands/approve.js';
 import {
   loadTask,
   parseChoice,
@@ -23,6 +23,7 @@ import {
   taskSetType,
 } from '../../src/commands/task.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
+import { ApprovalRefusedError } from '../../src/core/approvals.js';
 import { STATE_MARKER } from '../../src/core/stateComment.js';
 import { renderStageSummary } from '../../src/core/summary.js';
 import { reconcile } from '../../src/engine/reconcile.js';
@@ -459,18 +460,22 @@ describe('stagePublish', () => {
     it('posts as before when the tracker has no login to match comments to', async () => {
       const h = setup();
       const { issue, file } = await publishFailingAfterPost(h);
-      h.tracker.authenticatedLogin = async () => undefined;
+      // The token cannot read its login (the Actions GITHUB_TOKEN): the state it wrote earlier now
+      // stands as the Actions bot's, which vouches for it where the unknown login cannot.
+      h.tracker.comments.find(c => c.body.startsWith(STATE_MARKER))!.author = 'github-actions[bot]';
+      h.tracker.login = undefined;
 
       await stagePublish(h.ctx, issue, 'planning', { file, needsApproval: true });
 
       expect(visibleComments(h.tracker, issue)).toHaveLength(2);
+      expect(visibleComments(h.tracker, issue).map(c => c.author)).toEqual(['sdlc-bot', 'github-actions[bot]']);
       expect((await stateOf(h.tracker, issue)).stages.planning?.revision).toBe(1);
     });
 
     it('matches the login in any letter case', async () => {
       const h = setup();
       const { issue, file } = await publishFailingAfterPost(h);
-      h.tracker.login = h.tracker.login.toUpperCase();
+      h.tracker.login = h.tracker.login!.toUpperCase();
 
       await stagePublish(h.ctx, issue, 'planning', { file, needsApproval: true });
 
@@ -754,6 +759,52 @@ describe('taskSetType', () => {
       expect((await stateOf(h.tracker, issue)).type).toBe('feature');
     });
 
+    describe("compares the comment with GitHub's time of the last change, not the local clock", () => {
+      it('accepts a comment posted after the last write when the local clock runs ahead of GitHub', async () => {
+        // setup(): the tracker's clock is at 2026-05-15, the local clock at 2026-06-01, so the state's
+        // own `updatedAt` (local) is 17 days past GitHub's stamp of the same write.
+        const h = setup(enforceCfg);
+        const issue = await newTask(h, 'feature');
+        const written = (await h.tracker.getTask(issue)).stateCommentUpdatedAt;
+        const commentAt = '2026-05-20T00:00:00.000Z';
+        expect(Date.parse(commentAt)).toBeGreaterThan(Date.parse(written));
+        expect(Date.parse(commentAt)).toBeLessThan(Date.parse((await stateOf(h.tracker, issue)).updatedAt));
+        const url = ownerComment(h.tracker, issue, commentAt, { body: APPROVE_TOOLING });
+
+        const state = await taskSetType(h.ctx, issue, 'tooling', { commentUrl: url });
+
+        expect(state.type).toBe('tooling');
+        expect(state.typeChanges).toMatchObject([{ ref: url, source: 'comment' }]);
+      });
+
+      it('refuses a comment posted before the last write when the local clock runs behind GitHub', async () => {
+        const h = setup(enforceCfg);
+        const behind: CommandContext = { ...h.ctx, now: () => '2026-04-01T00:00:00.000Z' };
+        const issue = await newTask({ ...h, ctx: behind }, 'feature');
+        const { state, stateCommentUpdatedAt } = await h.tracker.getTask(issue);
+        const commentAt = '2026-04-15T00:00:00.000Z';
+        expect(Date.parse(commentAt)).toBeGreaterThan(Date.parse(state.updatedAt));
+        expect(Date.parse(commentAt)).toBeLessThan(Date.parse(stateCommentUpdatedAt));
+        const url = ownerComment(h.tracker, issue, commentAt, { body: APPROVE_TOOLING });
+
+        await expect(taskSetType(behind, issue, 'tooling', { commentUrl: url })).rejects.toThrow(
+          `comment ${url} at ${commentAt} is not newer than the task's last change at ${stateCommentUpdatedAt}`,
+        );
+        expect((await stateOf(h.tracker, issue)).type).toBe('feature');
+      });
+
+      it("falls back to the state's own time when the tracker gives no usable one", async () => {
+        const h = setup(enforceCfg);
+        const issue = await newTask(h, 'feature');
+        const real = h.tracker.getTask.bind(h.tracker);
+        h.tracker.getTask = async n => ({ ...(await real(n)), stateCommentUpdatedAt: '' });
+        const url = ownerComment(h.tracker, issue, BEFORE, { body: APPROVE_TOOLING });
+        await expect(taskSetType(h.ctx, issue, 'tooling', { commentUrl: url })).rejects.toThrow(
+          /is not newer than the task's last change at 2026-06-01/,
+        );
+      });
+    });
+
     it('is allowed in observe mode, with a warning, and recorded as unverified', async () => {
       const h = setup();
       const issue = await newTask(h, 'feature');
@@ -979,6 +1030,118 @@ describe('approve sources', () => {
     expect(state).toMatchObject({ status: 'in_progress', waitingOn: 'agent' });
   });
 
+  describe('an unverified approval is ordered by GitHub time, not by the local clock', () => {
+    const MIN = 60_000;
+    /** The same context with a constant local clock. */
+    const clockedAt = (h: Harness, iso: string): CommandContext => ({ ...h.ctx, now: () => iso });
+    const minutesFrom = (iso: string, minutes: number): string => new Date(Date.parse(iso) + minutes * MIN).toISOString();
+
+    it('unverified approval with a clock 10 min behind GitHub is recorded', async () => {
+      const h = setup();
+      const issue = await pausedFeature(h);
+      const publishedAt = (await stateOf(h.tracker, issue)).stages.brainstorming!.publishedAt!;
+      const behind = minutesFrom(publishedAt, -10);
+
+      const state = await approve(clockedAt(h, behind), issue, { action: 'approve', unverified: true });
+
+      const approval = state.stages.brainstorming?.approval;
+      expect(approval).toMatchObject({ source: 'unverified', by: 'sdlc-bot' });
+      expect(Date.parse(approval!.at)).toBeGreaterThan(Date.parse(publishedAt));
+      expect(approval!.at).toBe(minutesFrom(publishedAt, 0).replace(/\.000Z$/, '.001Z'));
+      expect(state).toMatchObject({ status: 'in_progress', waitingOn: 'agent' });
+    });
+
+    it('unverified approval with a clock ahead keeps the local time', async () => {
+      const h = setup();
+      const issue = await pausedFeature(h);
+      const publishedAt = (await stateOf(h.tracker, issue)).stages.brainstorming!.publishedAt!;
+      const ahead = minutesFrom(publishedAt, 10);
+
+      const state = await approve(clockedAt(h, ahead), issue, { action: 'approve', unverified: true });
+
+      expect(state.stages.brainstorming?.approval).toMatchObject({ source: 'unverified', at: ahead });
+    });
+
+    it('records the same approval in the same order whichever way the clock is off', async () => {
+      const ats: number[] = [];
+      for (const skew of [-10, -1, 0, 1, 10]) {
+        const h = setup();
+        const issue = await pausedFeature(h);
+        const publishedAt = (await stateOf(h.tracker, issue)).stages.brainstorming!.publishedAt!;
+        const state = await approve(clockedAt(h, minutesFrom(publishedAt, skew)), issue, { action: 'approve', unverified: true });
+        ats.push(Date.parse(state.stages.brainstorming!.approval!.at) - Date.parse(publishedAt));
+      }
+      expect(ats.every(delta => delta > 0)).toBe(true);
+    });
+
+    it('also lets a cancel through after a reopen that the local clock stamped in the future', async () => {
+      const h = setup();
+      const issue = await newTask(h);
+      await approve(h.ctx, issue, { action: 'cancel', reason: 'r', unverified: true });
+      const reopened = await taskReopen(clockedAt(h, '2026-09-01T00:00:00.000Z'), issue);
+      expect(reopened.reopenedAt).toBe('2026-09-01T00:00:00.000Z');
+
+      const state = await approve(clockedAt(h, '2026-06-01T00:00:00.000Z'), issue, {
+        action: 'cancel',
+        reason: 'again',
+        unverified: true,
+      });
+
+      expect(state.outcome).toBe('cancelled');
+      expect(Date.parse(state.outcomeApproval!.at)).toBeGreaterThan(Date.parse('2026-09-01T00:00:00.000Z'));
+    });
+
+    describe('unverifiedAt', () => {
+      const base = (extra: Partial<TaskState> = {}): TaskState => ({
+        ...newTaskState({ issue: 1, type: BUILTIN_TYPES.find(t => t.id === 'feature')!, summary: 'S', now: '2026-01-01T00:00:00.000Z' }),
+        ...extra,
+      });
+      const T = '2026-03-10T00:00:00.000Z';
+
+      it('is the local time when nothing was published', () => {
+        expect(unverifiedAt(base(), T)).toBe(T);
+      });
+
+      it('is one millisecond after the newest stamp when the local clock is not past it', () => {
+        const state = base({ stages: { brainstorming: { revision: 1, publishedAt: T } } });
+        expect(unverifiedAt(state, '2026-03-09T23:50:00.000Z')).toBe('2026-03-10T00:00:00.001Z');
+        expect(unverifiedAt(state, T)).toBe('2026-03-10T00:00:00.001Z');
+      });
+
+      it('keeps the local time when it is past every stamp', () => {
+        const state = base({ stages: { brainstorming: { revision: 1, publishedAt: T } } });
+        expect(unverifiedAt(state, '2026-03-10T00:00:00.002Z')).toBe('2026-03-10T00:00:00.002Z');
+        expect(unverifiedAt(state, '2026-03-10T00:10:00.000Z')).toBe('2026-03-10T00:10:00.000Z');
+      });
+
+      it('takes the newest of every stage, the result and the reopen', () => {
+        const state = base({
+          stages: {
+            brainstorming: { revision: 1, publishedAt: '2026-03-01T00:00:00.000Z' },
+            planning: { revision: 1, publishedAt: '2026-03-05T00:00:00.000Z' },
+          },
+          resultPublishedAt: '2026-03-04T00:00:00.000Z',
+          reopenedAt: '2026-03-08T00:00:00.000Z',
+        });
+        expect(unverifiedAt(state, '2026-02-01T00:00:00.000Z')).toBe('2026-03-08T00:00:00.001Z');
+        expect(unverifiedAt({ ...state, resultPublishedAt: '2026-03-20T00:00:00.000Z' }, '2026-02-01T00:00:00.000Z')).toBe(
+          '2026-03-20T00:00:00.001Z',
+        );
+      });
+
+      it('reads the whole-second times GitHub writes', () => {
+        const state = base({ stages: { brainstorming: { revision: 1, publishedAt: '2026-03-10T00:00:00Z' } } });
+        expect(unverifiedAt(state, '2026-03-09T00:00:00.000Z')).toBe('2026-03-10T00:00:00.001Z');
+      });
+
+      it('ignores a stamp that is not a date', () => {
+        const state = base({ stages: { brainstorming: { revision: 1, publishedAt: 'soon' } }, reopenedAt: T });
+        expect(unverifiedAt(state, '2026-01-01T00:00:00.000Z')).toBe('2026-03-10T00:00:00.001Z');
+        expect(unverifiedAt(base({ reopenedAt: 'soon' }), T)).toBe(T);
+      });
+    });
+  });
+
   it('needs exactly one source', async () => {
     const h = setup();
     const issue = await pausedFeature(h);
@@ -1038,6 +1201,108 @@ describe('approve sources', () => {
     await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: url })).rejects.toThrow(
       `comment ${url} is on PR #50, which is not linked to #1`,
     );
+  });
+
+  describe('a PR whose body was edited (I1: re-pointing a PR to another task)', () => {
+    const EDIT_REFUSED = 'PR body was edited after the comment';
+
+    it('refuses a PR comment that the body edit came after', async () => {
+      const h = setup();
+      const issue = await pausedFeature(h);
+      linkPr(h.tracker, issue, 50, 'Related to #1', { bodyEditedAt: '2026-07-01T00:01:00.000Z' });
+      const url = ownerComment(h.tracker, 50, AFTER);
+      const before = await stateOf(h.tracker, issue);
+      const writes = h.tracker.writes;
+
+      const refused = approve(h.ctx, issue, { action: 'approve', commentUrl: url });
+      await expect(refused).rejects.toThrow(EDIT_REFUSED);
+      await expect(refused).rejects.toBeInstanceOf(ApprovalRefusedError);
+
+      expect(await stateOf(h.tracker, issue)).toEqual(before);
+      expect(h.tracker.writes).toBe(writes);
+    });
+
+    it('refuses it when the comment is found through the PR the issue search returns', async () => {
+      const h = setup();
+      const issue = await pausedFeature(h);
+      linkPr(h.tracker, issue, 50, 'Related to #1', { bodyEditedAt: '2026-07-01T00:01:00.000Z' });
+      const url = ownerComment(h.tracker, 50, AFTER);
+      // A comment URL that names no thread is looked up on the issue, then on each PR of the task.
+      const anonymous = url.replace('/issues/50', '');
+      const comment = h.tracker.comments.find(c => c.url === url)!;
+      comment.url = anonymous;
+      await expect(approve(h.ctx, issue, { action: 'approve', commentUrl: anonymous })).rejects.toThrow(EDIT_REFUSED);
+    });
+
+    it('accepts a PR comment when the body was edited before it', async () => {
+      const h = setup();
+      const issue = await pausedFeature(h);
+      linkPr(h.tracker, issue, 50, 'Related to #1', { bodyEditedAt: '2026-06-30T00:00:00.000Z' });
+      const url = ownerComment(h.tracker, 50, AFTER);
+
+      const state = await approve(h.ctx, issue, { action: 'approve', commentUrl: url });
+
+      expect(state.stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: url, at: AFTER });
+    });
+
+    it('accepts a PR comment when the body was never edited', async () => {
+      const h = setup();
+      const issue = await pausedFeature(h);
+      linkPr(h.tracker, issue, 50, 'Related to #1');
+      const url = ownerComment(h.tracker, 50, AFTER);
+      const state = await approve(h.ctx, issue, { action: 'approve', commentUrl: url });
+      expect(state.stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: url });
+    });
+
+    it('does not ask about the PR for a comment on the issue', async () => {
+      const h = setup();
+      const issue = await pausedFeature(h);
+      linkPr(h.tracker, issue, 50, 'Related to #1', { bodyEditedAt: '2026-08-01T00:00:00.000Z' });
+      const url = ownerComment(h.tracker, issue, AFTER);
+      const state = await approve(h.ctx, issue, { action: 'approve', commentUrl: url });
+      expect(state.stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: url });
+    });
+
+    it('applies to a type-change approval posted on a PR as well', async () => {
+      const h = setup(enforceCfg);
+      const issue = await newTask(h, 'feature');
+      linkPr(h.tracker, issue, 50, 'Related to #1', { bodyEditedAt: '2026-07-01T00:01:00.000Z' });
+      const url = ownerComment(h.tracker, 50, AFTER, { body: APPROVE_TOOLING });
+      await expect(taskSetType(h.ctx, issue, 'tooling', { commentUrl: url })).rejects.toThrow(EDIT_REFUSED);
+      expect((await stateOf(h.tracker, issue)).type).toBe('feature');
+    });
+
+    describe('assertPrSpeaksFor', () => {
+      const pr = (extra: object = {}) => ({
+        number: 50,
+        url: 'https://github.test/pull/50',
+        merged: false,
+        baseRef: 'main',
+        body: 'Related to #1',
+        ...extra,
+      });
+      const URL = 'https://github.test/issues/50#issuecomment-9';
+      const AT = '2026-07-01T00:00:00.000Z';
+
+      it('passes for a PR that links only the task and was not edited after the comment', () => {
+        expect(() => assertPrSpeaksFor(pr(), 1, URL, AT)).not.toThrow();
+        expect(() => assertPrSpeaksFor(pr({ bodyEditedAt: AT }), 1, URL, AT)).not.toThrow();
+        expect(() => assertPrSpeaksFor(pr({ bodyEditedAt: '2026-06-01T00:00:00Z' }), 1, URL, AT)).not.toThrow();
+      });
+
+      it('throws an ApprovalRefusedError when the body was edited after the comment', () => {
+        for (const bodyEditedAt of ['2026-07-01T00:00:00.001Z', '2026-07-01T00:01:00Z', 'not a date']) {
+          const call = () => assertPrSpeaksFor(pr({ bodyEditedAt }), 1, URL, AT);
+          expect(call).toThrow(ApprovalRefusedError);
+          expect(call).toThrow('PR body was edited after the comment');
+        }
+      });
+
+      it('still refuses a PR that does not link the task or links several', () => {
+        expect(() => assertPrSpeaksFor(pr({ body: 'Related to #7' }), 1, URL, AT)).toThrow(/not linked to #1/);
+        expect(() => assertPrSpeaksFor(pr({ body: 'Related to #1, #7' }), 1, URL, AT)).toThrow(/links several tasks/);
+      });
+    });
   });
 
   it('refuses a comment by someone who is not an owner', async () => {

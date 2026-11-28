@@ -93,6 +93,12 @@ export interface PrInfo {
   mergedAt?: string;
   baseRef: string;
   body: string;
+  /**
+   * When the PR body was last edited, ISO 8601 (GitHub's `lastEditedAt`); `undefined` when it never
+   * was, or when the tracker could not tell. A comment older than this was made on a body that may
+   * have said something else, such as another task (see `prBodyEditedAfter`).
+   */
+  bodyEditedAt?: string;
 }
 
 /** A comment just posted: its id and GitHub's creation time. */

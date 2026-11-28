@@ -671,6 +671,116 @@ describe('approvals', () => {
     expect((await stateOf(h, 1)).status).toBe('paused');
   });
 
+  it('trusts no state comment of an unknown login: with none, only the Actions bot, owners and agents vouch', async () => {
+    const h = setup();
+    h.tracker.seedTask(inReview(1, 'tooling'));
+    h.tracker.seedTask(inReview(2, 'tooling'));
+    h.tracker.login = undefined;
+    h.tracker.comments.find(c => c.issue === 1)!.author = 'github-actions[bot]';
+    mergedPr(h, 1, 51);
+    mergedPr(h, 2, 52);
+
+    const result = await reconcile(h.ctx, {});
+
+    // #2's state comment is by the login the tool no longer knows: it is not a state comment now.
+    expect(result.actions.filter(a => a.issue === 2).map(a => a.kind)).toEqual(['untracked']);
+    expect(result.actions.filter(a => a.issue === 1).map(a => a.kind)).toContain('pr_merged');
+    expect((await stateOf(h, 1)).status).toBe('done');
+  });
+
+  describe('a PR whose body was edited (I1: re-pointing a PR to another task)', () => {
+    const EDIT_REFUSED = 'PR body was edited after the comment';
+    /** Task 1 paused on the owner, and PR 51, which links only it, with `extra` fields. */
+    const withPr = (extra: object): Harness => {
+      const h = setup();
+      h.tracker.seedTask(pausedOn(1));
+      h.tracker.prs.push({
+        issue: 1,
+        number: 51,
+        url: 'https://github.test/pull/51',
+        merged: false,
+        baseRef: 'main',
+        body: 'Related to #1\nScope: partial',
+        ...extra,
+      });
+      return h;
+    };
+
+    it('PR comment ignored after a body re-point', async () => {
+      const h = withPr({ bodyEditedAt: '2026-03-20T00:01:00.000Z' });
+      const url = comment(h, 51, '/approve', AFTER);
+
+      const result = await reconcile(h.ctx, {});
+
+      expect(result.actions).toEqual([
+        { issue: 1, kind: 'ignored_approval', detail: `/approve (${url}): ${EDIT_REFUSED}` },
+      ]);
+      expect(await stateOf(h, 1)).toMatchObject({ status: 'paused', waitingOn: 'owner' });
+      expect((await stateOf(h, 1)).stages.brainstorming?.approval).toBeUndefined();
+    });
+
+    it('PR comment counts when the body was edited before it', async () => {
+      const h = withPr({ bodyEditedAt: PUBLISHED });
+      const url = comment(h, 51, '/approve', AFTER);
+
+      const result = await reconcile(h.ctx, {});
+
+      expect(result.actions.filter(a => a.kind === 'ignored_approval')).toEqual([]);
+      expect(result.actions).toContainEqual(expect.objectContaining({ issue: 1, kind: 'approval' }));
+      expect((await stateOf(h, 1)).stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: url });
+    });
+
+    it('counts a comment made in the same instant as the edit (nothing shows the edit came later)', async () => {
+      const h = withPr({ bodyEditedAt: AFTER });
+      comment(h, 51, '/approve', AFTER);
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions).toContainEqual(expect.objectContaining({ kind: 'approval' }));
+    });
+
+    it('compares the instants, not the strings: GitHub writes whole seconds, the comment may carry milliseconds', async () => {
+      // 00:00:00Z is the same instant as 00:00:00.000Z but sorts after it as text.
+      const h = withPr({ bodyEditedAt: '2026-03-20T00:00:00Z' });
+      comment(h, 51, '/approve', '2026-03-20T00:00:00.000Z');
+      expect(await reconcile(h.ctx, {})).toMatchObject({ actions: expect.arrayContaining([expect.objectContaining({ kind: 'approval' })]) });
+    });
+
+    it('voids a comment made half a second before the edit although the text sorts the other way', async () => {
+      // As text '…00Z' sorts after '…00.500Z', so a string comparison would let this comment count.
+      const h = withPr({ bodyEditedAt: '2026-03-20T00:00:00.500Z' });
+      const url = comment(h, 51, '/approve', '2026-03-20T00:00:00Z');
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions).toEqual([{ issue: 1, kind: 'ignored_approval', detail: `/approve (${url}): ${EDIT_REFUSED}` }]);
+    });
+
+    it('treats an unreadable edit time as an edit after the comment', async () => {
+      const h = withPr({ bodyEditedAt: 'yesterday' });
+      const url = comment(h, 51, '/approve', AFTER);
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions).toEqual([{ issue: 1, kind: 'ignored_approval', detail: `/approve (${url}): ${EDIT_REFUSED}` }]);
+    });
+
+    it('voids only the comments older than the edit', async () => {
+      const h = withPr({ bodyEditedAt: '2026-03-20T00:00:00.000Z' });
+      const old = comment(h, 51, '/approve', '2026-03-19T00:00:00.000Z');
+      const fresh = comment(h, 51, '/approve', '2026-03-21T00:00:00.000Z');
+
+      const result = await reconcile(h.ctx, {});
+
+      expect(result.actions.filter(a => a.kind === 'ignored_approval')).toEqual([
+        { issue: 1, kind: 'ignored_approval', detail: `/approve (${old}): ${EDIT_REFUSED}` },
+      ]);
+      expect((await stateOf(h, 1)).stages.brainstorming?.approval).toMatchObject({ source: 'comment', ref: fresh });
+    });
+
+    it('does not touch comments on the task issue itself', async () => {
+      const h = withPr({ bodyEditedAt: '2026-03-25T00:00:00.000Z' });
+      const url = comment(h, 1, '/approve', AFTER);
+      const result = await reconcile(h.ctx, {});
+      expect(result.actions.filter(a => a.kind === 'ignored_approval')).toEqual([]);
+      expect((await stateOf(h, 1)).stages.brainstorming?.approval).toMatchObject({ ref: url });
+    });
+  });
+
   describe('agent logins (`agents` in the config)', () => {
     const AGENT = 'agent-bot';
     const withAgents = (config: Config): Config => ({ ...config, agents: [AGENT] });

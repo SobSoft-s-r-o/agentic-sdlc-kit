@@ -9,6 +9,8 @@ import {
   finalMergeTime,
   normalizeCommentUrl,
   parseApprovalCommands,
+  PR_BODY_EDITED_MESSAGE,
+  prBodyEditedAfter,
   recordedRefs,
   validateCommentApproval,
   type ApprovalCommand,
@@ -334,25 +336,40 @@ function describeApproval(command: ApprovalCommand, approval: Approval, state: T
   return `/${command.action} by ${approval.by} (${approval.ref})${unverified}: ${outcome}`;
 }
 
-/** Whether the PR's body links exactly one issue, `issue`: only then do its comments speak for that task. */
-const linksOnly = (pr: PrInfo, issue: number): boolean => {
+/**
+ * Whether a comment made at `commentAt` on `pr` speaks for `issue`: the PR's body links exactly that
+ * one issue, and was not edited after the comment (an edit may have re-pointed the PR to this task).
+ */
+const linksOnly = (pr: PrInfo, issue: number, commentAt: string): boolean => {
+  if (prBodyEditedAfter(pr, commentAt)) return false;
   const linked = parsePrBody(pr.body).issues;
   return linked.length === 1 && linked[0] === issue;
 };
 
 /**
  * Step 3: owner commands on the issue and its PRs, oldest first. A command on a PR whose body links
- * more than this one task is ignored.
+ * more than this one task is ignored, and so is one the PR's body was edited after.
  */
 async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void> {
   const { ctx, task } = t;
   const comments: IssueComment[] = [];
-  /** Comments on a PR that links other tasks too: they cannot be told to be meant for this one. */
-  const sharedPr = new Map<IssueComment, number>();
+  /**
+   * Comments on a PR that cannot be told to be meant for this task, with why: its body links other
+   * tasks too, or was edited after the comment.
+   */
+  const refusedPr = new Map<IssueComment, string>();
   for (const thread of [task.issue, ...prs.map(pr => pr.number)]) {
     const read = await trackerStep('listComments', task.issue, () => ctx.tracker.listComments(thread));
     const pr = prs.find(candidate => candidate.number === thread);
-    if (pr && !linksOnly(pr, task.issue)) for (const comment of read) sharedPr.set(comment, pr.number);
+    if (pr) {
+      for (const comment of read) {
+        if (linksOnly(pr, task.issue, comment.createdAt)) continue;
+        refusedPr.set(
+          comment,
+          prBodyEditedAfter(pr, comment.createdAt) ? PR_BODY_EDITED_MESSAGE : `PR #${pr.number} links several tasks`,
+        );
+      }
+    }
     comments.push(...read);
   }
   // In observe mode an agent's command is recorded as unverified, so it is checked like an owner's.
@@ -368,8 +385,8 @@ async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void>
     try {
       // Authorizes `task set-type` only; a recorded one was skipped above.
       if (command.typeId !== undefined) throw new ApprovalRefusedError('type-change approval');
-      const shared = sharedPr.get(comment);
-      if (shared !== undefined) throw new ApprovalRefusedError(`PR #${shared} links several tasks`);
+      const refusal = refusedPr.get(comment);
+      if (refusal !== undefined) throw new ApprovalRefusedError(refusal);
       const state = t.state;
       if (state.status === 'done') throw new TransitionError('the task is already done');
       const pausedOnOwner = state.status === 'paused' && state.waitingOn === 'owner';

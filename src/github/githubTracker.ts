@@ -96,6 +96,8 @@ interface RestComment {
 }
 
 interface PrRow {
+  /** The GraphQL node id, for the query that reads `lastEditedAt` (`gh pr` has no field for it). */
+  id: string;
   number: number;
   url: string;
   mergedAt: string | null;
@@ -103,6 +105,23 @@ interface PrRow {
   baseRefName: string;
   body: string | null;
 }
+
+/** The `--json` fields of `gh pr list` and `gh pr view` that `toPrInfo` reads. */
+const PR_FIELDS = 'id,number,url,mergedAt,mergeCommit,baseRefName,body';
+
+/**
+ * `gh pr list/view --json` offers no edit time of the body, GraphQL does: `PullRequest.lastEditedAt`
+ * (null for a body never edited). One query reads any number of PRs, by node id; an id that
+ * resolves to nothing is `null` in the answer.
+ */
+const PR_EDIT_TIMES_QUERY = `query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on PullRequest {
+      id
+      lastEditedAt
+    }
+  }
+}`;
 
 interface DeploymentRow {
   id: number;
@@ -157,6 +176,11 @@ interface PlannedWrite {
 export interface GitHubTrackerOptions {
   /** Directory holding `.sdlc/cache/` for board field ids; defaults to the git root of the working directory. */
   repoRoot?: string;
+  /**
+   * Where a warning goes: a read that failed and was skipped rather than failing the call (the edit
+   * times of PR bodies, see `listTaskPrs`). Left out, such a failure is silent.
+   */
+  warn?: (message: string) => void;
 }
 
 /**
@@ -257,7 +281,8 @@ const toIssueComment = (c: RestComment): IssueComment => ({
   updatedAt: c.updated_at ?? c.created_at,
 });
 
-const toPrInfo = (pr: PrRow): PrInfo => ({
+/** `bodyEditedAt`: the PR's `lastEditedAt` from `bodyEditTimes`, when it has one. */
+const toPrInfo = (pr: PrRow, bodyEditedAt?: string): PrInfo => ({
   number: pr.number,
   url: pr.url,
   merged: pr.mergedAt !== null,
@@ -265,6 +290,7 @@ const toPrInfo = (pr: PrRow): PrInfo => ({
   ...(pr.mergedAt !== null && { mergedAt: pr.mergedAt }),
   baseRef: pr.baseRefName,
   body: pr.body ?? '',
+  ...(bodyEditedAt !== undefined && { bodyEditedAt }),
 });
 
 interface DeploymentStatusRow {
@@ -468,32 +494,63 @@ export class GitHubTracker implements Tracker {
   /**
    * PRs whose body links the issue with `Related to #N`. The search can miss PRs; the body is
    * parsed again here because search also matches text that is not a link (closing keywords, `#120`).
+   * `bodyEditedAt` comes from one more query for all the PRs (`bodyEditTimes`).
    */
   async listTaskPrs(issue: number): Promise<PrInfo[]> {
     const rows =
       (await ghJson<PrRow[] | undefined>(this.run, [
         'pr', 'list', '--repo', this.repo, '--state', 'all',
         '--search', `"Related to #${issue}" in:body`,
-        '--json', 'number,url,mergedAt,mergeCommit,baseRefName,body',
+        '--json', PR_FIELDS,
         '--limit', String(PR_LIST_LIMIT),
       ])) ?? [];
     assertNotCut(rows.length, PR_LIST_LIMIT, 'gh pr list');
-    return rows
+    const linked = rows
       .filter(pr => parsePrBody(pr.body ?? '').issues.includes(issue))
-      .sort((a, b) => a.number - b.number)
-      .map(toPrInfo);
+      .sort((a, b) => a.number - b.number);
+    const edited = await this.bodyEditTimes(linked);
+    return linked.map(pr => toPrInfo(pr, edited.get(pr.id)));
   }
 
   /** `gh pr view`: no search index, so a PR opened seconds ago is found too. */
   async getPr(pr: number): Promise<PrInfo | undefined> {
+    let row: PrRow;
     try {
-      const row = await ghJson<PrRow>(this.run, [
-        'pr', 'view', String(pr), '--repo', this.repo, '--json', 'number,url,mergedAt,mergeCommit,baseRefName,body',
-      ]);
-      return toPrInfo(row);
+      row = await ghJson<PrRow>(this.run, ['pr', 'view', String(pr), '--repo', this.repo, '--json', PR_FIELDS]);
     } catch (error) {
       if (error instanceof GhError && PR_NOT_FOUND.test(error.stderr)) return undefined;
       throw error;
+    }
+    return toPrInfo(row, (await this.bodyEditTimes([row])).get(row.id));
+  }
+
+  /**
+   * When the bodies of `rows` were last edited, by node id; a PR whose body was never edited has no
+   * entry. One GraphQL query for all of them. When it fails, every PR is left without a time and the
+   * failure goes to `options.warn`: the call carries on, as it did before the times were read, so
+   * a comment on a PR whose body was edited since can then not be told from one made on the current body.
+   */
+  private async bodyEditTimes(rows: readonly PrRow[]): Promise<Map<string, string>> {
+    const times = new Map<string, string>();
+    const ids = rows.map(row => row.id).filter(id => typeof id === 'string' && id !== '');
+    if (ids.length === 0) return times;
+    try {
+      const data = await graphql<{ nodes?: ({ id?: string; lastEditedAt?: string | null } | null)[] | null }>(
+        this.run,
+        PR_EDIT_TIMES_QUERY,
+        { ids },
+      );
+      for (const node of data?.nodes ?? []) {
+        if (node?.id && typeof node.lastEditedAt === 'string') times.set(node.id, node.lastEditedAt);
+      }
+      return times;
+    } catch (error) {
+      const numbers = rows.map(row => `#${row.number}`).join(', ');
+      this.options.warn?.(
+        `could not read when the body of PR ${numbers} was last edited (${(error as Error).message}); ` +
+          'owner commands on a PR whose body was edited after them are not caught',
+      );
+      return new Map();
     }
   }
 

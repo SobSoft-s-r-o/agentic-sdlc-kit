@@ -270,7 +270,7 @@ describe('lookupTrackedTask', () => {
   it('is false for a state comment that cannot be read', async () => {
     const tracker = new FakeTracker();
     tracker.issues.push({ number: 6, title: 'broken', body: '', labels: ['sdlc:task'], open: true, onBoard: false });
-    tracker.seedComment(6, { body: `${STATE_MARKER}\nnot json`, author: tracker.login });
+    tracker.seedComment(6, { body: `${STATE_MARKER}\nnot json`, author: tracker.login! });
 
     expect(await lookupTrackedTask(tracker)(6)).toBe(false);
   });

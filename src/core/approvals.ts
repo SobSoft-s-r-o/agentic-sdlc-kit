@@ -21,6 +21,25 @@ export function approvalEvent(action: ApprovalAction, phase: Phase, reason: stri
   }
 }
 
+/** Why a comment on a PR is refused when the PR's body was edited after it (`prBodyEditedAfter`). */
+export const PR_BODY_EDITED_MESSAGE = 'PR body was edited after the comment';
+
+/**
+ * Whether the body of `pr` was edited after a comment made at `commentAt`. Such a comment may have
+ * been made on a body that linked another task, so it cannot be told to be meant for the task the
+ * body links now (I1: re-pointing a PR). Compares instants, never strings: GitHub writes whole
+ * seconds (`...:00Z`) where other times carry milliseconds (`...:00.000Z`), and the two sort
+ * differently as text. A PR with no `bodyEditedAt` (never edited, or the time could not be read) is
+ * not edited; an edit time or comment time that is not a date counts as edited. An edit in the same
+ * instant as the comment does not void it: nothing shows which came first.
+ */
+export function prBodyEditedAfter(pr: Pick<PrInfo, 'bodyEditedAt'>, commentAt: string): boolean {
+  if (pr.bodyEditedAt === undefined) return false;
+  const edited = Date.parse(pr.bodyEditedAt);
+  const commented = Date.parse(commentAt);
+  return Number.isNaN(edited) || Number.isNaN(commented) || edited > commented;
+}
+
 /** Later than any real timestamp, so only a transition that is impossible whatever the time fails. */
 export const FAR_FUTURE = '9999-12-31T23:59:59.999Z';
 

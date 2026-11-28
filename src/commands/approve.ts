@@ -2,9 +2,12 @@ import type { Command } from 'commander';
 import {
   APPROVAL_ACTIONS,
   approvalEvent,
+  ApprovalRefusedError,
   assertApprovalFits,
   finalMergeTime,
   normalizeCommentUrl,
+  PR_BODY_EDITED_MESSAGE,
+  prBodyEditedAfter,
   recordedRefs,
   validateCommentApproval,
   type ApprovalAction,
@@ -48,10 +51,13 @@ const threadOf = (url: string): number | undefined => {
 };
 
 /**
- * Throws unless a comment on `pr` can speak for `issue`: the PR's body must link `issue` and no other
- * task, or the command cannot be told to be meant for this one.
+ * Throws unless a comment made at `commentAt` on `pr` can speak for `issue`: the PR's body must not
+ * have been edited after the comment (it may have been re-pointed to this task since: an
+ * `ApprovalRefusedError`), and must link `issue` and no other task, or the command cannot be told to
+ * be meant for this one.
  */
-export function assertPrSpeaksFor(pr: PrInfo, issue: number, url: string): void {
+export function assertPrSpeaksFor(pr: PrInfo, issue: number, url: string, commentAt: string): void {
+  if (prBodyEditedAfter(pr, commentAt)) throw new ApprovalRefusedError(PR_BODY_EDITED_MESSAGE);
   const linked = parsePrBody(pr.body).issues;
   if (!linked.includes(issue)) throw new Error(`comment ${url} is on PR #${pr.number}, which is not linked to #${issue}`);
   if (linked.length > 1) {
@@ -63,8 +69,8 @@ export function assertPrSpeaksFor(pr: PrInfo, issue: number, url: string): void 
 
 /**
  * The comment `url` on the task issue or one of its PRs. When the URL names a PR, that PR is read
- * directly (no search index) and must link this task only; otherwise the issue is searched, then the
- * task's PRs.
+ * directly (no search index) and must link this task only, with a body not edited after the comment
+ * (`assertPrSpeaksFor`); otherwise the issue is searched, then the task's PRs.
  */
 export async function findComment(
   ctx: CommandContext,
@@ -83,10 +89,10 @@ export async function findComment(
   if (thread !== undefined && thread !== issue) {
     const pr = await trackerStep('getPr', issue, () => ctx.tracker.getPr(thread));
     if (!pr) throw notFound();
-    assertPrSpeaksFor(pr, issue, url);
     const found = await onThread(thread);
-    if (found) return found;
-    throw notFound();
+    if (!found) throw notFound();
+    assertPrSpeaksFor(pr, issue, url, found.createdAt);
+    return found;
   }
 
   const onIssue = await onThread(issue);
@@ -95,11 +101,39 @@ export async function findComment(
   for (const pr of await listPrs()) {
     const onPr = await onThread(pr.number);
     if (onPr) {
-      assertPrSpeaksFor(pr, issue, url);
+      assertPrSpeaksFor(pr, issue, url, onPr.createdAt);
       return onPr;
     }
   }
   throw notFound();
+}
+
+/** Milliseconds of `iso`, `undefined` when it is missing or not a date. */
+const msOf = (iso: string | undefined): number | undefined => {
+  const ms = Date.parse(iso ?? '');
+  return Number.isNaN(ms) ? undefined : ms;
+};
+
+/**
+ * When an approval recorded without proof (`--unverified`) counts as made. The state machine needs
+ * it strictly after what it acts on (a stage's `publishedAt`, the `resultPublishedAt`, the
+ * `reopenedAt`), and those are GitHub's stamps, so a local clock behind GitHub's would refuse a
+ * legitimate approval. This is `now` when `now` is past every such stamp, and otherwise one
+ * millisecond after the newest, so GitHub's stamps decide the order and a skewed local clock never
+ * does. A stamp that is not a date is ignored.
+ */
+export function unverifiedAt(state: TaskState, now: string): string {
+  const stamps = [
+    ...Object.values(state.stages).map(stage => stage?.publishedAt),
+    state.resultPublishedAt,
+    state.reopenedAt,
+  ]
+    .map(msOf)
+    .filter((ms): ms is number => ms !== undefined);
+  if (stamps.length === 0) return now;
+  const newest = Math.max(...stamps);
+  const local = msOf(now);
+  return local !== undefined && local > newest ? now : new Date(newest + 1).toISOString();
 }
 
 /**
@@ -169,7 +203,7 @@ export async function approve(ctx: CommandContext, issue: number, input: Approve
   let approval: Approval;
   if (commentUrl === undefined) {
     const login = await trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin());
-    approval = { source: 'unverified', ref: 'unverified', by: login ?? 'unknown', at: ctx.now() };
+    approval = { source: 'unverified', ref: 'unverified', by: login ?? 'unknown', at: unverifiedAt(state, ctx.now()) };
   } else {
     // One comment is one decision: reconcile skips a recorded comment, and so must this.
     if (recordedRefs(state).has(normalizeCommentUrl(commentUrl))) {

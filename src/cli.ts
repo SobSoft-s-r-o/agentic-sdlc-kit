@@ -165,7 +165,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
     ((): CommandContext => {
       const { cfg, repoRoot, mainRoot } = environment();
       return {
-        tracker: new GitHubTracker(defaultGhRunner, cfg, { repoRoot }),
+        tracker: new GitHubTracker(defaultGhRunner, cfg, { repoRoot, warn: text => err(`warning: ${text}`) }),
         cfg,
         now: () => new Date().toISOString(),
         out: data => out(typeof data === 'string' ? data : JSON.stringify(data, null, 2)),
@@ -213,7 +213,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
         makeCommandContext: async (): Promise<CommandContext> => {
           const { cfg } = environment();
           return {
-            tracker: new GitHubTracker(defaultGhRunner, cfg, { repoRoot: roots.mainRoot }),
+            tracker: new GitHubTracker(defaultGhRunner, cfg, { repoRoot: roots.mainRoot, warn: text => err(`warning: ${text}`) }),
             cfg,
             now,
             out: data => out(typeof data === 'string' ? data : JSON.stringify(data, null, 2)),
