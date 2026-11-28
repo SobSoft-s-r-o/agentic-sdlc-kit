@@ -169,10 +169,10 @@ describe('renderGithub workflow', () => {
     expect(text).not.toMatch(/waiting run finishes instead of being cancelled/i);
   });
 
-  it('only runs for a command comment, a same-repository PR and a successful deployment', () => {
+  it('only runs for a command comment, a same-repository PR and a successful deployment, never for Dependabot', () => {
     const { job } = workflowOf(render(cfgOf(FULL)));
     expect(job.if).toBe(
-      "(github.event_name != 'issue_comment' || startsWith(github.event.comment.body, '/'))" +
+      "github.actor != 'dependabot[bot]' && (github.event_name != 'issue_comment' || startsWith(github.event.comment.body, '/'))" +
         " && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)" +
         " && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success')",
     );
@@ -183,18 +183,32 @@ describe('renderGithub workflow', () => {
     expect(text).toMatch(/^\s*#.*fork.*hourly schedule/im);
   });
 
-  it('checks the token first, then checks out, sets up Node 20 and runs reconcile through npx at kit_ref', () => {
+  it('checks the token first, then checks out, sets up Node 20, installs the kit without the token and runs reconcile with it', () => {
     const { job } = workflowOf(render(cfgOf(FULL)));
-    expect(job.steps).toHaveLength(4);
-    const [check, checkout, node, reconcile] = job.steps as [Step, Step, Step, Step];
+    expect(job.steps).toHaveLength(5);
+    const [check, checkout, node, install, reconcile] = job.steps as [Step, Step, Step, Step, Step];
     expect(check.run).toContain('::error::Add the SDLC_TOKEN secret (a token with repo and project scopes); see INSTALL.md');
     expect(checkout).toEqual({
-      uses: 'actions/checkout@v4',
+      uses: 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
       with: { ref: '${{ github.event.repository.default_branch }}' },
     });
-    expect(node).toEqual({ uses: 'actions/setup-node@v4', with: { 'node-version': 20 } });
+    expect(node).toEqual({ uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020', with: { 'node-version': 20 } });
+    expect(install).toEqual({ name: 'Install the kit', run: 'npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3 --version' });
     expect(reconcile.run).toBe('npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3 reconcile');
     expect(reconcile.env).toEqual({ GH_TOKEN: '${{ secrets.SDLC_TOKEN }}' });
+  });
+
+  it('pins every action to a full commit SHA, with the tag in a comment', () => {
+    const { text, job } = workflowOf(render(cfgOf(FULL)));
+    const uses = job.steps.flatMap(step => (step.uses === undefined ? [] : [step.uses]));
+    expect(uses.length).toBe(2);
+    for (const action of uses) expect(action).toMatch(/^actions\/[a-z-]+@[0-9a-f]{40}$/);
+    for (const action of uses) expect(text).toContain(`${action} # v4.4.0`);
+  });
+
+  it('skips Dependabot runs, which get no repository secrets', () => {
+    const { job } = workflowOf(render(cfgOf(FULL)));
+    expect(String(job.if)).toMatch(/^github\.actor != 'dependabot\[bot\]' && /);
   });
 
   it('checks out the default branch and says why, so the configuration it reads is the merged one', () => {
@@ -244,7 +258,9 @@ describe('renderGithub .gitignore block', () => {
     expect(change.comment).toBe('#');
     const lines = change.content.split('\n');
     expect(lines).toEqual(expect.arrayContaining(['.sdlc/cache/', '.env', '.env.*', '!.env.example', '.worktrees/']));
-    expect(lines.indexOf('!.env.example')).toBeGreaterThan(lines.indexOf('.env.*'));
+    for (const example of ['!.env.example', '!.env.sample', '!.env.template']) {
+      expect(lines.indexOf(example), example).toBeGreaterThan(lines.indexOf('.env.*'));
+    }
     expect(change.content.endsWith('\n')).toBe(false);
   });
 

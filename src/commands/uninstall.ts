@@ -84,13 +84,19 @@ function uninstallHooksPath(ctx: InstallContext, report: Reporter, dryRun: boole
 }
 
 /** What stays: the user-owned files that exist, the managed files that were edited, and all of GitHub. */
-function reportKept(ctx: InstallContext, report: Reporter): void {
+function reportKept(ctx: InstallContext, report: Reporter, dryRun: boolean): void {
   const details: string[] = [];
   for (const { path, what, directory } of USER_OWNED) {
     const exists = directory ? ctx.fs.list(path, 1).length > 0 : ctx.fs.read(path) !== undefined;
     if (exists) details.push(`${path}: ${what}`);
   }
   for (const notice of report.plan.notices) details.push(`${notice.path}: ${notice.message}`);
+  if (report.plan.writes.some(write => write.path === '.gitignore')) {
+    details.push(
+      `.gitignore: the sdlc block ${dryRun ? 'would be' : 'was'} removed, so .env, .env.*, .sdlc/cache/ and .worktrees/ are no longer ignored; ` +
+        'add the lines you still need back by hand, or a .env file can be committed',
+    );
+  }
   details.push(GITHUB_REMAINS);
   report.step('kept', 'ok', details);
 }
@@ -105,7 +111,7 @@ export async function runUninstall(ctx: InstallContext, options: UninstallOption
   const report = new Reporter(ctx, options.json === true);
   const filesStatus = uninstallFiles(ctx, report, dryRun);
   await uninstallHooksPath(ctx, report, dryRun, filesStatus);
-  reportKept(ctx, report);
+  reportKept(ctx, report, dryRun);
   return report.finish();
 }
 

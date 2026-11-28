@@ -15,7 +15,8 @@ function renderFile(path: string, template: string, data: Record<string, unknown
 
 /**
  * The lines the kit keeps out of git, inside the `# sdlc:begin` / `# sdlc:end` block of
- * `.gitignore`. `!.env.example` must stay after `.env.*`, or the example file would be ignored too.
+ * `.gitignore`. The `!.env.example`/`.sample`/`.template` lines (the example files the secret scan
+ * allows) must stay after `.env.*`, or those files would be ignored too.
  */
 function gitignoreLines(cfg: Config): string[] {
   return [
@@ -25,6 +26,8 @@ function gitignoreLines(cfg: Config): string[] {
     '.env',
     '.env.*',
     '!.env.example',
+    '!.env.sample',
+    '!.env.template',
     ...(cfg.stack.graphify ? ['graphify-out/'] : []),
   ];
 }

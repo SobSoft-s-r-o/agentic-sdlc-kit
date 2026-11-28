@@ -1004,6 +1004,10 @@ describe('sdlc uninstall', () => {
     const report = h.report();
     expect(report.plan.notices).toEqual([{ path: developer, message: 'modified locally; kept' }]);
     expect(report.steps.find(s => s.name === 'kept')?.details.join('\n')).toContain(developer);
+    expect(report.steps.find(s => s.name === 'kept')?.details).toContain(
+      '.gitignore: the sdlc block was removed, so .env, .env.*, .sdlc/cache/ and .worktrees/ are no longer ignored; ' +
+        'add the lines you still need back by hand, or a .env file can be committed',
+    );
     expect(process.exitCode).toBeUndefined();
   });
 
