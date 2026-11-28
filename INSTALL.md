@@ -7,13 +7,13 @@ Rules for the whole install:
 - Ask the install questions one topic at a time, each with the default you detected, and wait for the answer. Do not batch them.
 - The installer never commits, pushes or writes outside the repository. You commit; the owner runs the steps in Step 7.
 - No secret goes into a file, a commit, a chat message or a log. Never ask the owner to paste a token to you.
-- `<ref>` is the kit version to install: a release tag such as `v0.2.0`, or `main`.
-- How to run `sdlc`: until it is installed (Step 4), as `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> <command>`. After the project dependency of Step 4, as `npx --no-install sdlc <command>`: a dev dependency lives in `node_modules/.bin`, which is not on the PATH, so plain `sdlc` works only after a global install. Elsewhere in this document `sdlc <command>` in running text means whichever form applies.
+- `kit_ref` is the kit version to install, and it decides the form of every command. A release tag from `v0.3.0` on is run from the npm registry: `npx -y agentic-sdlc-kit@<version>`, where `<version>` is the tag without its `v` (`0.3.0`). `main`, another branch or a commit is run from git: `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>`. `v0.1.0` and `v0.2.0` were never published to npm, so a config pinned to either must switch to `v0.3.0` or later (or to `main`). The commands in this document are written in the release form; for `main` or a commit, write the `github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>` form in its place.
+- How to run `sdlc`: until it is installed (Step 4), as `npx -y agentic-sdlc-kit@<version> <command>`. After the project dependency of Step 4, as `npx --no-install sdlc <command>`: a dev dependency lives in `node_modules/.bin`, which is not on the PATH, so plain `sdlc` works only after a global install. Elsewhere in this document `sdlc <command>` in running text means whichever form applies.
 
 ## Step 1: Preflight
 
 ```sh
-npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> doctor --preflight
+npx -y agentic-sdlc-kit@<version> doctor --preflight
 ```
 
 It checks git, Node 20 or newer, `gh` (installed, logged in, token scopes `repo` and `project`, and `workflow` because the reconcile workflow is pushed), the repository `gh` sees, which instruction files exist, and whether `sdlc.config.yaml` exists yet. Read every line. Fix each failure with the owner before going on:
@@ -31,10 +31,10 @@ A fine-grained token has no scopes `gh` can list: the preflight then warns and y
 ## Step 2: Detect, then ask
 
 ```sh
-npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> config suggest
+npx -y agentic-sdlc-kit@<version> config suggest
 ```
 
-This prints a `sdlc.config.yaml` detected from the repository (YAML on stdout, notes on stderr; `--write` creates the file only when it does not exist). It writes `version`, `harnesses`, `mode`, `kit_ref`, `github`, `owners`, `agents`, `merge_policy`, `quality_gate`, `task_types` and `targets`. The other keys keep their defaults until you add them: `content_language`, `models`, `stack`, `mcp`, `secrets` and `reconcile`. The suggested `kit_ref` is `v` plus the kit's version, with a comment: until that release tag exists, set it to `main` or the ref you installed from.
+This prints a `sdlc.config.yaml` detected from the repository (YAML on stdout, notes on stderr; `--write` creates the file only when it does not exist). It writes `version`, `harnesses`, `mode`, `kit_ref`, `github`, `owners`, `agents`, `merge_policy`, `quality_gate`, `task_types` and `targets`. The other keys keep their defaults until you add them: `content_language`, `models`, `stack`, `mcp`, `secrets` and `reconcile`. The suggested `kit_ref` is `v` plus the kit's version, with a comment: a release is only usable once it is published on npm (`v0.3.0` and later), so when the suggestion is older, or the release is not out yet, set it to `v0.3.0` or later, `main`, or the ref you installed from.
 
 Now ask the questions below in order, one at a time. For each, state the detected default and the key it sets, and keep the owner's answer for Step 3.
 
@@ -119,16 +119,16 @@ Key `content_language`, default `en`: the language agents write issues, pull req
 Write `sdlc.config.yaml` from the answers (edit the suggestion, or write it fresh), then:
 
 ```sh
-npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> config validate
+npx -y agentic-sdlc-kit@<version> config validate
 ```
 
-Set `kit_ref` to the `<ref>` you installed from: the generated instructions and the reconcile workflow run `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<kit_ref>`, and the default is `v` plus the installed version, which must exist as a tag. `doctor` checks that it exists (`kit.ref`, with `git ls-remote`). Show the file to the owner and wait for a yes. A complete example:
+Set `kit_ref` to the version you installed from: the generated instructions and the reconcile workflow run `npx -y agentic-sdlc-kit@<version>` for a release tag (`v0.3.0` and later, with `<version>` the tag without its `v`) and `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<kit_ref>` for `main`, another branch or a commit. The default is `v` plus the installed version, which for a release must be published on npm. `doctor` checks that (`kit.ref`: `npm view agentic-sdlc-kit@<version>` for a release tag, `git ls-remote` for a branch, nothing for a commit). A config pinned to `v0.1.0` or `v0.2.0` fails the check, because those versions never reached npm: set `v0.3.0` or later, or `main`. Show the file to the owner and wait for a yes. A complete example:
 
 ```yaml
 version: 1
 harnesses: [claude, codex]
 mode: observe                 # observe | enforce
-kit_ref: v0.2.0               # the ref you installed from
+kit_ref: v0.3.0               # the ref you installed from
 github:
   repo: owner/name
   default_branch: main
@@ -161,7 +161,7 @@ secrets:
 ## Step 4: Install
 
 ```sh
-npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init --dry-run
+npx -y agentic-sdlc-kit@<version> init --dry-run
 ```
 
 Show the plan to the owner, then run `init` without `--dry-run`. It writes the managed files (instruction blocks, agent roles, skills, MCP config, the PR template, the reconcile workflow, `.sdlc/manifest.json`, the git hooks and `.gitignore` lines), sets `core.hooksPath` to `.sdlc/githooks` (the hooks `pre-commit` and `pre-push`, which run the secret guard and the branch rules, then `post-merge` and `post-checkout`), and provisions the board, labels, default-branch protection and secret scanning push protection. It commits nothing. `init` is idempotent: run it again and nothing changes.
@@ -177,10 +177,10 @@ Show the plan to the owner, then run `init` without `--dry-run`. It writes the m
 Then make `sdlc` resolvable, because the git hooks call it and, when they cannot find it, the secret guard does not run (see "Secret guard"; until then `doctor` fails `secrets.guard`). Tell the owner first: this adds a dev dependency to `package.json` and the lockfile, and the PR body of Step 5 must list it. Use the repository's own package manager:
 
 ```sh
-npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>   # pnpm add -D ...  /  yarn add -D ...  with the same specifier
+npm install --save-dev agentic-sdlc-kit@<version>   # pnpm add -D ...  /  yarn add -D ...  with the same specifier
 ```
 
-The kit builds itself from git in its `prepare` script, and recent pnpm versions run that build only when it is approved; without it the install has no working `sdlc`. The simple path is npm (the command above) or a global install. With pnpm:
+For `main` or a commit the specifier is `github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>`. A release from npm ships its built files and needs no approval. A git dependency builds itself from git in its `prepare` script, and recent pnpm versions run that build only when it is approved; without it the install has no working `sdlc`. The simple path is npm, with a release from the registry, or a global install. With pnpm and a git dependency:
 
 - pnpm 10.26 to 10.x: allow it in `pnpm-workspace.yaml` before `pnpm add -D`:
 
@@ -191,7 +191,7 @@ The kit builds itself from git in its `prepare` script, and recent pnpm versions
 
 - pnpm 11 and newer: `onlyBuiltDependencies` is gone; builds are approved in the `allowBuilds:` map of `pnpm-workspace.yaml`. A bare package name never approves a git dependency: the key is the package name, `@`, and the repository URL without `#<ref>`, and it must match exactly. The easiest way to get the exact key is `pnpm approve-builds`, or the placeholder entry pnpm writes into `pnpm-workspace.yaml` when an install blocks the build; set it to `true`. See https://pnpm.io/settings/build.
 
-The hooks then find `sdlc` through `npx --no-install sdlc`, and from here on you run `npx --no-install sdlc <command>`. A repository without a `package.json`, or one that uses Yarn Plug'n'Play (no `node_modules/.bin`), needs a global install instead: `npm install --global github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>`, after which plain `sdlc <command>` works. A global install protects only that machine: tell the owner that every other clone and every other contributor needs the same install, or the guard is not active there.
+The hooks then find `sdlc` through `npx --no-install sdlc`, and from here on you run `npx --no-install sdlc <command>`. A repository without a `package.json`, or one that uses Yarn Plug'n'Play (no `node_modules/.bin`), needs a global install instead: `npm install --global agentic-sdlc-kit@<version>` (the `github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>` form for `main` or a commit), after which plain `sdlc <command>` works. A global install protects only that machine: tell the owner that every other clone and every other contributor needs the same install, or the guard is not active there.
 
 **Every clone.** `core.hooksPath` is local git config: it is not committed or cloned. Every collaborator, every new clone and every cloud agent sandbox runs, once, from the repository root:
 
@@ -232,7 +232,7 @@ If the commit is blocked, the secret guard found something: see "Secret guard". 
 npx --no-install sdlc doctor
 ```
 
-Each line starts with `✓` (ok), `!` (warning) or `✗` (failure), and a failure exits non-zero. Until the owner finishes Step 7, expect `actions.secret` to fail (`SDLC_TOKEN` is not set) and `mcp.token` to warn (the variable is not exported); `secrets.pushProtection` may warn (no admin rights, or the plan has none) and `mcp.claude` may warn until the owner approves or adds the server. A failing `secrets.guard` means `sdlc` is not installed yet (Step 4): an `npm error npx canceled due to missing packages` from `npx --no-install sdlc` means the same, Step 4 was skipped. `doctor` run through `npx -y github:...` reports this correctly too: it ignores the temporary package npx put on its own PATH. `kit.ref` warns when `kit_ref` does not exist in the kit's repository, or when it cannot be checked (no network). The hook checks warn until things are done that only a person can do: `hooks.<harness>` warns while the launcher is not committed (Step 5), `stack.superpowers` and `stack.graphify` warn until the owner installs them (Step 7), and `mcp.<harness>` can warn until the project is trusted. `hooks.roundtrip` runs the hook code on a command it must refuse and fails when it does not answer as it should; it touches neither GitHub nor your logs. Report anything else to the owner instead of hiding it. The checks and their fixes are in "Troubleshooting".
+Each line starts with `✓` (ok), `!` (warning) or `✗` (failure), and a failure exits non-zero. Until the owner finishes Step 7, expect `actions.secret` to fail (`SDLC_TOKEN` is not set) and `mcp.token` to warn (the variable is not exported); `secrets.pushProtection` may warn (no admin rights, or the plan has none) and `mcp.claude` may warn until the owner approves or adds the server. A failing `secrets.guard` means `sdlc` is not installed yet (Step 4): an `npm error npx canceled due to missing packages` from `npx --no-install sdlc` means the same, Step 4 was skipped. `doctor` run through `npx -y` reports this correctly too: it ignores the temporary package npx put on its own PATH. `kit.ref` fails when a release `kit_ref` is not published on npm, warns when a branch does not exist in the kit's repository, and warns when it cannot be checked (no network). The hook checks warn until things are done that only a person can do: `hooks.<harness>` warns while the launcher is not committed (Step 5), `stack.superpowers` and `stack.graphify` warn until the owner installs them (Step 7), and `mcp.<harness>` can warn until the project is trusted. `hooks.roundtrip` runs the hook code on a command it must refuse and fails when it does not answer as it should; it touches neither GitHub nor your logs. Report anything else to the owner instead of hiding it. The checks and their fixes are in "Troubleshooting".
 
 Doctor cannot tell whether a harness actually runs the hooks. Check that once, in `enforce` mode, from inside the harness: start it in the repository, ask it to run `npx --no-install sdlc config set mode observe --dry-run`, and see it refused with a message that names the rule (`mode-change`). If it prints the dry-run plan instead, the hooks are not running (see "Harness hooks and trust"). The command is safe either way: with `--dry-run` it writes nothing.
 
@@ -312,7 +312,7 @@ Limits you must tell the owner:
 
 - `git commit --no-verify` skips the local hooks, and the pre-push hook can be skipped the same way. The server-side backstop is GitHub secret scanning push protection: `init` enables it where the plan allows, and `doctor` warns when it is off. Turn it on.
 - The hooks call `sdlc` from the PATH, or from the project's dev dependency through `npx --no-install sdlc`. When neither resolves, the hook prints that `sdlc` was not found and that the secret guard is NOT active, and lets the commit through. Run `npx --no-install sdlc doctor` (it checks `sdlc.onPath` and `secrets.guard`), or install the dev dependency as in Step 4. A global install covers only that machine.
-- Version skew: the hooks run the installed `sdlc`, not the version `init` ran from. When you upgrade, move the dev dependency to the same version (`npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<new-ref>`), or the hooks keep running the old guard.
+- Version skew: the hooks run the installed `sdlc`, not the version `init` ran from. When you upgrade, move the dev dependency to the same version (`npm install --save-dev agentic-sdlc-kit@<new-version>`, or the `github:SobSoft-s-r-o/agentic-sdlc-kit#<new-ref>` form for `main` or a commit), or the hooks keep running the old guard.
 
 ## Owner, agents and tokens
 
@@ -366,7 +366,7 @@ Role files are templates: `{{...}}` is filled in when the file is rendered. To w
 
 ## Upgrading and uninstalling
 
-- Upgrade: set `kit_ref` to the new ref, move the dev dependency to it (the command in Step 4), then run `npx --no-install sdlc upgrade --dry-run` and `npx --no-install sdlc upgrade`. Without a dev dependency, run `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<new-ref> upgrade` instead. It re-renders the managed files from the installed kit version and removes what the kit no longer generates, keeps everything outside managed blocks, edited files and custom roles, and never touches GitHub. Commit the result through a task PR.
+- Upgrade: set `kit_ref` to the new ref, move the dev dependency to it (the command in Step 4), then run `npx --no-install sdlc upgrade --dry-run` and `npx --no-install sdlc upgrade`. Without a dev dependency, run `npx -y agentic-sdlc-kit@<new-version> upgrade` instead (the `github:SobSoft-s-r-o/agentic-sdlc-kit#<new-ref>` form for `main` or a commit). It re-renders the managed files from the installed kit version and removes what the kit no longer generates, keeps everything outside managed blocks, edited files and custom roles, and never touches GitHub. Commit the result through a task PR.
 - Uninstall: `npx --no-install sdlc uninstall --dry-run`, then `npx --no-install sdlc uninstall`. It removes the managed files and unsets `core.hooksPath` when it is the kit's. It keeps `sdlc.config.yaml`, `.sdlc/agents/custom/`, the cache and any file that was edited. It removes the `.gitignore` block too, so `.env`, `.env.*` and `.sdlc/cache/` are no longer ignored: add back the lines you need. The board, labels, issues, branch protection and push protection stay on GitHub. Remove the dev dependency yourself.
 
 ## Troubleshooting and limits
@@ -380,7 +380,7 @@ Role files are templates: `{{...}}` is filled in when the file is rendered. To w
 | `git.hooksPath` | `core.hooksPath` is unset or something else (husky, say), so the kit's hooks do not run: `init` leaves another value alone, so run `git config core.hooksPath .sdlc/githooks`, or call the scripts in `.sdlc/githooks` from your own hooks |
 | `git.legacyHooks` | the repository's own hooks in `.git/hooks` that the kit's hooks run after their own step; a warning names one that is not executable and is skipped: `chmod +x` it |
 | `sdlc.onPath` (warning), `secrets.guard` (failure) | the hooks cannot find `sdlc` (they look on the PATH, then run `npx --no-install sdlc`), so the secret guard is not active: install the dev dependency or a global install (Step 4). Under `npx -y` doctor leaves out the PATH entries npx added for its own run, as a hook does not see them |
-| `kit.ref` | `kit_ref` does not exist in the kit's repository, so the generated `npx -y github:...#<kit_ref>` commands fail: set it to `main` or the ref you installed from. "cannot verify" means `git ls-remote` could not reach GitHub |
+| `kit.ref` | failure: a release `kit_ref` (`v0.3.0`) is not published on npm, so the generated `npx -y agentic-sdlc-kit@<version>` commands fail (`v0.1.0` and `v0.2.0` never were): set `kit_ref` to a published version (`v0.3.0` or later) or `main`. Warning: a branch `kit_ref` does not exist in the kit's repository, so the generated `npx -y github:...#<kit_ref>` commands fail: set it to `main` or the ref you installed from. "cannot verify" means `npm view` (release) or `git ls-remote` (branch) could not reach the registry or GitHub |
 | `board.fields`, `labels` | no board number in the config, or fields, options or views missing: `sdlc board ensure`; labels missing: `sdlc init`. A view the API cannot create is a warning and a manual step |
 | `actions.workflow`, `actions.secret` | the workflow file is missing (`sdlc init`) or `SDLC_TOKEN` is not set (`gh secret set SDLC_TOKEN`); without admin rights the secret cannot be checked and `doctor` only warns |
 | `mcp.token`, `mcp.<harness>` | export `GITHUB_PERSONAL_ACCESS_TOKEN` from the OS keystore in the shell profile ("Secrets"); `mcp.claude`, `mcp.codex` and `mcp.gemini` warn when `<harness> mcp list` does not show the configured servers: approve or add the server, and trust the project in Codex and Gemini |

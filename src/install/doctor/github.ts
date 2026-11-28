@@ -2,7 +2,7 @@ import type { Config } from '../../config/schema.js';
 import { ensureBoard } from '../../github/board.js';
 import { GhError, ghJson } from '../../github/gh.js';
 import { WORKFLOW_PATH } from '../../render/github.js';
-import { KIT_GIT_URL } from '../../render/instructions.js';
+import { KIT_GIT_URL, KIT_PACKAGE, releaseVersion } from '../../render/instructions.js';
 import { ensureLabels } from '../provision.js';
 import { describeError, printable, ok, warn, fail, ghReason, failure, list, type Check, type DoctorEnv } from './types.js';
 
@@ -11,13 +11,57 @@ import { describeError, printable, ok, warn, fail, ghReason, failure, list, type
 const KIT_REF_TIMEOUT_MS = 15_000;
 const COMMIT_SHA = /^[0-9a-f]{7,40}$/;
 
-/** `kit_ref` must exist in the kit's repository: every generated `npx -y github:...#<kit_ref>` command fails otherwise. Network trouble is "cannot verify". */
+/**
+ * `kit_ref` must resolve, or every generated `npx -y ...` command fails: a release tag (`v0.3.0`) must be published on npm,
+ * a branch must exist in the kit's repository, and a commit is not checked. Network trouble is "cannot verify".
+ */
 export async function checkKitRef(env: DoctorEnv, cfg: Config): Promise<Check> {
+  const version = releaseVersion(cfg.kitRef);
+  if (version !== undefined) return checkPublishedVersion(env, cfg.kitRef, version);
+  return checkGitRef(env, cfg.kitRef);
+}
+
+type ExecAnswer = Awaited<ReturnType<DoctorEnv['exec']>>;
+
+/** A release tag: `npm view agentic-sdlc-kit@<version> version --json`. The registry answers E404 for a version it does not have. */
+async function checkPublishedVersion(env: DoctorEnv, ref: string, version: string): Promise<Check> {
   const id = 'kit.ref';
-  const ref = cfg.kitRef;
-  const fix = `set kit_ref in sdlc.config.yaml to a tag or branch of the kit that exists (main until a release tag exists, or the ref you installed from)`;
+  let result: ExecAnswer;
+  try {
+    result = await env.exec('npm', ['view', `${KIT_PACKAGE}@${version}`, 'version', '--json'], { env: env.env, timeoutMs: KIT_REF_TIMEOUT_MS });
+  } catch (error) {
+    return warn(id, `cannot verify kit_ref ${printable(ref)}: ${describeError(error)}`);
+  }
+  if (result.code === 0) {
+    // `"0.3.0"` for the one version asked for (a list of versions when more than one matched).
+    return publishedVersions(result.stdout).includes(version)
+      ? ok(id, `kit_ref ${printable(ref)} is published on npm`)
+      : warn(id, `cannot verify kit_ref ${printable(ref)}: npm view did not answer with ${version}`);
+  }
+  // Matched only, never shown: the output can hold other people's credentials (a registry URL with a token).
+  if (/\bE404\b/.test(`${result.stderr}\n${result.stdout}`)) {
+    return fail(id, `kit_ref ${printable(ref)} is not published on npm`, 'set kit_ref to a published version (v0.3.0 or later) or main');
+  }
+  return warn(id, `cannot verify kit_ref ${printable(ref)}: npm view ${failure(result.code, result.stderr)}`);
+}
+
+/** The versions in the output of `npm view <name>@<version> version --json`. */
+function publishedVersions(stdout: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    return items.filter((item): item is string => typeof item === 'string');
+  } catch {
+    return [];
+  }
+}
+
+/** A branch (or any other ref that is not a release tag or a commit): `git ls-remote` of the kit's repository. */
+async function checkGitRef(env: DoctorEnv, ref: string): Promise<Check> {
+  const id = 'kit.ref';
+  const fix = `set kit_ref in sdlc.config.yaml to a branch of the kit that exists (main), a commit, or a published version (v0.3.0 or later)`;
   if (COMMIT_SHA.test(ref)) return ok(id, `kit_ref ${ref} looks like a commit; not checked`);
-  let result: Awaited<ReturnType<DoctorEnv['exec']>>;
+  let result: ExecAnswer;
   try {
     result = await env.exec('git', ['ls-remote', '--exit-code', KIT_GIT_URL, ref], {
       // No prompt for credentials, and no ssh passphrase or host-key prompt when a url.insteadOf rule turns the URL into ssh.

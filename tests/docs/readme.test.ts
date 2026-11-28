@@ -40,14 +40,15 @@ interface Mention {
 }
 
 /**
- * A command mentioned in code is written in one of three forms, each followed by the command word:
+ * A command mentioned in code is written in one of four forms, each followed by the command word:
  * `sdlc <word>` (a global install, or a name in running text),
- * `npx --no-install sdlc <word>` (the project dependency), and
- * `npx [-y] github:<owner>/agentic-sdlc-kit#<ref> <word>` (the first run, before it is installed).
+ * `npx --no-install sdlc <word>` (the project dependency),
+ * `npx [-y] agentic-sdlc-kit@<version> <word>` (the first run of a release, before it is installed), and
+ * `npx [-y] github:<owner>/agentic-sdlc-kit#<ref> <word>` (the first run of `main` or a commit).
  * Prose is not read, so a sentence such as "sdlc not found" is not a mention; a line is cut at `&&`,
  * `||`, `;` and `|` so each command keeps only its own flags.
  */
-const CALL = /(?:\bnpx\s+--no-install\s+sdlc|\bnpx\s+(?:-y\s+)?\S*agentic-sdlc-kit#\S+|\bsdlc)\s+([a-z][a-z-]*)(?:\s+([a-z][a-z-]*))?/;
+const CALL = /(?:\bnpx\s+--no-install\s+sdlc|\bnpx\s+(?:-y\s+)?(?:\S*agentic-sdlc-kit#\S+|agentic-sdlc-kit@\S+)|\bsdlc)\s+([a-z][a-z-]*)(?:\s+([a-z][a-z-]*))?/;
 
 function mentions(markdown: string): Mention[] {
   const found: Mention[] = [];
@@ -102,13 +103,14 @@ const mentioned = (markdown: string): Set<string> =>
 // --- the extractor itself ---------------------------------------------------------------------------
 
 describe('the command extractor', () => {
-  it('reads the three forms, and only code', () => {
+  it('reads the four forms, and only code', () => {
     const text = [
       'Not code: sdlc nothing at all.',
       '```sh',
       'sdlc doctor',
       'npx --no-install sdlc config suggest --write   # sdlc to the rescue',
       'npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init --dry-run && git status',
+      'npx -y agentic-sdlc-kit@0.3.0 upgrade --dry-run && git status',
       '```',
       'Inline `npx --no-install sdlc review handoff <n> --pr <pr>` and `git commit` and `sdlc board`.',
     ].join('\n');
@@ -116,6 +118,7 @@ describe('the command extractor', () => {
       { command: 'doctor', flags: [] },
       { command: 'config', next: 'suggest', flags: ['--write'] },
       { command: 'init', flags: ['--dry-run'] },
+      { command: 'upgrade', flags: ['--dry-run'] },
       { command: 'review', next: 'handoff', flags: ['--pr'] },
       { command: 'board', flags: [] },
     ]);
@@ -183,8 +186,10 @@ describe('README', () => {
 
   it('walks through the install in the order that works', () => {
     const walkthrough = readme.slice(readme.search(/^## Two-minute walkthrough/m), readme.search(/^## CLI/m));
-    expect(walkthrough).toContain('`<ref>` is the kit version: a release tag such as `v0.2.0`, or `main`');
-    const steps = ['doctor --preflight', 'config suggest --write', 'set kit_ref to <ref>', 'init --dry-run', 'init  ', 'set github.project.number to N', 'npm install --save-dev', 'npx --no-install sdlc doctor'];
+    expect(walkthrough).toContain('`<version>` is a release on npm, from `0.3.0` on');
+    expect(walkthrough).toContain('`v0.1.0` and `v0.2.0` were never published');
+    expect(walkthrough).toContain('write `github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>` where the commands say `agentic-sdlc-kit@<version>`');
+    const steps = ['doctor --preflight', 'config suggest --write', 'set kit_ref to v<version>', 'init --dry-run', 'init  ', 'set github.project.number to N', 'npm install --save-dev', 'npx --no-install sdlc doctor'];
     const positions = steps.map(step => walkthrough.indexOf(step));
     expect(positions.map((position, index) => (position < 0 ? steps[index] : ''))).toEqual(steps.map(() => ''));
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
@@ -261,7 +266,15 @@ const REQUIRED_TOPICS: Array<{ about: string; terms: string[] }> = [
     ],
   },
   { about: 'the hooks the repository already has', terms: ['each kit hook runs the one of the same name after its own step', '`git.legacyHooks`'] },
-  { about: 'kit_ref existing', terms: ['until that release tag exists, set it to `main` or the ref you installed from', '`kit.ref`'] },
+  {
+    about: 'the registry form for release tags',
+    terms: [
+      'A release tag from `v0.3.0` on is run from the npm registry: `npx -y agentic-sdlc-kit@<version>`',
+      '`main`, another branch or a commit is run from git: `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>`',
+      '`v0.1.0` and `v0.2.0` were never published to npm, so a config pinned to either must switch to `v0.3.0` or later',
+    ],
+  },
+  { about: 'kit_ref being published or existing', terms: ['`kit.ref`: `npm view agentic-sdlc-kit@<version>` for a release tag, `git ls-remote` for a branch', 'set `v0.3.0` or later, or `main`'] },
   {
     about: 'pnpm and the build of a git dependency',
     terms: ['pnpm 10.26 to 10.x', 'onlyBuiltDependencies', 'pnpm 11 and newer', '`allowBuilds:` map', 'A bare package name never approves a git dependency', 'pnpm approve-builds', 'The simple path is npm'],
@@ -288,7 +301,7 @@ describe('INSTALL.md', () => {
   });
 
   it('starts with the preflight, as the design says, run through npx', () => {
-    expect(install).toContain('npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> doctor --preflight');
+    expect(install).toContain('npx -y agentic-sdlc-kit@<version> doctor --preflight');
   });
 
   it.each(QUESTION_TOPICS)('asks the $topic question', ({ heading, terms }) => {

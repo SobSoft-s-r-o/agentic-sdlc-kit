@@ -57,9 +57,29 @@ export type RenderData = {
   roles: RenderRole[];
 };
 
+/** The kit's name on the npm registry. */
+export const KIT_PACKAGE = 'agentic-sdlc-kit';
 const KIT_REPOSITORY = 'github:SobSoft-s-r-o/agentic-sdlc-kit';
-/** The kit's git repository, where `kit_ref` must exist (`doctor` checks it with `git ls-remote`). */
+/** The kit's git repository, where a branch or commit `kit_ref` must exist (`doctor` checks it with `git ls-remote`). */
 export const KIT_GIT_URL = 'https://github.com/SobSoft-s-r-o/agentic-sdlc-kit.git';
+
+/** `v1.2.3` or `v1.2.3-rc.1`: a release tag, which is also a version on the npm registry (from v0.3.0 on). */
+const RELEASE_TAG = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
+
+/** The npm version a release-tag `kit_ref` names (`v1.2.3` is `1.2.3`); `undefined` for a branch, a commit or anything else. */
+export function releaseVersion(ref: string): string | undefined {
+  return RELEASE_TAG.exec(ref)?.[1];
+}
+
+/**
+ * How the kit is run and installed for `kit_ref`. A release tag uses the registry (`agentic-sdlc-kit@1.2.3`), so the
+ * install needs no build from git; a branch or a commit uses the repository (`github:...#<ref>`).
+ */
+export function kitCommand(ref: string): { npx: string; devDependency: string; source: 'npm' | 'github' } {
+  const version = releaseVersion(ref);
+  const devDependency = version === undefined ? `${KIT_REPOSITORY}#${ref}` : `${KIT_PACKAGE}@${version}`;
+  return { npx: `npx -y ${devDependency}`, devDependency, source: version === undefined ? 'github' : 'npm' };
+}
 
 /** How each end condition reads after "Ends when". */
 function endsOnText(endsOn: EndsOn, defaultBranch: string): string {
@@ -124,7 +144,7 @@ export function renderData(cfg: Config, roles: readonly RenderRole[] = builtinRo
   );
   return {
     cfg,
-    kit: { ref: cfg.kitRef, npx: `npx -y ${KIT_REPOSITORY}#${cfg.kitRef}` },
+    kit: { ref: cfg.kitRef, npx: kitCommand(cfg.kitRef).npx },
     enforce: cfg.mode === 'enforce',
     mergeOwnerOnly: cfg.mergePolicy === 'owner_only',
     defaultBranch: cfg.github.defaultBranch,

@@ -18,16 +18,16 @@ The agent runs the preflight, detects your setup, asks you the install questions
 
 ## Two-minute walkthrough
 
-Run these yourself instead, from the root of a git repository with `gh` logged in. `<ref>` is the kit version: a release tag such as `v0.2.0`, or `main`.
+Run these yourself instead, from the root of a git repository with `gh` logged in. `<version>` is a release on npm, from `0.3.0` on (for example `0.3.0`; `v0.1.0` and `v0.2.0` were never published). To try `main` or a commit instead, write `github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>` where the commands say `agentic-sdlc-kit@<version>`.
 
 ```sh
-npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> doctor --preflight       # git, Node, gh, repository
-npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> config suggest --write   # sdlc.config.yaml from what it finds
-$EDITOR sdlc.config.yaml                    # answer the questions of INSTALL.md; set kit_ref to <ref>
-npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init --dry-run           # the plan; nothing is written
-npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init                     # files, git hooks, board, labels, protection
+npx -y agentic-sdlc-kit@<version> doctor --preflight       # git, Node, gh, repository
+npx -y agentic-sdlc-kit@<version> config suggest --write   # sdlc.config.yaml from what it finds
+$EDITOR sdlc.config.yaml                    # answer the questions of INSTALL.md; set kit_ref to v<version>
+npx -y agentic-sdlc-kit@<version> init --dry-run           # the plan; nothing is written
+npx -y agentic-sdlc-kit@<version> init                     # files, git hooks, board, labels, protection
 $EDITOR sdlc.config.yaml                    # init printed "Created project #N": set github.project.number to N
-npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>          # the git hooks need sdlc to resolve
+npm install --save-dev agentic-sdlc-kit@<version>          # the git hooks need sdlc to resolve
 npx --no-install sdlc doctor                # expect only actions.secret and mcp.token to complain (possibly also secrets.pushProtection, mcp.claude)
 ```
 

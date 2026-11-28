@@ -196,8 +196,8 @@ describe('renderGithub workflow', () => {
       uses: 'actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1',
       with: { 'node-version': 22, 'package-manager-cache': false },
     });
-    expect(install).toEqual({ name: 'Install the kit', run: 'npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3 --version' });
-    expect(reconcile.run).toBe('npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3 reconcile');
+    expect(install).toEqual({ name: 'Install the kit', run: 'npx -y agentic-sdlc-kit@1.2.3 --version' });
+    expect(reconcile.run).toBe('npx -y agentic-sdlc-kit@1.2.3 reconcile');
     expect(reconcile.env).toEqual({ GH_TOKEN: '${{ secrets.SDLC_TOKEN }}' });
   });
 
