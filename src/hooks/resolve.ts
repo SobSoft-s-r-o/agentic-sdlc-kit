@@ -89,3 +89,31 @@ export async function checkoutOf(dir: string, gitFor: (cwd: string) => GitRunner
     ...(issue === undefined ? {} : { issue }),
   };
 }
+
+/**
+ * What one hook already asked git: the checkout of each directory, as the promise of the answer, so
+ * that askers who come together (the files of one edit) share one resolution and later ones none.
+ */
+export type CheckoutCache = Map<string, Promise<Checkout | undefined>>;
+
+/**
+ * `checkoutOf`, asked once per directory for the life of `cache`. The key is the directory git runs
+ * in, the nearest existing one, so that the files of a directory that is not there yet, and the
+ * files of every missing subdirectory, share the answer of the ancestor that exists. A failed
+ * resolution is kept as well: git is not asked again about a directory it could not answer for.
+ */
+export function cachedCheckoutOf(
+  cache: CheckoutCache,
+  dir: string,
+  gitFor: (cwd: string) => GitRunner,
+): Promise<Checkout | undefined> {
+  const start = nearestDirectory(realPathOf(dir));
+  // Nothing exists up to the root: checkoutOf answers `undefined` without running git.
+  if (start === undefined) return checkoutOf(dir, gitFor);
+  let found = cache.get(start);
+  if (found === undefined) {
+    found = checkoutOf(start, gitFor);
+    cache.set(start, found);
+  }
+  return found;
+}

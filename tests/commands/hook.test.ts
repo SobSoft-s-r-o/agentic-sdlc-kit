@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
@@ -10,6 +10,7 @@ import {
   GIT_TIMEOUT_MS,
   registerHookCommand,
   runHook,
+  SLOW_EVENT_DEADLINE_MS,
   type HookContext,
 } from '../../src/commands/hook.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
@@ -155,14 +156,91 @@ const denyReason = (stdout: string): string => {
   return parsed.hookSpecificOutput.permissionDecisionReason;
 };
 
+/** A `gitFor` that runs the real git and counts every call, by the arguments it was given. */
+function countingGit(): { gitFor: HookContext['gitFor']; calls: string[][] } {
+  const calls: string[][] = [];
+  const gitFor: HookContext['gitFor'] = dir => {
+    const git = createGitRunner(dir);
+    return async args => {
+      calls.push([...args]);
+      return git(args);
+    };
+  };
+  return { gitFor, calls };
+}
+
 describe('the time the hook may take', () => {
   /** The `timeout` the harness settings get for the pre-tool hook. */
   const PRE_TOOL_TIMEOUT_MS = 15_000;
+  const outside = (): string => realpathSync(dirname(repo.root));
 
-  it('fits the pre-tool timeout in the worst case: the checkout of the cwd and of a file (two git calls each), then GitHub', () => {
+  it('fits the pre-tool timeout in the worst case: the cwd, the project directory and one edited file (two git calls each, once), then GitHub', () => {
     expect(GIT_TIMEOUT_MS).toBe(2000);
-    expect(DEFAULT_DEADLINE_MS).toBe(6000);
-    expect(4 * GIT_TIMEOUT_MS + DEFAULT_DEADLINE_MS).toBeLessThan(PRE_TOOL_TIMEOUT_MS);
+    expect((2 + 2 + 2) * GIT_TIMEOUT_MS + DEFAULT_DEADLINE_MS).toBeLessThanOrEqual(PRE_TOOL_TIMEOUT_MS);
+  });
+
+  it('keeps the longer deadline for the events that have the longer harness timeout', () => {
+    expect(SLOW_EVENT_DEADLINE_MS).toBeGreaterThan(DEFAULT_DEADLINE_MS);
+    // session-start and prompt get 30 s from the harness (HOOK_TIMEOUT_S).
+    expect(2 * 2 * GIT_TIMEOUT_MS + SLOW_EVENT_DEADLINE_MS).toBeLessThan(30_000);
+  });
+
+  it('git calls stay bounded: a cwd and a project dir outside any checkout, one edited file in a checkout, at most 4 calls', async () => {
+    const { gitFor, calls } = countingGit();
+    const projectDir = join(outside(), 'plain');
+    mkdirSync(projectDir);
+
+    await claudePreTool(claudeWrite(join(repo.root, 'src', 'a.ts'), outside()), {
+      gitFor,
+      env: { CLAUDE_PROJECT_DIR: projectDir },
+    });
+
+    // cwd: 1 (rev-parse fails), project dir: 1, the edited file's directory: 2 (rev-parse, symbolic-ref), and
+    // judging the edit asks for that directory again from the shared cache, not from git.
+    expect(calls.map(args => args[0])).toEqual(['rev-parse', 'rev-parse', 'rev-parse', 'symbolic-ref']);
+    expect(calls.length).toBeLessThanOrEqual(4);
+  });
+
+  it('asks once when the cwd and the project directory are the same directory outside any checkout', async () => {
+    const { gitFor, calls } = countingGit();
+
+    await claudePreTool(claudeWrite(join(repo.root, 'src', 'a.ts'), outside()), {
+      gitFor,
+      env: { CLAUDE_PROJECT_DIR: outside() },
+    });
+
+    expect(calls).toHaveLength(3); // the outside directory 1, the edited file's directory 2
+  });
+
+  it('resolves each directory once, whatever the number of files in it', async () => {
+    repo.write('src/keep.ts', 'x\n');
+    repo.write('lib/keep.ts', 'x\n');
+    const { gitFor, calls } = countingGit();
+    const files = ['src/a.ts', 'src/b.ts', 'src/c.ts', 'lib/d.ts'].map(file => join(root, file));
+    const patch = `*** Begin Patch\n${files.map(file => `*** Add File: ${file}\n+x`).join('\n')}\n*** End Patch`;
+
+    const result = await run('codex', 'pre-tool', { stdin: payload(outside(), 'apply_patch', { command: patch }), gitFor });
+
+    expect(result.stderr).toEqual([]);
+    // cwd 1 + src 2 + lib 2; the four files of two directories add nothing.
+    expect(calls).toHaveLength(5);
+  });
+
+  it('asks git once for a file in a directory that does not exist yet, below the cwd checkout', async () => {
+    const { gitFor, calls } = countingGit();
+
+    await claudePreTool(claudeWrite(join(repo.root, 'new', 'deep', 'a.ts')), { gitFor });
+
+    // The cwd and the (missing) directory of the file both resolve through the repository root.
+    expect(calls).toHaveLength(2);
+  });
+
+  it('resolves the cwd once at session start', async () => {
+    const { gitFor, calls } = countingGit();
+
+    await run('claude', 'session-start', { stdin: sessionStart(), gitFor });
+
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -363,6 +441,7 @@ describe('runHook pre-tool: edits', () => {
 
   it('counts a git call killed on its time limit as no checkout for that file: the edit is allowed', async () => {
     taskBranch('task/5-x');
+    repo.write('src/keep.ts', 'x\n'); // an existing directory of its own: it is resolved apart from the cwd
     const getTask = vi.spyOn(tracker, 'getTask');
     let calls = 0;
     const gitFor = (dir: string): GitRunner => {
@@ -380,6 +459,7 @@ describe('runHook pre-tool: edits', () => {
 
   it('leaves an edit alone when git is killed before it names the branch of the file: unresolved, not a branch-less checkout', async () => {
     taskBranch('task/5-x');
+    repo.write('src/keep.ts', 'x\n'); // an existing directory of its own: it is resolved apart from the cwd
     const getTask = vi.spyOn(tracker, 'getTask');
     let calls = 0;
     const gitFor = (dir: string): GitRunner => {
