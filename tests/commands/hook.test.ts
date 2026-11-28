@@ -86,6 +86,7 @@ interface Options {
   exit?: (code: number) => void;
   spawnSync?: (root: string) => void;
   readOnly?: boolean;
+  env?: Record<string, string | undefined>;
 }
 
 async function run(harness: HookHarness, event: HookEventName, options: Options): Promise<Run> {
@@ -108,6 +109,8 @@ async function run(harness: HookHarness, event: HookEventName, options: Options)
     ...(options.exit === undefined ? {} : { exit: options.exit }),
     ...(options.spawnSync === undefined ? {} : { spawnSync: options.spawnSync }),
     ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
+    // Never the environment of the test run itself: the harness may have set its project variables there.
+    env: options.env ?? {},
   };
   const code = await runHook(harness, event, ctx);
   return { code, stdout: out.join(''), stderr: err, ctx };
@@ -452,6 +455,91 @@ describe('runHook pre-tool: edits', () => {
     expect(parsed.decision).toBe('deny');
     expect(parsed.reason).toContain('#5 is in planning');
     expect(gapLines()).toMatchObject([{ harness: 'gemini', issue: 5 }]);
+  });
+});
+
+describe('runHook pre-tool: harness settings', () => {
+  /** The home directory of the test (createTestRepo points HOME at it). */
+  const home = (): string => realpathSync(process.env.HOME as string);
+
+  it.each(['.claude/settings.json', 'apps/web/.claude/settings.local.json', '.codex/hooks.json', '.gemini/settings.json', '.mcp.json'])(
+    'enforce refuses an edit of %s in the project, even in a task with an approved plan',
+    async file => {
+      taskBranch('task/5-x');
+      tracker.seedTask(feature(5, true, 'implementation'));
+      const result = await claudePreTool(claudeWrite(join(repo.root, file)));
+      expect(denyReason(result.stdout)).toContain(`${file} is protected`);
+      expect(gapLines()).toMatchObject([{ rule: 'protected-path', blocked: true }]);
+    },
+  );
+
+  it.each(['.claude/settings.json', '.claude/settings.local.json', '.codex/config.toml', '.codex/hooks.json', '.gemini/settings.json', '.claude.json'])(
+    'enforce refuses an edit of the user-level ~/%s and logs it as a gap',
+    async file => {
+      const target = join(home(), file);
+      const result = await claudePreTool(claudeWrite(target));
+      expect(denyReason(result.stdout)).toContain(`${target} is protected`);
+      expect(gapLines()).toMatchObject([{ rule: 'protected-path', blocked: true }]);
+    },
+  );
+
+  it('observe lets a user-level settings file be edited, without a gap', async () => {
+    const result = await claudePreTool(claudeWrite(join(home(), '.claude', 'settings.json')), { cfg: observe });
+    expect(result.stdout).toBe('');
+    expect(gapLines()).toEqual([]);
+  });
+
+  it('leaves other files of the home directory alone', async () => {
+    const result = await claudePreTool(claudeWrite(join(home(), '.claude', 'agents', 'x.md')));
+    expect(result.stdout).toBe('');
+  });
+});
+
+describe('runHook pre-tool: a working directory without a checkout', () => {
+  const outside = (): string => realpathSync(dirname(repo.root));
+
+  it.each([
+    ['claude', 'CLAUDE_PROJECT_DIR'],
+    ['gemini', 'GEMINI_PROJECT_DIR'],
+  ] as const)('%s: falls back to %s when it is in a checkout', async (harness, variable) => {
+    taskBranch('task/5-x');
+    const stdin =
+      harness === 'claude'
+        ? payload(outside(), 'Bash', { command: 'git push --force' })
+        : payload(outside(), 'run_shell_command', { command: 'git push --force' });
+    const result = await run(harness, 'pre-tool', { stdin, env: { [variable]: repo.root } });
+    expect(result.stdout).toContain('force-pushing is not allowed');
+    expect(result.stdout).toContain('deny');
+    expect(gapLines()).toMatchObject([{ rule: 'force-push', blocked: true, issue: 5 }]);
+  });
+
+  it('codex has no project variable: CLAUDE_PROJECT_DIR is not read for it', async () => {
+    const stdin = payload(outside(), 'Bash', { command: 'git push --force' });
+    const result = await run('codex', 'pre-tool', { stdin, env: { CLAUDE_PROJECT_DIR: repo.root } });
+    // Not resolved through the variable: the force push only warns, as without a config.
+    expect(result.stdout).not.toContain('deny');
+    expect(gapLines()).toEqual([]);
+  });
+
+  it('judges an edited file by its own checkout when neither the cwd nor a variable resolves', async () => {
+    const result = await claudePreTool(claudeWrite(join(repo.root, 'sdlc.config.yaml'), outside()));
+    expect(denyReason(result.stdout)).toContain('sdlc.config.yaml is protected');
+    expect(gapLines()).toMatchObject([{ rule: 'protected-path', blocked: true }]);
+  });
+
+  it('still applies the rules that block in every mode to a shell command', async () => {
+    const removal = await claudePreTool(payload(outside(), 'Bash', { command: 'sdlc uninstall' }));
+    expect(denyReason(removal.stdout)).toContain('only the owner removes or overwrites the sdlc install');
+
+    const warned = await claudePreTool(payload(outside(), 'Bash', { command: 'git push --force' }));
+    expect(warned.stdout).not.toContain('deny');
+    expect(warned.stdout).toContain('force-pushing is not allowed');
+  });
+
+  it('skips when nothing resolves', async () => {
+    const result = await claudePreTool(claudeWrite(join(outside(), 'x.txt'), outside()), { env: { CLAUDE_PROJECT_DIR: outside() } });
+    expect(result.stdout).toBe('');
+    expect(result.stderr[0]).toContain('git repository');
   });
 });
 

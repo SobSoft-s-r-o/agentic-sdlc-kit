@@ -46,7 +46,7 @@
     ],
     "value": [
       {
-        "matcher": "^(apply_patch|Edit|Write|Bash|spawn_agent|Agent)$",
+        "matcher": "^(apply_patch|Bash|spawn_agent|Agent)$",
         "hooks": [
           {
             "type": "command",

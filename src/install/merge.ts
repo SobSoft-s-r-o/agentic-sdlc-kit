@@ -11,6 +11,7 @@
  * or guessed at: the merge throws a `MergeError` that names the markers and the line.
  */
 
+import { HOOK_MARKER, isKitHookItem } from '../render/hooks.js';
 import {
   appendEntry,
   applySplice,
@@ -225,8 +226,13 @@ export function jsonValueAt(root: JsonObject, pointer: string[]): { found: boole
   return { found: true, value: node };
 }
 
-/** Whether an array element is one of the kit's items: its JSON text contains the marker. */
-const hasMarker = (element: unknown, marker: string): boolean => (JSON.stringify(element) ?? '').includes(marker);
+/**
+ * Whether an array element is one of the kit's items: its JSON text contains the marker. The hook
+ * launcher's marker asks for more: a handler must run a command the kit rendered (`isKitHookItem`),
+ * so a user hook that merely mentions the launcher path stays the user's.
+ */
+const hasMarker = (element: unknown, marker: string): boolean =>
+  marker === HOOK_MARKER ? isKitHookItem(element) : (JSON.stringify(element) ?? '').includes(marker);
 
 /** The elements of `array` that contain `marker`, in order. */
 export const ownedItems = (array: unknown[], marker: string): unknown[] => array.filter(element => hasMarker(element, marker));

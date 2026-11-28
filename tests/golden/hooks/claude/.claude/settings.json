@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" claude session-start",
+            "command": "\"$(cd \"${CLAUDE_PROJECT_DIR:-.}\" && git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" claude session-start",
             "timeout": 30
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" claude prompt",
+            "command": "\"$(cd \"${CLAUDE_PROJECT_DIR:-.}\" && git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" claude prompt",
             "timeout": 30
           }
         ]
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" claude pre-tool",
+            "command": "\"$(cd \"${CLAUDE_PROJECT_DIR:-.}\" && git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" claude pre-tool",
             "timeout": 15
           }
         ]

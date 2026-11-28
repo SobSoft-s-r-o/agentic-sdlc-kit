@@ -6,6 +6,7 @@ import type { Phase, TaskState, TaskTypeDef } from '../../src/core/types.js';
 import {
   decide,
   editViolations,
+  isUserHarnessFile,
   needsTask,
   subagentViolation,
   type PathCheck,
@@ -252,6 +253,73 @@ describe('editViolations: protected paths', () => {
   });
 });
 
+describe('editViolations: harness settings', () => {
+  const SETTINGS = [
+    '.claude/settings.json',
+    '.claude/settings.local.json',
+    '.codex/hooks.json',
+    '.codex/config.toml',
+    '.gemini/settings.json',
+    'apps/web/.claude/settings.json',
+    'packages/x/.codex/hooks.json',
+    'a/b/.gemini/settings.json',
+    '.CLAUDE/Settings.Local.json',
+    '.mcp.json',
+    '.MCP.json',
+  ];
+
+  it.each(SETTINGS)('protects %s in enforce, nothing in observe', relPath => {
+    const approved = taskCheck(feature('implementation', true), relPath);
+    for (const check of [approved, noTaskCheck(relPath)]) {
+      const { violations } = editViolations([check], 'enforce');
+      expect(violations.map(v => v.rule)).toEqual(['protected-path']);
+      expect(violations[0]?.text).toContain('harness settings');
+      expect(editViolations([check], 'observe')).toEqual({ violations: [], warnings: [] });
+    }
+    expect(needsTask(relPath)).toBe(false);
+  });
+
+  it('does not protect look-alikes', () => {
+    for (const relPath of ['apps/web/.mcp.json', '.claude/agents/x.md', '.claude/commands/x.json', 'src/settings.json', 'my.claude/settings.json', '.codex/agents/sdlc-x.toml']) {
+      expect(editViolations([taskCheck(feature('implementation', true), relPath)], 'enforce').violations, relPath).toEqual([]);
+    }
+  });
+
+  it('protects user-level harness files outside the project in enforce only', () => {
+    const userFile: PathCheck = { path: '/home/u/.claude/settings.json', inProject: false, userHarnessFile: true, lookup: 'none' };
+    const { violations } = editViolations([userFile], 'enforce');
+    expect(violations.map(v => v.rule)).toEqual(['protected-path']);
+    expect(violations[0]?.text).toContain('/home/u/.claude/settings.json');
+    expect(editViolations([userFile], 'observe')).toEqual({ violations: [], warnings: [] });
+  });
+});
+
+describe('isUserHarnessFile', () => {
+  const home = '/home/u';
+  it.each([
+    '/home/u/.claude/settings.json',
+    '/home/u/.claude/settings.local.json',
+    '/home/u/.codex/config.toml',
+    '/home/u/.codex/hooks.json',
+    '/home/u/.gemini/settings.json',
+    '/home/u/.claude.json',
+    '/home/u/.Claude/SETTINGS.json',
+  ])('%s is one', path => {
+    expect(isUserHarnessFile(path, home)).toBe(true);
+  });
+
+  it.each(['/home/u/.claude/agents/x.md', '/home/u/project/.claude.json', '/home/other/.claude.json', '/home/u2/.claude.json', '/etc/hosts'])(
+    '%s is not',
+    path => {
+      expect(isUserHarnessFile(path, home)).toBe(false);
+    },
+  );
+
+  it('matches the home directory without regard to case', () => {
+    expect(isUserHarnessFile('/Users/U/.gemini/settings.json', '/Users/u')).toBe(true);
+  });
+});
+
 describe('decide', () => {
   const noTask: Violation = { rule: 'no-task', text: 'editing a.ts outside a task' };
   const noVerify: Violation = { rule: 'no-verify', text: '--no-verify skips the git hooks and the secret guard' };
@@ -284,6 +352,12 @@ describe('decide', () => {
     const outcome = decide([noTask, spoof], 'observe');
     expect(outcome.block).toBe('sdlc (observe): sdlc hooks are run by the harness only');
     expect(outcome.warnings).toContain('sdlc (observe): editing a.ts outside a task');
+  });
+
+  it('blocks kit-removal in observe too', () => {
+    const removal: Violation = { rule: 'kit-removal', text: 'only the owner removes or overwrites the sdlc install' };
+    expect(decide([noTask, removal], 'observe').block).toBe('sdlc (observe): only the owner removes or overwrites the sdlc install');
+    expect(decide([removal], 'enforce').block).toBe('sdlc (enforce): only the owner removes or overwrites the sdlc install');
   });
 
   it('blocks hook-spoof in enforce with the enforce prefix', () => {

@@ -1,5 +1,5 @@
 import type { Config, Harness } from '../config/schema.js';
-import type { HookEventName, HookHarness } from '../hooks/types.js';
+import { HOOK_EVENTS, HOOK_HARNESSES, type HookEventName, type HookHarness } from '../hooks/types.js';
 import type { Change, JsonKeysChange } from './changes.js';
 import { loadTemplate } from './templates.js';
 
@@ -10,7 +10,8 @@ import { loadTemplate } from './templates.js';
  *
  * The hook arrays in those files are shared with the user, who may have hooks of their own there
  * (`.codex/hooks.json` and `.gemini/settings.json` as much as `.claude/settings.json`), so each
- * event is an `items` entry: the kit owns the elements that contain `HOOK_MARKER`, and only those.
+ * event is an `items` entry: the kit owns the elements that call the launcher (`isKitHookItem`), and
+ * only those.
  */
 
 /** Where the launcher is written, relative to the repository root. */
@@ -27,11 +28,49 @@ export const HOOK_TIMEOUT_S = { 'session-start': 30, prompt: 30, 'pre-tool': 15 
 
 /**
  * The command a harness runs. The launcher is found from the git root: a harness runs hooks in the
- * directory it was started in, which may be a subdirectory, and only Claude has a project-directory
- * placeholder. The path is quoted for a root with spaces.
+ * directory it was started in (or wherever the session has since gone), which may be a subdirectory
+ * or no checkout at all. Claude Code gives its hook commands `CLAUDE_PROJECT_DIR`, the project
+ * directory, so its command takes the git root of that directory. Codex has no such variable, and
+ * Gemini's `GEMINI_PROJECT_DIR` is substituted into the command text before the shell sees it,
+ * so those two use the git root of the working directory (see docs/notes/harness-hooks-2026-11.md).
+ * The path is quoted for a root with spaces.
  */
 export function hookCommand(harness: HookHarness, event: HookEventName): string {
-  return `"$(git rev-parse --show-toplevel)/${HOOK_LAUNCHER}" ${harness} ${event}`;
+  const root = harness === 'claude' ? 'cd "${CLAUDE_PROJECT_DIR:-.}" && git rev-parse --show-toplevel' : 'git rev-parse --show-toplevel';
+  return `"$(${root})/${HOOK_LAUNCHER}" ${harness} ${event}`;
+}
+
+/** Every command the kit renders, for any harness and event. */
+const RENDERED_COMMANDS: ReadonlySet<string> = new Set(
+  HOOK_HARNESSES.flatMap(harness => HOOK_EVENTS.map(event => hookCommand(harness, event))),
+);
+
+/**
+ * The shape of a command an earlier version of the kit rendered: the quoted launcher path under a
+ * computed root, then the harness and the event, and nothing else (no `;`, `&`, `|` or `#` that
+ * would run or hide something more).
+ */
+const RENDERED_SHAPE = new RegExp(
+  `^"[^"#;&|\\n]*(?:"[^"#;&|\\n]*"[^"#;&|\\n]*)*/${HOOK_LAUNCHER.replace(/\./g, '\\.')}" (?:${HOOK_HARNESSES.join('|')}) (?:${HOOK_EVENTS.join('|')})$`,
+);
+
+/** Whether a hook command is one the kit rendered: exactly this version's, or one of the earlier shape. */
+const isKitCommand = (command: string): boolean => RENDERED_COMMANDS.has(command) || RENDERED_SHAPE.test(command);
+
+/**
+ * Whether an element of a harness's hook array (a matcher group) is the kit's: one of its handlers
+ * runs a command the kit rendered. A user hook that merely mentions the launcher path is not.
+ */
+export function isKitHookItem(element: unknown): boolean {
+  if (typeof element !== 'object' || element === null || Array.isArray(element)) return false;
+  const { hooks } = element as { hooks?: unknown };
+  return (
+    Array.isArray(hooks) &&
+    hooks.some(handler => {
+      const command = typeof handler === 'object' && handler !== null ? (handler as { command?: unknown }).command : undefined;
+      return typeof command === 'string' && isKitCommand(command);
+    })
+  );
 }
 
 /** The file each harness reads its hooks from, relative to the repository root. */
@@ -51,11 +90,13 @@ export const NATIVE_EVENT: Record<HookHarness, Record<HookEventName, string>> = 
 /**
  * The tools `pre-tool` looks at: file edits, the shell and subagent dispatch, under each harness's
  * names. Claude's matcher is a plain list (letters and `|` only), which the harness compares to the
- * whole tool name; Codex and Gemini take regular expressions, so those are anchored.
+ * whole tool name; Codex and Gemini take regular expressions, so those are anchored. Codex edits
+ * files only through `apply_patch` (its `Edit` and `Write` are matcher aliases of that tool, and the
+ * payload still says `apply_patch`), so the aliases are not listed.
  */
 const PRE_TOOL_MATCHER: Record<HookHarness, string> = {
   claude: 'Write|Edit|NotebookEdit|Bash|PowerShell|Agent|Task',
-  codex: '^(apply_patch|Edit|Write|Bash|spawn_agent|Agent)$',
+  codex: '^(apply_patch|Bash|spawn_agent|Agent)$',
   gemini: '^(write_file|replace|run_shell_command|invoke_agent)$',
 };
 

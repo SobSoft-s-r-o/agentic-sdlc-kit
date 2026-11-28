@@ -145,6 +145,7 @@ const ADMIN_MERGE = violation(
 );
 const MODE_CHANGE = violation('mode-change', 'only the owner changes sdlc settings (`sdlc config set`); ask the owner');
 const HOOK_SPOOF = violation('hook-spoof', 'sdlc hooks are run by the harness only');
+const KIT_REMOVAL = violation('kit-removal', 'only the owner removes or overwrites the sdlc install');
 const NO_VERIFY = violation('no-verify', '--no-verify skips the git hooks and the secret guard');
 const FORCE_PUSH = violation('force-push', 'force-pushing is not allowed');
 const WORKTREE_PRUNE = violation(
@@ -371,6 +372,10 @@ function callViolations(call: Invocation): Violation[] {
       const [sub, ...rest] = sdlcArgs(call.args);
       if (sub === 'hook') found.push(HOOK_SPOOF);
       if (sub === 'config' && rest.find(arg => !arg.startsWith('-')) === 'set') found.push(MODE_CHANGE);
+      // `sdlc upgrade` stays allowed: it reinstalls the hooks rather than removing them.
+      if ((sub === 'uninstall' && !rest.includes('--dry-run')) || (sub === 'init' && rest.includes('--overwrite-modified'))) {
+        found.push(KIT_REMOVAL);
+      }
       break;
     }
     default:

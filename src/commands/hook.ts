@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { dirname, relative, sep } from 'node:path';
 import type { Command } from 'commander';
 import { typeRegistry, type Config } from '../config/schema.js';
@@ -21,6 +22,7 @@ import {
 import {
   decide,
   editViolations,
+  isUserHarnessFile,
   needsTask,
   subagentViolation,
   type PathCheck,
@@ -106,6 +108,8 @@ export interface HookContext {
    * adds to the real logs or writes to GitHub.
    */
   readOnly?: boolean;
+  /** The environment the harness gave the hook (its project-directory variable); defaults to `process.env`. */
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 /**
@@ -267,9 +271,12 @@ async function judgeEdit(env: HookEnv, tool: Extract<ToolCall, { category: 'edit
     return found;
   };
 
+  const home = realPathOf(homedir());
   const checks = await Promise.all(
     tool.paths.map(async (path): Promise<PathCheck> => {
       const real = realPathOf(path);
+      // The user's own harness settings are outside the project, and switch its hooks off as well.
+      if (isUserHarnessFile(real, home)) return { path, inProject: false, userHarnessFile: true, lookup: 'none' };
       // The git directory is no work tree, so git cannot name a checkout for it; it is judged here,
       // under the task of the checkout the agent works in.
       if (isInside(real, root.commonDir)) {
@@ -316,14 +323,18 @@ async function judgeEdit(env: HookEnv, tool: Extract<ToolCall, { category: 'edit
   return { violations: [...violations.values()], warnings: [...warnings] };
 }
 
+/** The rules a shell command or a subagent dispatch breaks; they need no checkout. */
+function otherViolations(tool: Exclude<ToolCall, { category: 'edit' }>): Violation[] {
+  return tool.category === 'shell'
+    ? shellViolations(tool.command)
+    : tool.category === 'subagent'
+      ? [subagentViolation(tool)].filter((violation): violation is Violation => violation !== undefined)
+      : [];
+}
+
 /** The violations of a shell command or a subagent dispatch carry the issue of the `cwd` checkout. */
 function judgeOther(env: HookEnv, tool: Exclude<ToolCall, { category: 'edit' }>): Judgement {
-  const found =
-    tool.category === 'shell'
-      ? shellViolations(tool.command)
-      : tool.category === 'subagent'
-        ? [subagentViolation(tool)].filter((violation): violation is Violation => violation !== undefined)
-        : [];
+  const found = otherViolations(tool);
   const { issue } = env.checkout;
   return {
     violations: found.map(violation => ({ ...violation, ...(issue === undefined ? {} : { issue }) })),
@@ -548,6 +559,44 @@ function parsePayload(text: string): unknown {
   }
 }
 
+/**
+ * The variable each harness gives its hook commands with the directory of the project, from the
+ * harness notes (docs/notes/harness-hooks-2026-11.md): Claude Code sets `CLAUDE_PROJECT_DIR`, Gemini
+ * CLI `GEMINI_PROJECT_DIR` (the directory it was started in, which may be below the root). Codex
+ * sets none, so for it a `cwd` outside a checkout falls through to the edited files.
+ */
+const PROJECT_DIR_VARIABLE: Record<HookHarness, string | undefined> = {
+  claude: 'CLAUDE_PROJECT_DIR',
+  codex: undefined,
+  gemini: 'GEMINI_PROJECT_DIR',
+};
+
+/**
+ * The checkout whose config and local files the event uses: the one of the payload's `cwd`; when the
+ * agent works outside any checkout, the one of the harness's project directory; for an edit, failing
+ * both, the checkout of the first edited file in one (each file is still judged in its own checkout).
+ * `undefined` when nothing resolves.
+ */
+async function anchorCheckout(event: HookEvent, ctx: HookContext): Promise<Checkout | undefined> {
+  const fromCwd = await checkoutOf(event.cwd, ctx.gitFor);
+  if (fromCwd !== undefined) return fromCwd;
+
+  const variable = PROJECT_DIR_VARIABLE[event.harness];
+  const projectDir = variable === undefined ? undefined : (ctx.env ?? process.env)[variable];
+  if (projectDir !== undefined && projectDir !== '') {
+    const fromProject = await checkoutOf(projectDir, ctx.gitFor);
+    if (fromProject !== undefined) return fromProject;
+  }
+
+  if (event.tool?.category === 'edit') {
+    for (const path of event.tool.paths) {
+      const holder = await checkoutOf(dirname(realPathOf(path)), ctx.gitFor);
+      if (holder !== undefined) return holder;
+    }
+  }
+  return undefined;
+}
+
 /** Every step that can throw; what it throws is the reason the hook is skipped. Gives the stdout text. */
 async function answer(
   harness: HookHarness,
@@ -556,8 +605,14 @@ async function answer(
   deadline: Deadline,
 ): Promise<string> {
   const event = normalizePayload(harness, eventName, parsePayload(await ctx.readStdin()));
-  const checkout = await checkoutOf(event.cwd, ctx.gitFor);
-  if (checkout === undefined) throw new Error(`${event.cwd} is not inside a git repository`);
+  const checkout = await anchorCheckout(event, ctx);
+  if (checkout === undefined) {
+    const { tool } = event;
+    if (tool === undefined || tool.category === 'edit') throw new Error(`${event.cwd} is not inside a git repository`);
+    // No checkout, so no config and no mode: the rules that block in every mode still block, the
+    // others only warn, and there is no main checkout to log a gap in.
+    return renderOutput(harness, eventName, decide(otherViolations(tool), 'observe'));
+  }
   const cfg = ctx.loadConfig(checkout.root);
   if (cfg === undefined) throw new Error(`no sdlc.config.yaml in ${checkout.root}`);
 

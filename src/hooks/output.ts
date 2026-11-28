@@ -25,7 +25,7 @@ export const emptyOutput = (harness: HookHarness): string => (harness === 'gemin
 /**
  * The text a hook prints on stdout for `outcome`, in the protocol of `harness`. A block and warnings
  * are `pre-tool` answers; `context` is for `session-start` and `prompt`. A block is the whole
- * answer: `decide` also lists a `hook-spoof` block among the warnings in observe mode, and those
+ * answer: `decide` also lists a block among the warnings in observe mode (`hook-spoof`, `kit-removal`), and those
  * warnings are dropped here so the reason is shown once.
  */
 export function renderOutput(harness: HookHarness, event: HookEventName, outcome: HookOutcome): string {

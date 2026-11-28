@@ -140,11 +140,28 @@ const TABLE: ReadonlyArray<readonly [string, string[]]> = [
   ['npx --no-install sdlc config set mode enforce', ['mode-change']],
   ['sdlc --config x.yaml config set mode observe', ['mode-change']],
   ['sdlc config check', []],
+  ['sdlc uninstall', ['kit-removal']],
+  ['sdlc uninstall --yes', ['kit-removal']],
+  ['sdlc uninstall --dry-run', []],
+  ['sdlc --json uninstall --dry-run', []],
+  ['npx --no-install sdlc uninstall', ['kit-removal']],
+  ['pnpm exec sdlc uninstall', ['kit-removal']],
+  ['npm exec sdlc -- uninstall', ['kit-removal']],
+  ['npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v0.1.0 uninstall', ['kit-removal']],
+  ['bash -c "sdlc uninstall"', ['kit-removal']],
+  ['sdlc init --overwrite-modified', ['kit-removal']],
+  ['npx sdlc init --yes --overwrite-modified', ['kit-removal']],
+  ['sdlc init --overwrite-modified --dry-run', ['kit-removal']],
+  ['sdlc init', []],
+  ['sdlc upgrade', []],
+  ['npx sdlc upgrade --yes', []],
+  ['echo sdlc uninstall', []],
   ['sdlc status', []],
   ['sdlc hook claude prompt < x.json', ['hook-spoof']],
   ['.sdlc/hooks/run.sh claude prompt', ['hook-spoof']],
   ['"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude pre-tool', ['hook-spoof']],
   ['bash .sdlc/hooks/run.sh claude prompt', ['hook-spoof']],
+  ['"$(cd "${CLAUDE_PROJECT_DIR:-.}" && git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude pre-tool', ['hook-spoof']],
   ['npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v0.1.0 hook gemini prompt', ['hook-spoof']],
   ['npx agentic-sdlc-kit hook claude prompt', ['hook-spoof']],
   ['cat .sdlc/hooks/run.sh', []],
@@ -321,6 +338,7 @@ describe('shellViolations', () => {
       'only the owner changes sdlc settings (`sdlc config set`); ask the owner',
     );
     expect(text('sdlc hook claude prompt')).toBe('sdlc hooks are run by the harness only');
+    expect(text('sdlc uninstall')).toBe('only the owner removes or overwrites the sdlc install');
     expect(text('git commit --no-verify -m x')).toBe('--no-verify skips the git hooks and the secret guard');
     expect(text('git push --force')).toBe('force-pushing is not allowed');
     expect(text('git worktree prune')).toBe(

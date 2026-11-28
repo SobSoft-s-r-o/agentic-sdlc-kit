@@ -13,6 +13,7 @@ import {
   HOOK_TIMEOUT_S,
   hookCommand,
   hookNotes,
+  isKitHookItem,
   renderHookLauncher,
   renderHooks,
 } from '../../src/render/hooks.js';
@@ -43,7 +44,9 @@ const entryOf = (change: JsonKeysChange, event: string) => {
 };
 
 const cmd = (harness: 'claude' | 'codex' | 'gemini', event: 'session-start' | 'prompt' | 'pre-tool'): string =>
-  `"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" ${harness} ${event}`;
+  harness === 'claude'
+    ? `"$(cd "\${CLAUDE_PROJECT_DIR:-.}" && git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude ${event}`
+    : `"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" ${harness} ${event}`;
 
 describe('constants', () => {
   it('names the launcher, uses its path as the marker and has the rendered timeouts', () => {
@@ -53,10 +56,42 @@ describe('constants', () => {
   });
 
   it('hookCommand resolves the launcher from the git root and passes the harness and event', () => {
+    // Claude: the git root of its project directory, so a session that left the repository still finds it.
     expect(hookCommand('claude', 'session-start')).toBe(
-      '"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude session-start',
+      '"$(cd "${CLAUDE_PROJECT_DIR:-.}" && git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude session-start',
     );
+    expect(hookCommand('codex', 'prompt')).toBe('"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" codex prompt');
     expect(hookCommand('gemini', 'pre-tool')).toBe('"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" gemini pre-tool');
+  });
+});
+
+describe('isKitHookItem', () => {
+  const group = (command: unknown) => ({ matcher: 'Bash', hooks: [{ type: 'command', command }] });
+
+  it('owns a group whose command is a rendered command, of this version or the earlier shape', () => {
+    for (const harness of ['claude', 'codex', 'gemini'] as const) {
+      for (const event of ['session-start', 'prompt', 'pre-tool'] as const) {
+        expect(isKitHookItem(group(hookCommand(harness, event)))).toBe(true);
+        expect(isKitHookItem(group(`"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" ${harness} ${event}`))).toBe(true);
+      }
+    }
+  });
+
+  it('does not own a user hook that merely mentions the launcher', () => {
+    for (const command of [
+      'cat .sdlc/hooks/run.sh',
+      './audit.sh --skip .sdlc/hooks/run.sh',
+      '"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude pre-tool && ./mine.sh',
+      '"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude pre-tool; ./mine.sh',
+      '"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude other-event',
+      '"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh.bak" claude prompt',
+      './mine.sh # .sdlc/hooks/run.sh claude prompt',
+    ]) {
+      expect(isKitHookItem(group(command)), command).toBe(false);
+    }
+    expect(isKitHookItem({ note: '.sdlc/hooks/run.sh' })).toBe(false);
+    expect(isKitHookItem(group(7))).toBe(false);
+    expect(isKitHookItem('.sdlc/hooks/run.sh')).toBe(false);
   });
 });
 
@@ -112,7 +147,7 @@ describe('renderHooks, codex (.codex/hooks.json)', () => {
     ]);
     expect(entryOf(change, 'PreToolUse').value).toEqual([
       {
-        matcher: '^(apply_patch|Edit|Write|Bash|spawn_agent|Agent)$',
+        matcher: '^(apply_patch|Bash|spawn_agent|Agent)$',
         hooks: [{ type: 'command', command: cmd('codex', 'pre-tool'), timeout: 15 }],
       },
     ]);

@@ -8,12 +8,14 @@ import {
   mergeLineBlock,
   mergeMdBlock,
   mergeTomlBlock,
+  ownedItems,
   removeJsonKeys,
   removeLineBlock,
   removeMdBlock,
   removeTomlBlock,
   tomlTableText,
 } from '../../src/install/merge.js';
+import { HOOK_MARKER, hookCommand } from '../../src/render/hooks.js';
 
 const MD_BEGIN = '<!-- sdlc:begin -->';
 const MD_END = '<!-- sdlc:end -->';
@@ -449,6 +451,27 @@ describe('mergeJsonKeys with owned array items', () => {
     expect(() => mergeJsonKeys(undefined, [{ ...bad, items: { marker: '' } }], new Set(), 's.json')).toThrow(
       's.json: hooks/PreToolUse: the marker must not be empty',
     );
+  });
+});
+
+describe('mergeJsonKeys with the hook launcher as the marker', () => {
+  const group = (command: string) => ({ hooks: [{ type: 'command', command }] });
+  const rendered = group(hookCommand('claude', 'prompt'));
+  const earlier = group('"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude prompt');
+  const mentions = group('./audit.sh --skip .sdlc/hooks/run.sh');
+  const entry = { pointer: ['hooks', 'UserPromptSubmit'], value: [rendered], items: { marker: HOOK_MARKER } };
+
+  it('replaces the items of the earlier shape and keeps a user hook that merely mentions the launcher', () => {
+    const doc = JSON.stringify({ hooks: { UserPromptSubmit: [mentions, earlier] } });
+    const merged = JSON.parse(mergeJsonKeys(doc, [entry], new Set()).text) as unknown;
+    expect(merged).toEqual({ hooks: { UserPromptSubmit: [mentions, rendered] } });
+    expect(ownedItems([mentions, earlier, rendered], HOOK_MARKER)).toEqual([earlier, rendered]);
+  });
+
+  it('uninstall leaves the user hook that mentions the launcher', () => {
+    const doc = JSON.stringify({ hooks: { UserPromptSubmit: [mentions, rendered] } });
+    const removed = JSON.parse(removeJsonKeys(doc, [{ pointer: ['hooks', 'UserPromptSubmit'], marker: HOOK_MARKER }], 'a.json')) as unknown;
+    expect(removed).toEqual({ hooks: { UserPromptSubmit: [mentions] } });
   });
 });
 

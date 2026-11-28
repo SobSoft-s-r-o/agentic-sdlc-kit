@@ -81,6 +81,7 @@ export type GapRule =
   | 'ai-cli'
   | 'mode-change'
   | 'hook-spoof'
+  | 'kit-removal'
   | 'no-verify'
   | 'force-push'
   | 'worktree-prune'
