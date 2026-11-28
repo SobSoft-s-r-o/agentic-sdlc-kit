@@ -697,16 +697,25 @@ describe('JSON merges splice into the user\'s own text', () => {
     expect(removeJsonKeys(merged, marker, 'a.json', { pruneEmpty: false })).toBe(HAND_WRITTEN);
   });
 
-  it('appends owned items to an array spread over lines in its layout, and takes them back out', () => {
+  it('appends an owned item on its own line, on one line like the one-line items around it, and takes it back out', () => {
     const entry = ownItems(['hooks', 'PreToolUse'], OURS('sdlc hook pre-tool'));
     const merged = mergeJsonKeys(HAND_WRITTEN, [entry], new Set()).text;
-    const item = JSON.stringify(OURS('sdlc hook pre-tool'), null, 2).split('\n').join(`${eol}      `);
+    const item = JSON.stringify(OURS('sdlc hook pre-tool'));
     expect(merged).toBe(
       insertAt(HAND_WRITTEN, '"command": "user hook" }] }', `,${eol}      ${item}`),
     );
     expect(merged).toContain('{ "matcher": "Edit", "hooks": [{ "type": "command", "command": "user hook" }] }');
     const marker = [{ pointer: ['hooks', 'PreToolUse'], marker: 'sdlc hook' }];
     expect(removeJsonKeys(merged, marker, 'a.json', { pruneEmpty: false })).toBe(HAND_WRITTEN);
+  });
+
+  it('spreads an owned item over lines when an item around it is spread over lines', () => {
+    const text = '{\n  "hooks": {\n    "Stop": [\n      {\n        "hooks": []\n      }\n    ]\n  }\n}\n';
+    const merged = mergeJsonKeys(text, [ownItems(['hooks', 'Stop'], OURS('sdlc hook stop'))], new Set()).text;
+    const item = JSON.stringify(OURS('sdlc hook stop'), null, 2).split('\n').join('\n      ');
+    expect(merged).toBe(
+      '{\n  "hooks": {\n    "Stop": [\n      {\n        "hooks": []\n      },\n      ' + item + '\n    ]\n  }\n}\n',
+    );
   });
 
   it('refreshes an owned item in place of the old one and leaves the user items byte for byte', () => {

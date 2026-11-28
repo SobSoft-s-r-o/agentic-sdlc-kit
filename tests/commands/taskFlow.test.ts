@@ -404,6 +404,42 @@ describe('stagePublish', () => {
       expect(h.tracker.fields.get(issue)).toMatchObject({ status: 'Paused', waitingOn: 'Owner' });
     });
 
+    it('says on stderr that it reused the comment, naming it, and says nothing when it posted a new one', async () => {
+      const h = setup();
+      const { issue, file } = await publishFailingAfterPost(h);
+      const [posted] = visibleComments(h.tracker, issue);
+      const url = `https://github.test/issues/${issue}#issuecomment-${posted!.id}`;
+      h.err.length = 0;
+
+      await stagePublish(h.ctx, issue, 'planning', { file, needsApproval: true });
+
+      expect(h.err).toEqual([`stage publish: reused the stage summary already posted (${url})`]);
+
+      const fresh = setup();
+      const other = await newTask(fresh);
+      await stagePublish(fresh.ctx, other, 'planning', { file: await summaryFile(), needsApproval: true });
+      expect(fresh.err).toEqual([]);
+    });
+
+    it('stops with the step name and writes nothing when the login cannot be read', async () => {
+      const h = setup();
+      const { issue, file } = await publishFailingAfterPost(h);
+      const before = await stateOf(h.tracker, issue);
+      const writes = h.tracker.writes;
+      const comments = visibleComments(h.tracker, issue).length;
+      h.err.length = 0;
+      h.tracker.failNext('authenticatedLogin');
+
+      await expect(stagePublish(h.ctx, issue, 'planning', { file, needsApproval: true })).rejects.toThrow(
+        /authenticatedLogin failed for #\d+.*\(the state was not changed\)/,
+      );
+
+      expect(h.tracker.writes).toBe(writes);
+      expect(visibleComments(h.tracker, issue)).toHaveLength(comments);
+      expect(await stateOf(h.tracker, issue)).toEqual(before);
+      expect(h.err).toEqual([]);
+    });
+
     it('compares the body after trimming', async () => {
       const h = setup();
       const { issue, file } = await publishFailingAfterPost(h);

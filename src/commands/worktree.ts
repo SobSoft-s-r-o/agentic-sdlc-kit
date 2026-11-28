@@ -188,7 +188,7 @@ const IGNORED_ENTRY = '!! ';
 /** A file that holds local settings: `.env`, `.env.local`, `.env.production`, ... */
 const ENV_FILE = /^\.env(\..+)?$/;
 
-/** The ignored `.env` files among the lines of `git status --porcelain --ignored`, as paths. */
+/** The ignored `.env` files and directories among the lines of `git status --porcelain --ignored`, as git prints them (a directory ends with a slash). */
 function ignoredEnvFiles(lines: string[]): string[] {
   return lines
     .filter(line => line.startsWith(IGNORED_ENTRY))
@@ -239,7 +239,7 @@ async function updateMainCheckout(ctx: WorktreeContext): Promise<{ updated: bool
 
 /**
  * Cleans up after the merge of #issue: refuses while the worktree has changes (untracked files included,
- * whatever the user's git config hides), holds ignored `.env` files, or no PR of the task has
+ * whatever the user's git config hides), holds ignored `.env` files or directories, or no PR of the task has
  * merged (unless it is awaiting deployment or done), and when the command runs inside that worktree
  * (its directory would vanish under the caller: run it from the main checkout). Then it fast-forwards
  * the main checkout to the fetched default branch when that checkout is on it and clean (and only reports
@@ -274,8 +274,10 @@ export async function worktreeFinish(
       // Ignored files (build output, node_modules) go with the worktree, but local settings may exist nowhere else.
       const env = ignoredEnvFiles(lines);
       if (env.length > 0) {
+        // A directory keeps its slash (`.env/`, a Python virtualenv), and the wording says there is one.
+        const kind = env.some(path => path.endsWith('/')) ? 'files or directories' : 'files';
         blockers.push(
-          `${dir} holds ignored local files (${env.join(', ')}); move them out, then run \`sdlc worktree finish ${issue}\` again`,
+          `${dir} holds ignored local ${kind} (${env.join(', ')}); move them out, then run \`sdlc worktree finish ${issue}\` again`,
         );
       }
     }
@@ -364,7 +366,7 @@ export function registerWorktreeCommand(program: Command, makeContext: WorktreeC
     .description('After the merge: update the main checkout, remove the task worktree and delete its branch, never forced')
     .addHelpText(
       'after',
-      '\nIgnored files in the worktree (build output, node_modules) are removed together with it; an ignored .env file makes finish refuse, so move it out first.',
+      '\nIgnored files in the worktree (build output, node_modules) are removed together with it; an ignored .env file or directory makes finish refuse, so move it out first.',
     )
     .argument('<issue>', 'issue number')
     .option('--dry-run', 'show what would run without changing anything')
