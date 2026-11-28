@@ -133,9 +133,9 @@ describe('the command extractor', () => {
 // --- README ---------------------------------------------------------------------------------------------
 
 describe('README', () => {
-  it('states the current status: the core CLI, the installer and the harness hooks are available, the npm package is next', () => {
+  it('states the current status: the core CLI, the installer and the harness hooks are available, and the package is on npm from 0.3.0', () => {
     const status = readme.split('\n').find(line => line.startsWith('> Status:'));
-    expect(status).toBe('> Status: core CLI, installer and harness hooks available; npm package next');
+    expect(status).toBe('> Status: core CLI, installer and harness hooks available; on npm as `agentic-sdlc-kit` from version 0.3.0');
   });
 
   it('gives the bootstrap prompt, exactly, in a code block', () => {

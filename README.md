@@ -2,7 +2,7 @@
 
 Installable, agent-driven software development lifecycle for GitHub — works with Claude Code, Gemini CLI, OpenAI Codex and any `AGENTS.md`-aware agent.
 
-> Status: core CLI, installer and harness hooks available; npm package next
+> Status: core CLI, installer and harness hooks available; on npm as `agentic-sdlc-kit` from version 0.3.0
 
 See [the design](docs/superpowers/specs/2026-11-27-agentic-sdlc-design.md) for the whole picture.
 
@@ -15,6 +15,14 @@ Install agentic-sdlc-kit from https://github.com/SobSoft-s-r-o/agentic-sdlc-kit 
 ```
 
 The agent runs the preflight, detects your setup, asks you the install questions one at a time (agents, board, mode, task types, deploy targets, quality gate, merge policy, MCP servers, where secrets live, models, stack, owners, language), shows you `sdlc.config.yaml` and the plan, installs, and opens a pull request for you to review. The steps only you can do (tokens, MCP approvals) are listed at the end. The full procedure is in [INSTALL.md](INSTALL.md).
+
+## Requirements
+
+- Node.js 20 or newer
+- git 2.31 or newer
+- the [GitHub CLI](https://cli.github.com) (`gh`), logged in (`gh auth login`)
+
+The package is [`agentic-sdlc-kit` on npm](https://www.npmjs.com/package/agentic-sdlc-kit) and its binary is `sdlc`. Add it to a project with `npm install --save-dev agentic-sdlc-kit`, or run a release once with `npx -y agentic-sdlc-kit@<version> <command>`; the walkthrough below uses both.
 
 ## Two-minute walkthrough
 
@@ -75,5 +83,9 @@ What the layers guarantee, and what an agent with a shell can still do, is in [t
 ## Secrets
 
 The commit and push hooks block anything that looks like a secret, in `observe` and `enforce` mode alike, and print only a masked value. Secrets for local testing live in your OS keystore, production secrets in the store you name in the config; none belongs in a repository file. See "Secret guard" in [INSTALL.md](INSTALL.md).
+
+## Contributing, security and changes
+
+Setup, tests and commit style are in [CONTRIBUTING.md](CONTRIBUTING.md); everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md). Report a vulnerability privately, as [SECURITY.md](SECURITY.md) describes. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 
 License: MIT
