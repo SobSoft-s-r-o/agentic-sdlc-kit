@@ -223,25 +223,112 @@ function geminiSwitch(text: string | undefined): string | undefined {
   return disabled.length > 0 ? `hooksConfig.disabled lists ${disabled.join(', ')}` : undefined;
 }
 
+/** The characters of `text` outside quoted strings, with their index (`"..."` with backslash escapes, and `'...'` literal). */
+function* unquoted(text: string): Generator<[number, string]> {
+  let quote: string | undefined;
+  for (let index = 0; index < text.length; index++) {
+    const char = text.charAt(index);
+    if (quote === undefined) {
+      if (char === '"' || char === "'") quote = char;
+      else yield [index, char];
+    } else if (quote === '"' && char === '\\') {
+      index++;
+    } else if (char === quote) {
+      quote = undefined;
+    }
+  }
+}
+
+/** `text` without a trailing comment: a `#` outside a quoted string and everything after it. */
+function withoutComment(text: string): string {
+  for (const [index, char] of unquoted(text)) if (char === '#') return text.slice(0, index);
+  return text;
+}
+
+/** `text` cut at its first `=` outside a quoted string: the key and the value, `undefined` when there is none. */
+function splitPair(text: string): [key: string, value: string] | undefined {
+  for (const [index, char] of unquoted(text)) if (char === '=') return [text.slice(0, index), text.slice(index + 1).trim()];
+  return undefined;
+}
+
+/** The entries of an inline table body: `body` cut at the commas that are outside quoted strings and nested `{}`/`[]`. */
+function inlineEntries(body: string): string[] {
+  const entries: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (const [index, char] of unquoted(body)) {
+    if (char === '{' || char === '[') depth++;
+    else if (char === '}' || char === ']') depth--;
+    else if (char === ',' && depth === 0) {
+      entries.push(body.slice(start, index));
+      start = index + 1;
+    }
+  }
+  entries.push(body.slice(start));
+  return entries.filter(entry => entry.trim() !== '');
+}
+
+/** The names in a dotted key (`a . "b".'c'`: bare or quoted, blanks around the dots), `undefined` when `text` is not a key. Escapes in quoted names are not decoded. */
+function keyNames(text: string): string[] | undefined {
+  const names: string[] = [];
+  let rest = text.trim();
+  for (;;) {
+    const name = /^(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*/.exec(rest);
+    if (name === null) return undefined;
+    names.push(name[1] ?? name[2] ?? name[3] ?? '');
+    rest = rest.slice(name[0].length);
+    if (rest === '') return names;
+    if (!rest.startsWith('.')) return undefined;
+    rest = rest.slice(1).trimStart();
+  }
+}
+
+/** The keys that turn every Codex hook off when they are `false`: the current name and the deprecated one. */
+const CODEX_SWITCH_KEYS = ['features.hooks', 'features.codex_hooks'];
+
 /**
- * Codex: `hooks = false` (or the deprecated `codex_hooks`) in the `[features]` table, or
- * `features.hooks = false` at the top level, turns every hook off. A line reading, not a TOML parser:
- * enough for the forms Codex documents.
+ * The switch that `key = value` is, as `<key> is false`: the key reads `false` and is one of
+ * `CODEX_SWITCH_KEYS`, or the value is an inline table (`{ a = 1, b = false }`) with such a key, at
+ * any depth, so that `features = { hooks = false }` reads as `features.hooks = false`.
+ */
+function falseSwitch(key: string[], value: string): string | undefined {
+  if (value.startsWith('{') && value.endsWith('}')) {
+    for (const entry of inlineEntries(value.slice(1, -1))) {
+      const pair = splitPair(entry);
+      const names = pair === undefined ? undefined : keyNames(pair[0]);
+      const found = pair === undefined || names === undefined ? undefined : falseSwitch([...key, ...names], pair[1]);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  const name = key.join('.');
+  return value === 'false' && key.length === 2 && CODEX_SWITCH_KEYS.includes(name) ? `${name} is false` : undefined;
+}
+
+/**
+ * Codex: `hooks = false` (or the deprecated `codex_hooks`) in the `[features]` table, as
+ * `features.hooks = false` at the top level, or as `features = { hooks = false }` (an inline table,
+ * also under another table, where it is that table's own `features`), turns every hook off. A
+ * line reading, not a TOML parser: enough for the forms Codex documents. Keys may be quoted, and
+ * a trailing comment is ignored. Limits: it does not read a value that spans lines (a multi-line
+ * string or an inline table broken over lines), and it does not decode escapes in quoted keys.
  */
 function codexSwitch(text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
-  let table = '';
+  let table: string[] = [];
   for (const raw of text.split(/\r?\n/)) {
-    const line = raw.replace(/\s+#.*$/, '').trim();
-    const header = /^\[\s*([^\]]+?)\s*\]$/.exec(line);
-    if (header !== null) {
-      table = header[1] as string;
+    const line = withoutComment(raw).trim();
+    const header = /^\[\[?\s*(.+?)\s*\]\]?$/.exec(line);
+    const named = header === null ? undefined : keyNames(header[1] as string);
+    if (named !== undefined) {
+      table = named;
       continue;
     }
-    const setting = /^([A-Za-z0-9_.]+)\s*=\s*false$/.exec(line);
-    if (setting === null) continue;
-    const key = table === '' ? setting[1] : `${table}.${setting[1]}`;
-    if (key === 'features.hooks' || key === 'features.codex_hooks') return `${key} is false`;
+    const pair = splitPair(line);
+    const names = pair === undefined ? undefined : keyNames(pair[0]);
+    if (pair === undefined || names === undefined) continue;
+    const found = falseSwitch([...table, ...names], pair[1]);
+    if (found !== undefined) return found;
   }
   return undefined;
 }

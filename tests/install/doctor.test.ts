@@ -2074,6 +2074,13 @@ describe('hooks.switches', () => {
     '# mine\n[features]\n  hooks=false # off\n',
     '[features]\ncodex_hooks = false\n',
     'features.hooks = false\n',
+    'features = { hooks = false }\n',
+    'features = { other = 1, codex_hooks = false } # x\n',
+    'features={hooks=false}# x\n',
+    '"features" = { "hooks" = false }\n',
+    "'features' = { 'codex_hooks' = false }\n",
+    'features = { note = "a } # b", hooks = false }\n',
+    '[ "features" ]\n"hooks" = false\n',
   ])('fails in enforce when .codex/config.toml has %j', async toml => {
     const h = allThree({ cfg: enforceThree() });
     // Before the kit's tables: a top-level key after a table header would belong to that table.
@@ -2086,6 +2093,31 @@ describe('hooks.switches', () => {
   it('does not take other Codex settings for the switch', async () => {
     const h = allThree({ cfg: enforceThree() });
     h.fs.write('.codex/config.toml', '[features]\nhooks = true\n[other]\nhooks = false\n');
+    expect(byId(await runDoctor(h.env, h.cfg), 'hooks.switches').status).toBe('ok');
+  });
+
+  it.each([
+    ['features = { hooks = false }\n', 'features.hooks is false'],
+    ['features = { other = 1, codex_hooks = false } # x\n', 'features.codex_hooks is false'],
+  ])('names the inline-table switch of %j', async (toml, message) => {
+    const h = allThree({ cfg: enforceThree() });
+    h.fs.write('.codex/config.toml', toml);
+    const check = byId(await runDoctor(h.env, h.cfg), 'hooks.switches');
+    expect(check.status).toBe('fail');
+    expect(check.message).toContain(`.codex/config.toml: ${message}`);
+  });
+
+  it.each([
+    'features = { hooks = true }\n',
+    '[profile]\nfeatures = { hooks = false }\n',
+    'features = { other = { hooks = false }, hooks = true }\n',
+    'features = { "a.hooks" = false }\n',
+    'features = { note = "hooks = false" }\n',
+    'other = { hooks = false }\n',
+    '# features = { hooks = false }\n',
+  ])('does not take %j for a Codex switch', async toml => {
+    const h = allThree({ cfg: enforceThree() });
+    h.fs.write('.codex/config.toml', toml);
     expect(byId(await runDoctor(h.env, h.cfg), 'hooks.switches').status).toBe('ok');
   });
 
