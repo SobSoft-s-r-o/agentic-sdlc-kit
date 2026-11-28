@@ -254,7 +254,7 @@ ${readFileSync(validConfig, 'utf8').replace('mode: observe', '# owner notes: enf
 
     expect(h.out).toEqual([
       'mode: observe -> enforce. Run `sdlc upgrade` so the instructions and hooks match.',
-      'Commit and push sdlc.config.yaml: existing task worktrees and new ones read the mode from their own checkout.',
+      'The mode applies to all worktrees at once when set in the main checkout (the harness hooks read it there); the rest of the config is per checkout: commit and push sdlc.config.yaml.',
     ]);
     expect(h.err).toEqual([]);
     expect(readFileSync(h.configPath, 'utf8')).toBe(
@@ -272,7 +272,7 @@ ${readFileSync(validConfig, 'utf8').replace('mode: observe', '# owner notes: enf
 
     expect(h.out).toEqual([
       'mode: enforce -> observe. Run `sdlc upgrade` so the instructions and hooks match.',
-      'Commit and push sdlc.config.yaml: existing task worktrees and new ones read the mode from their own checkout.',
+      'The mode applies to all worktrees at once when set in the main checkout (the harness hooks read it there); the rest of the config is per checkout: commit and push sdlc.config.yaml.',
     ]);
     expect(loadConfigFromString(readFileSync(h.configPath, 'utf8')).mode).toBe('observe');
   });
@@ -409,7 +409,7 @@ ${readFileSync(validConfig, 'utf8').replace('mode: observe', '# owner notes: enf
       changed: true,
       dryRun: false,
       path: h.configPath,
-      note: 'Commit and push sdlc.config.yaml: existing task worktrees and new ones read the mode from their own checkout.',
+      note: 'The mode applies to all worktrees at once when set in the main checkout (the harness hooks read it there); the rest of the config is per checkout: commit and push sdlc.config.yaml.',
     });
   });
 

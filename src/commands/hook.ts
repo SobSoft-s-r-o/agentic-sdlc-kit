@@ -81,6 +81,11 @@ export interface HookContext {
   readStdin(): Promise<string>;
   /** The config of the repository whose root is `root`: `undefined` when there is none, a throw when it is invalid. */
   loadConfig(root: string): Config | undefined;
+  /**
+   * The command line named the config file (`--config <path>`): then `loadConfig` answers with that
+   * file for every root, and the mode is not read from the main checkout (see `effectiveMode`).
+   */
+  explicitConfig?: boolean;
   /** Called only when an event needs a task (an edit that is not cached, a session start or an approval prompt). */
   makeTracker(cfg: Config, root: string): Tracker;
   /** Git, run in `cwd`. */
@@ -124,6 +129,40 @@ export const GIT_TIMEOUT_MS = 2000;
 export const TASK_CACHE_TTL_MS = 10 * 60_000;
 
 const NO_OUTCOME: HookOutcome = { context: [], warnings: [] };
+
+/**
+ * The mode a hook applies: the one of the main checkout's config, so that `sdlc config set mode` in
+ * the main checkout reaches every worktree at once, without a commit. The worktree's own mode counts
+ * when `--config` named the file (`explicitConfig`) or the main checkout has no usable config (none,
+ * or one that does not load: the caller passes `undefined` for it). Nothing else is taken from main.
+ */
+export function effectiveMode(worktreeCfg: Config, mainCfg: Config | undefined, explicitConfig: boolean): Config['mode'] {
+  return explicitConfig || mainCfg === undefined ? worktreeCfg.mode : mainCfg.mode;
+}
+
+/**
+ * The config a hook runs on: the checkout's own, with the mode of the main checkout's (see
+ * `effectiveMode`). A config of the checkout that is missing or invalid is the hook's problem, as
+ * ever (it is skipped); the main checkout's is only an override, so whatever is wrong with it is
+ * ignored.
+ */
+function configFor(ctx: HookContext, checkout: Checkout): Config {
+  const cfg = ctx.loadConfig(checkout.root);
+  if (cfg === undefined) throw new Error(`no sdlc.config.yaml in ${checkout.root}`);
+  const explicit = ctx.explicitConfig === true;
+  const mainRoot = mainRootOf(checkout);
+
+  let mainCfg: Config | undefined;
+  if (!explicit && mainRoot !== checkout.root) {
+    try {
+      mainCfg = ctx.loadConfig(mainRoot);
+    } catch {
+      mainCfg = undefined;
+    }
+  }
+  const mode = effectiveMode(cfg, mainCfg, explicit);
+  return mode === cfg.mode ? cfg : { ...cfg, mode };
+}
 
 /** One line for the stderr skip message: white space collapsed, and not unreasonably long. */
 function reasonOf(error: unknown): string {
@@ -613,8 +652,7 @@ async function answer(
     // others only warn, and there is no main checkout to log a gap in.
     return renderOutput(harness, eventName, decide(otherViolations(tool), 'observe'));
   }
-  const cfg = ctx.loadConfig(checkout.root);
-  if (cfg === undefined) throw new Error(`no sdlc.config.yaml in ${checkout.root}`);
+  const cfg = configFor(ctx, checkout);
 
   const env: HookEnv = { ctx, event, checkout, cfg, deadline };
   let outcome = NO_OUTCOME;

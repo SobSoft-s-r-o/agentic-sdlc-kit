@@ -324,6 +324,8 @@ export function buildProgram(deps: CliDeps = {}): Command {
           const path = configOption === undefined ? join(root, CONFIG_FILE) : resolve(cwd, configOption);
           return existsSync(path) ? loadConfig(path) : undefined;
         },
+        // With `--config` the one file decides, for every root; without it the mode comes from the main checkout.
+        explicitConfig: configOption !== undefined,
         makeTracker: (cfg, root) => new GitHubTracker(defaultGhRunner, cfg, { repoRoot: root }),
         gitFor: dir => createGitRunner(dir, { timeoutMs: GIT_TIMEOUT_MS }),
         now: () => new Date().toISOString(),

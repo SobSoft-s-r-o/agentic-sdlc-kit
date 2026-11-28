@@ -99,9 +99,13 @@ async function suggest(
 
 const SETTABLE_MODES: readonly ConfigMode[] = ['observe', 'enforce'];
 
-/** Each checkout reads the mode from its own copy of the config, so a change reaches a task worktree only through git. */
+/**
+ * The harness hooks read the mode from the main checkout's config (`effectiveMode` in
+ * `commands/hook.ts`), so a change there reaches every worktree at once; the rest of the config, and
+ * what git hooks and commands read, stays per checkout and travels through git.
+ */
 const PER_CHECKOUT_NOTE =
-  'Commit and push sdlc.config.yaml: existing task worktrees and new ones read the mode from their own checkout.';
+  'The mode applies to all worktrees at once when set in the main checkout (the harness hooks read it there); the rest of the config is per checkout: commit and push sdlc.config.yaml.';
 
 /**
  * `sdlc config set mode <observe|enforce> [--dry-run]`: owners only. Edits the one line in

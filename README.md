@@ -64,7 +64,7 @@ Tasks and the board:
 Installing and checking:
 
 - `sdlc config validate | suggest` - check `sdlc.config.yaml`, or print one suggested from the repository (`suggest --write` creates it when it does not exist).
-- `sdlc config set mode <observe|enforce>` - switch the enforcement mode (`--dry-run` only reports). Owners only: a login listed under `agents` is refused, and the harness hooks block an agent from running it. Run `sdlc upgrade` afterwards so the instructions and hooks match, and commit and push the config: each checkout reads the mode from its own copy.
+- `sdlc config set mode <observe|enforce>` - switch the enforcement mode (`--dry-run` only reports). Owners only: a login listed under `agents` is refused, and the harness hooks block an agent from running it. Run `sdlc upgrade` afterwards so the instructions and hooks match, and commit and push the config. The harness hooks read the mode from the main checkout, so run it there and it applies to all worktrees at once; the rest of the config is per checkout.
 - `sdlc init` - install the managed files, git hooks and GitHub setup (board, labels, branch and push protection) for `sdlc.config.yaml` (`--dry-run` only reports, `--skip-github` leaves GitHub alone, `--overwrite-modified` replaces files you edited). It commits nothing.
 - `sdlc upgrade` - bring the managed files up to the installed kit version and remove what it no longer generates (`--dry-run`, `--overwrite-modified`). It never touches GitHub.
 - `sdlc uninstall` - remove the managed files and the git hooks path, keeping everything you wrote and edited (`--dry-run`). The board, labels and issues on GitHub remain.
