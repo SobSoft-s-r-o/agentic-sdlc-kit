@@ -12,7 +12,7 @@ Open-source packaging: the kit is published on npm, has CI and a release workflo
 
 ### Added
 
-- The package is published on npm as `agentic-sdlc-kit` (from 0.3.0), with provenance. `v0.1.0` and `v0.2.0` were GitHub releases only and never reached npm.
+- The package is published on npm as `agentic-sdlc-kit` (from 0.3.0). Releases published by the workflow carry npm provenance; 0.3.0, the bootstrap publish by hand, has none. `v0.1.0` and `v0.2.0` were GitHub releases only and never reached npm.
 - CI on every push to `main` and every pull request: typecheck, tests, build and a pack smoke test (`scripts/pack-smoke.mjs`: pack, install the tarball into an empty project, run the installed `sdlc`), on Ubuntu with Node 20, 22 and 24 and on macOS with Node 22.
 - A release workflow that publishes to npm from a version tag through trusted publishing (OIDC), without an npm token. It checks that the tag matches `package.json`, runs typecheck, tests, build and the pack smoke test first, publishes a version containing `-` (a prerelease such as `0.4.0-rc.1`) under the `next` dist-tag instead of `latest`, and skips a version that is already published. The first publish is manual (`npm publish --provenance=false`, then `npm trust`); `CONTRIBUTING.md` has the steps.
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) and `SECURITY.md` (reports through GitHub private reporting).

@@ -102,4 +102,4 @@ npm needs the package to exist before it can trust a workflow, so the owner publ
 4. `npm trust github agentic-sdlc-kit --file release.yml --repo SobSoft-s-r-o/agentic-sdlc-kit --allow-publish`. This needs npm 11.15.0 or newer.
 5. In the package settings on npmjs.com, enable "Require two-factor authentication and disallow tokens".
 
-From then on, every release is a pushed tag, as above.
+The tag of the first version can be pushed before the manual publish: its `release` run fails at the publish step, and re-running it after step 3 turns it green, because the version is then skipped. From then on, every release is a pushed tag, as above.
