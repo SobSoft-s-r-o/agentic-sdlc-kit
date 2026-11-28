@@ -5,11 +5,13 @@ import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerHookCommand, runHook, type HookContext } from '../../src/commands/hook.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
+import { StateCommentError } from '../../src/core/stateComment.js';
 import { newTask } from '../../src/core/stateMachine.js';
 import type { Approval, Phase, TaskState } from '../../src/core/types.js';
 import { GhError } from '../../src/github/gh.js';
-import { createGitRunner } from '../../src/install/provision.js';
+import { createGitRunner, type GitRunner } from '../../src/install/provision.js';
 import type { HookEventName, HookHarness } from '../../src/hooks/types.js';
+import { CASE_INSENSITIVE_FS, recased } from '../support/caseFs.js';
 import { FakeTracker } from '../support/fakeTracker.js';
 import { createTestRepo, type TestRepo } from '../support/gitRepo.js';
 
@@ -252,6 +254,95 @@ describe('runHook pre-tool: edits', () => {
     }
   });
 
+  describe('the git directory', () => {
+    it.each(['.git/config', '.git/hooks/pre-commit'])('denies a write to %s in enforce, asking no task', async file => {
+      taskBranch('task/5-x');
+      const getTask = vi.spyOn(tracker, 'getTask');
+
+      const result = await claudePreTool(claudeWrite(join(repo.root, file)));
+
+      expect(denyReason(result.stdout)).toContain(`${file} is protected`);
+      expect(getTask).not.toHaveBeenCalled();
+      expect(gapLines()).toMatchObject([{ rule: 'protected-path', blocked: true, issue: 5 }]);
+    });
+
+    it.each(['.git/config', '.git/hooks/pre-commit'])('allows a write to %s in observe, like the other protected paths', async file => {
+      const result = await claudePreTool(claudeWrite(join(repo.root, file)), { cfg: observe });
+
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toEqual([]);
+      expect(gapLines()).toEqual([]);
+    });
+
+    it('denies the config and hooks of the shared git directory from a worktree, and the .git file of the worktree itself', async () => {
+      repo.git('worktree', 'add', '-q', '-b', 'task/7-x', '.worktrees/7-x');
+      const cwd = join(repo.root, '.worktrees', '7-x');
+
+      for (const [file, shown] of [
+        [join(repo.root, '.git', 'hooks', 'pre-commit'), '.git/hooks/pre-commit'],
+        [join(repo.root, '.git', 'worktrees', '7-x', 'config.worktree'), '.git/worktrees/7-x/config.worktree'],
+        [join(cwd, '.git'), '.git'],
+      ] as const) {
+        const result = await claudePreTool(claudeWrite(file, cwd));
+
+        expect(denyReason(result.stdout), file).toContain(`${shown} is protected`);
+      }
+    });
+
+    it('denies a mis-cased .GIT/ as well', async () => {
+      const result = await claudePreTool(claudeWrite(join(repo.root, '.GIT', 'hooks', 'pre-push')));
+
+      expect(denyReason(result.stdout)).toContain('is protected');
+    });
+  });
+
+  it.skipIf(!CASE_INSENSITIVE_FS)('does not let the case of a path hide sdlc.config.yaml (case-insensitive filesystems)', async () => {
+    const miscased = join(dirname(repo.root), recased('repo') as string, 'sdlc.config.yaml');
+
+    const result = await claudePreTool(claudeWrite(miscased));
+
+    expect(denyReason(result.stdout)).toContain('sdlc.config.yaml is protected');
+    expect(gapLines()).toMatchObject([{ rule: 'protected-path', blocked: true }]);
+  });
+
+  it('treats a file that is in the project but not under its checkout root as protected: enforce denies, observe says nothing', async () => {
+    // Git and the path disagree about the root (the case bug of a case-insensitive filesystem), simulated.
+    const gitFor = (dir: string): GitRunner => {
+      const real = createGitRunner(dir);
+      return async args => {
+        const result = await real(args);
+        if (args[0] !== 'rev-parse') return result;
+        const [top, ...rest] = result.stdout.split('\n');
+        return { ...result, stdout: [(top ?? '').toUpperCase(), ...rest].join('\n') };
+      };
+    };
+    const stdin = claudeWrite(join(repo.root, 'sdlc.config.yaml'));
+
+    const enforced = await claudePreTool(stdin, { gitFor });
+    const observed = await claudePreTool(stdin, { gitFor, cfg: observe });
+
+    expect(denyReason(enforced.stdout)).toContain('is protected');
+    expect(observed.stdout).toBe('');
+    expect(gapLines()).toMatchObject([{ rule: 'protected-path', blocked: true }]);
+  });
+
+  it('counts a git call killed on its time limit as no checkout for that file: the edit is allowed', async () => {
+    taskBranch('task/5-x');
+    const getTask = vi.spyOn(tracker, 'getTask');
+    let calls = 0;
+    const gitFor = (dir: string): GitRunner => {
+      const real = createGitRunner(dir);
+      // The first checkout (the cwd, two git calls) is found; the one of the file times out.
+      return args => (++calls <= 2 ? real(args) : Promise.resolve({ stdout: '', code: 1, stderr: 'terminated by SIGTERM' }));
+    };
+
+    const result = await claudePreTool(claudeWrite(join(repo.root, 'src', 'a.ts')), { gitFor });
+
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toEqual([]);
+    expect(getTask).not.toHaveBeenCalled();
+  });
+
   it('does not call the tracker for Markdown and docs edits (Codex apply_patch)', async () => {
     taskBranch('task/5-x');
     const getTask = vi.spyOn(tracker, 'getTask');
@@ -412,6 +503,44 @@ describe('runHook pre-tool: shell and subagent', () => {
   });
 });
 
+describe('runHook: local files live in the main checkout', () => {
+  const worktreeCwd = (): string => join(repo.root, '.worktrees', '7-x');
+
+  it('writes the gaps log of a violation found from a worktree to the main checkout', async () => {
+    repo.git('worktree', 'add', '-q', '-b', 'task/7-x', '.worktrees/7-x');
+
+    const result = await claudePreTool(payload(worktreeCwd(), 'Bash', { command: 'gh pr merge 1 --admin' }));
+
+    denyReason(result.stdout);
+    expect(gapLines()).toMatchObject([{ rule: 'admin-merge', issue: 7, blocked: true }]);
+    expect(existsSync(join(worktreeCwd(), '.sdlc'))).toBe(false);
+  });
+
+  it('writes the gaps log of an edit found from a worktree to the main checkout', async () => {
+    repo.git('worktree', 'add', '-q', '-b', 'task/7-x', '.worktrees/7-x');
+    tracker.seedTask(feature(7, false));
+
+    await claudePreTool(claudeWrite(join(worktreeCwd(), 'src', 'a.ts'), worktreeCwd()));
+
+    expect(gapLines()).toMatchObject([{ rule: 'plan-not-approved', issue: 7 }]);
+    expect(existsSync(join(worktreeCwd(), '.sdlc'))).toBe(false);
+  });
+
+  it('keeps the task cache in the main checkout too, shared by every worktree', async () => {
+    repo.git('worktree', 'add', '-q', '-b', 'task/7-x', '.worktrees/7-x');
+    tracker.seedTask(feature(7, true));
+    const getTask = vi.spyOn(tracker, 'getTask');
+    const stdin = claudeWrite(join(worktreeCwd(), 'src', 'a.ts'), worktreeCwd());
+
+    await claudePreTool(stdin);
+    await claudePreTool(stdin);
+
+    expect(Object.keys(taskCache() ?? {})).toEqual(['7']);
+    expect(getTask).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(worktreeCwd(), '.sdlc'))).toBe(false);
+  });
+});
+
 describe('runHook: events that only render context for now', () => {
   it.each([
     ['claude', 'session-start', ''],
@@ -507,6 +636,21 @@ describe('runHook: fails open', () => {
     expect((JSON.parse(result.stdout) as { systemMessage: string }).systemMessage).toBe(
       'sdlc: could not read task #5; edit allowed',
     );
+    expect(taskCache()).toBeUndefined();
+  });
+
+  it('a state comment that cannot be read is a task that cannot be read: warning, edit allowed (not no-task)', async () => {
+    taskBranch('task/5-x');
+    vi.spyOn(tracker, 'getTask').mockRejectedValue(new StateCommentError('state comment is not valid JSON'));
+
+    const result = await claudePreTool(claudeWrite(join(repo.root, 'src', 'a.ts')));
+
+    expect(result.stderr).toEqual([]);
+    expect((JSON.parse(result.stdout) as { systemMessage: string }).systemMessage).toBe(
+      'sdlc: could not read task #5; edit allowed',
+    );
+    expect(result.stdout).not.toContain('deny');
+    expect(gapLines()).toEqual([]);
     expect(taskCache()).toBeUndefined();
   });
 

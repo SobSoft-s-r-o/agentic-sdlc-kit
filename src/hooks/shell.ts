@@ -189,18 +189,70 @@ function hasShortFlag(args: readonly string[], letter: string, valueLetters: str
   return false;
 }
 
-/** The git subcommand and its arguments, after git's own options (`-C <dir>`, `-c <k=v>`, ...). */
-function gitCommand(args: readonly string[]): { sub: string | undefined; rest: string[] } {
+/**
+ * The git subcommand and its arguments, after git's own options (`-C <dir>`, `-c <k=v>`, ...), and
+ * the settings those options give (`-c <k=v>`, `--config-env=<k>=<var>`).
+ */
+function gitCommand(args: readonly string[]): { sub: string | undefined; rest: string[]; settings: string[] } {
+  const settings: string[] = [];
   let i = 0;
   while (i < args.length && (args[i] as string).startsWith('-')) {
-    i += ['-C', '-c', '--git-dir', '--work-tree', '--namespace'].includes(args[i] as string) ? 2 : 1;
+    const arg = args[i] as string;
+    if (arg === '-c' || arg === '--config-env') {
+      const value = args[i + 1];
+      if (value !== undefined) settings.push(value);
+      i += 2;
+    } else if (arg.startsWith('--config-env=')) {
+      settings.push(arg.slice('--config-env='.length));
+      i += 1;
+    } else {
+      i += ['-C', '--git-dir', '--work-tree', '--namespace'].includes(arg) ? 2 : 1;
+    }
   }
-  return { sub: args[i], rest: args.slice(i + 1) };
+  return { sub: args[i], rest: args.slice(i + 1), settings };
+}
+
+/** `core.hooksPath` as a `-c` setting (`core.hooksPath=x`, or the bare key), in any letter case. */
+const isHooksPathSetting = (setting: string): boolean => /^core\.hookspath(=|$)/i.test(setting);
+
+/** `git config` options that take their value as the next argument. */
+const CONFIG_VALUE_OPTIONS: readonly string[] = ['-f', '--file', '--blob', '--default', '--type', '--comment'];
+const CONFIG_READ_OPTIONS: readonly string[] = ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '-l', '--list'];
+const CONFIG_WRITE_OPTIONS: readonly string[] = ['--unset', '--unset-all', '--replace-all', '--add'];
+
+/**
+ * Whether the arguments of `git config` set or unset `core.hooksPath`, in any scope: the key with
+ * a value, `--unset`, `--replace-all`, ..., or the `set` and `unset` subcommands. Reading it
+ * (`--get`, the key alone, `get`, `--list`) is not.
+ */
+function changesHooksPath(args: readonly string[]): boolean {
+  const named: string[] = [];
+  let reads = false;
+  let writes = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === '--') {
+      named.push(...args.slice(i + 1));
+      break;
+    }
+    if (CONFIG_READ_OPTIONS.includes(arg)) reads = true;
+    else if (CONFIG_WRITE_OPTIONS.includes(arg)) writes = true;
+    else if (CONFIG_VALUE_OPTIONS.includes(arg)) i += 1;
+    else if (!arg.startsWith('-')) named.push(arg);
+  }
+  if (reads) return false;
+  const subcommand = named[0]?.toLowerCase();
+  if (subcommand === 'get' || subcommand === 'list') return false;
+  const sets = subcommand === 'set' || subcommand === 'unset';
+  const [key, ...values] = sets ? named.slice(1) : named;
+  return key !== undefined && /^core\.hookspath$/i.test(key) && (sets || writes || values.length > 0);
 }
 
 function gitViolations(args: readonly string[]): Violation[] {
-  const { sub, rest } = gitCommand(args);
+  const { sub, rest, settings } = gitCommand(args);
   const found: Violation[] = [];
+  // Turning the hooks off by configuration is --no-verify for every command at once.
+  if (settings.some(isHooksPathSetting) || (sub === 'config' && changesHooksPath(rest))) found.push(NO_VERIFY);
   if (sub !== undefined && NO_VERIFY_SUBCOMMANDS.has(sub)) {
     // `-n` is `--no-verify` for commit only; for push it is `--dry-run`.
     if (rest.includes('--no-verify') || (sub === 'commit' && hasShortFlag(rest, 'n', 'mFCctuS'))) {

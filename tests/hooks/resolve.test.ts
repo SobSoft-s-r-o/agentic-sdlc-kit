@@ -1,9 +1,10 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createGitRunner, type GitRunner } from '../../src/install/provision.js';
-import { checkoutOf, realPathOf } from '../../src/hooks/resolve.js';
+import { checkoutOf, mainRootOf, realPathOf } from '../../src/hooks/resolve.js';
+import { CASE_INSENSITIVE_FS, recased } from '../support/caseFs.js';
 import { createTestRepo, type TestRepo } from '../support/gitRepo.js';
 
 let repo: TestRepo;
@@ -111,5 +112,33 @@ describe('realPathOf', () => {
 
     expect(realPathOf(join(repo.root, 'src', 'a.ts'))).toBe(join(root, 'src', 'a.ts'));
     expect(realPathOf(join(repo.root, 'src', 'new', 'deep', 'b.ts'))).toBe(join(root, 'src', 'new', 'deep', 'b.ts'));
+  });
+});
+
+describe('realPathOf: letter case', () => {
+  it.skipIf(!CASE_INSENSITIVE_FS)('gives a path the case it has on disk, which is how git reports it', async () => {
+    const other = recased('repo') as string;
+    const miscased = join(dirname(repo.root), other, 'src', 'a.ts');
+
+    expect(realPathOf(miscased)).toBe(join(root, 'src', 'a.ts'));
+    // Git and the path now agree on the checkout root, so the path sits under it.
+    const checkout = await checkoutOf(dirname(realPathOf(miscased)), gitFor);
+    expect(realPathOf(miscased).startsWith(`${checkout?.root}/`)).toBe(true);
+  });
+});
+
+describe('mainRootOf', () => {
+  it('is the root of the main checkout, also from one of its worktrees', async () => {
+    repo.git('worktree', 'add', '-q', '-b', 'task/7-x', '.worktrees/7-x');
+
+    const main = await checkoutOf(repo.root, gitFor);
+    const worktree = await checkoutOf(join(repo.root, '.worktrees', '7-x'), gitFor);
+
+    expect(main && mainRootOf(main)).toBe(root);
+    expect(worktree && mainRootOf(worktree)).toBe(root);
+  });
+
+  it('falls back to the checkout root when the common directory is not a `.git` directory (a bare repository)', () => {
+    expect(mainRootOf({ root: '/work/wt', commonDir: '/srv/shop.git' })).toBe('/work/wt');
   });
 });

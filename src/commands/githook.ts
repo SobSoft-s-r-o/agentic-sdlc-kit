@@ -182,15 +182,23 @@ export async function decidePrePush(
 const NO_SUCH_ISSUE = /could not resolve to an? issue/i;
 
 /**
- * Whether `error` from `Tracker.getTask` means there is no tracked task: the issue exists without
- * readable task state, or does not exist. Any other failure (offline, no `gh`, rate limit) is not.
+ * Whether `error` from `Tracker.getTask` means the issue has no task to read: it has no state
+ * comment, or does not exist. Any other failure (offline, no `gh`, rate limit, a state comment that
+ * cannot be read) is not.
+ */
+export function isMissingTaskError(error: unknown): boolean {
+  return (
+    error instanceof NoStateCommentError || (error instanceof GhError && NO_SUCH_ISSUE.test(error.stderr))
+  );
+}
+
+/**
+ * Whether `error` from `Tracker.getTask` means there is no tracked task, for the git hooks: the
+ * issue exists without readable task state, or does not exist. Any other failure (offline, no
+ * `gh`, rate limit) is not.
  */
 export function isNoTaskError(error: unknown): boolean {
-  return (
-    error instanceof NoStateCommentError ||
-    error instanceof StateCommentError ||
-    (error instanceof GhError && NO_SUCH_ISSUE.test(error.stderr))
-  );
+  return isMissingTaskError(error) || error instanceof StateCommentError;
 }
 
 /**

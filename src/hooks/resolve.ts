@@ -16,8 +16,9 @@ export interface Checkout {
 }
 
 /**
- * `path` with the symlinks of its existing part resolved (the temp directory of macOS is one), and
- * the part that does not exist yet kept as written. The edited file may not exist, nor its directory.
+ * `path` with the symlinks of its existing part resolved (the temp directory of macOS is one) and
+ * its letter case made the one on disk, which is how git spells a path; the part that does not exist
+ * yet is kept as written. The edited file may not exist, nor its directory.
  */
 export function realPathOf(path: string): string {
   const absolute = resolve(path);
@@ -25,7 +26,7 @@ export function realPathOf(path: string): string {
   let existing = absolute;
   for (;;) {
     try {
-      return join(realpathSync(existing), ...missing.reverse());
+      return join(realpathSync.native(existing), ...missing.reverse());
     } catch {
       const parent = dirname(existing);
       if (parent === existing) return absolute;
@@ -33,6 +34,15 @@ export function realPathOf(path: string): string {
       existing = parent;
     }
   }
+}
+
+/**
+ * The root of the main checkout, where the kit keeps its local files (`.sdlc/cache/`) whichever
+ * worktree runs: the parent of the common git directory when that is a `.git` directory, else (a
+ * bare repository) the root of `checkout` itself.
+ */
+export function mainRootOf(checkout: Pick<Checkout, 'root' | 'commonDir'>): string {
+  return basename(checkout.commonDir) === '.git' ? dirname(checkout.commonDir) : checkout.root;
 }
 
 /** The nearest directory that exists, `path` itself or the closest ancestor (a file counts as missing). */

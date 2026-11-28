@@ -18,7 +18,7 @@ import {
   spawnDetachedLogged,
   type GitHookContext,
 } from './commands/githook.js';
-import { registerHookCommand, type HookContext } from './commands/hook.js';
+import { GIT_TIMEOUT_MS, registerHookCommand, type HookContext } from './commands/hook.js';
 import { registerInitCommand } from './commands/init.js';
 import type { InstallContext, InstallContextFactory } from './commands/install.js';
 import { registerReconcileCommand } from './commands/reconcile.js';
@@ -235,7 +235,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
           return existsSync(path) ? loadConfig(path) : undefined;
         },
         makeTracker: (cfg, root) => new GitHubTracker(defaultGhRunner, cfg, { repoRoot: root }),
-        gitFor: dir => createGitRunner(dir),
+        gitFor: dir => createGitRunner(dir, { timeoutMs: GIT_TIMEOUT_MS }),
         now: () => new Date().toISOString(),
         out,
         err,

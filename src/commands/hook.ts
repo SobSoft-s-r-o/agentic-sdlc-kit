@@ -21,7 +21,7 @@ import {
   type PathCheck,
   type Violation,
 } from '../hooks/policy.js';
-import { checkoutOf, realPathOf, type Checkout } from '../hooks/resolve.js';
+import { checkoutOf, mainRootOf, realPathOf, type Checkout } from '../hooks/resolve.js';
 import { shellViolations } from '../hooks/shell.js';
 import {
   HOOK_EVENTS,
@@ -34,7 +34,7 @@ import {
 } from '../hooks/types.js';
 import type { GitRunner } from '../install/provision.js';
 import type { Tracker } from '../tracker/types.js';
-import { deadlineOf, isNoTaskError, type Deadline } from './githook.js';
+import { deadlineOf, isMissingTaskError, type Deadline } from './githook.js';
 
 /**
  * `sdlc hook <harness> <event>`: the entrypoint a harness runs for its hooks (through the launcher
@@ -81,6 +81,8 @@ export interface HookContext {
 
 /** Longest the hook waits, in all, for GitHub; the rendered `pre-tool` timeout is 15 s. */
 export const DEFAULT_DEADLINE_MS = 8000;
+/** Longest one git call of the hook may take; the real context kills a slower git (see `createGitRunner`). */
+export const GIT_TIMEOUT_MS = 5000;
 /** How long a cached task state, read while edits were allowed, is trusted. */
 export const TASK_CACHE_TTL_MS = 10 * 60_000;
 
@@ -112,6 +114,8 @@ class TaskReader {
   private readonly types: Map<string, TaskTypeDef>;
   private tracker: Tracker | undefined;
   private cache: Promise<TaskCache> | undefined;
+  /** Where the cache lives: the main checkout, shared by all its worktrees. */
+  private readonly cacheRoot: string;
 
   constructor(
     private readonly ctx: HookContext,
@@ -120,6 +124,7 @@ class TaskReader {
     private readonly deadline: Deadline,
   ) {
     this.types = typeRegistry(cfg);
+    this.cacheRoot = mainRootOf(checkout);
   }
 
   read(issue: number): Promise<TaskRead> {
@@ -138,7 +143,7 @@ class TaskReader {
       const at = this.ctx.now();
       const entries = { ...(await this.cached()) };
       for (const [issue, state] of this.learned) entries[String(issue)] = { at, state };
-      await writeJsonFile(this.checkout.root, TASK_CACHE_FILE, entries);
+      await writeJsonFile(this.cacheRoot, TASK_CACHE_FILE, entries);
     } catch {
       // The cache only saves a GitHub read; a read-only checkout works without it.
     }
@@ -152,7 +157,8 @@ class TaskReader {
         const task = await this.deadline.run(() => this.trackerOf().getTask(issue));
         state = task.state;
       } catch (error) {
-        return { lookup: isNoTaskError(error) ? 'none' : 'failed' };
+        // A state comment that cannot be read is no 'none': that would block the edit on a read problem.
+        return { lookup: isMissingTaskError(error) ? 'none' : 'failed' };
       }
     }
     const type = this.types.get(state.type);
@@ -179,7 +185,7 @@ class TaskReader {
   }
 
   private cached(): Promise<TaskCache> {
-    this.cache ??= readJsonFile<unknown>(this.checkout.root, TASK_CACHE_FILE).then(
+    this.cache ??= readJsonFile<unknown>(this.cacheRoot, TASK_CACHE_FILE).then(
       value => (isRecord(value) ? (value as TaskCache) : {}),
       () => ({}),
     );
@@ -204,11 +210,15 @@ interface PreToolEnv {
 
 const posixPath = (path: string): string => path.split(sep).join('/');
 
+/** Whether `path` is `dir` or lies below it (both absolute and normalized). */
+const isInside = (path: string, dir: string): boolean => path === dir || path.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`);
+
 /**
  * The edit rule over every file of an edit. Each file is judged in the checkout that holds it, so
  * a file in another worktree than the `cwd` is judged by that worktree's branch and task, and its
  * path is relative to that worktree's root. A file in no checkout of this repository is no concern
- * of ours. The task is read only for a file that needs one.
+ * of ours. A file in the git directory of the repository is a `.git/...` path, which the edit rule
+ * protects. The task is read only for a file that needs one.
  */
 async function judgeEdit(env: PreToolEnv, tool: Extract<ToolCall, { category: 'edit' }>): Promise<Judgement> {
   const { ctx, checkout: root, cfg } = env;
@@ -227,6 +237,18 @@ async function judgeEdit(env: PreToolEnv, tool: Extract<ToolCall, { category: 'e
   const checks = await Promise.all(
     tool.paths.map(async (path): Promise<PathCheck> => {
       const real = realPathOf(path);
+      // The git directory is no work tree, so git cannot name a checkout for it; it is judged here,
+      // under the task of the checkout the agent works in.
+      if (isInside(real, root.commonDir)) {
+        return {
+          path,
+          inProject: true,
+          relPath: `.git/${posixPath(relative(root.commonDir, real))}`,
+          lookup: 'none',
+          ...(root.issue === undefined ? {} : { issue: root.issue }),
+          ...(root.branch === undefined ? {} : { branch: root.branch }),
+        };
+      }
       const holder = await checkoutOfDir(dirname(real));
       if (holder === undefined || holder.commonDir !== root.commonDir) {
         return { path, inProject: false, lookup: 'none' };
@@ -323,7 +345,7 @@ async function answer(
 
   try {
     // In order, so a reader sees the lines as the rules found them.
-    for (const gap of gaps) await appendJsonLine(checkout.root, GAPS_FILE, gap);
+    for (const gap of gaps) await appendJsonLine(mainRootOf(checkout), GAPS_FILE, gap);
   } catch {
     // A log that cannot be written must not turn a block into an allow.
   }

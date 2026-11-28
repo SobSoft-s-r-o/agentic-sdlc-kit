@@ -217,6 +217,36 @@ describe('editViolations: protected paths', () => {
     expect(editViolations([noTaskCheck('.sdlc/agents/customer/x.ts')], 'enforce').violations.map(v => v.rule)).toEqual(['protected-path']);
   });
 
+  it('protects the git directory: .git/ in the checkout, however the case', () => {
+    for (const relPath of ['.git', '.git/config', '.git/hooks/pre-commit', '.git/worktrees/7-x/config.worktree', '.GIT/hooks/x', 'src/../.git/config']) {
+      const found = editViolations([noTaskCheck(relPath)], 'enforce');
+      expect(found.violations.map(v => v.rule), relPath).toEqual(['protected-path']);
+      expect(editViolations([noTaskCheck(relPath)], 'observe')).toEqual({ violations: [], warnings: [] });
+      expect(needsTask(relPath), relPath).toBe(false);
+    }
+  });
+
+  it('does not protect look-alikes of .git', () => {
+    for (const relPath of ['.gitignore', '.github/workflows/ci.yml', '.gitattributes', 'src/.git/x.ts']) {
+      expect(editViolations([taskCheck(feature('implementation', true), relPath)], 'enforce').violations, relPath).toEqual([]);
+    }
+  });
+
+  it('never lets a path outside its checkout root pass: protected in enforce, nothing in observe', () => {
+    for (const relPath of ['..', '../CASEREPO/sdlc.config.yaml', '../../x/a.ts', '/etc/hosts', 'C:/x/a.ts', 'src/../../a.ts']) {
+      const approved = taskCheck(feature('implementation', true), relPath);
+      for (const check of [approved, noTaskCheck(relPath)]) {
+        expect(editViolations([check], 'enforce').violations.map(v => v.rule), relPath).toEqual(['protected-path']);
+        expect(editViolations([check], 'observe')).toEqual({ violations: [], warnings: [] });
+      }
+      expect(needsTask(relPath), relPath).toBe(false);
+    }
+  });
+
+  it('does not take a name that merely starts with two dots for an escape', () => {
+    expect(editViolations([taskCheck(feature('implementation', true), '..notes/a.ts')], 'enforce').violations).toEqual([]);
+  });
+
   it('keeps .sdlc/agents/custom/ code subject to the task rules', () => {
     expect(editViolations([noTaskCheck('.sdlc/agents/custom/x.toml')], 'enforce').violations.map(v => v.rule)).toEqual(['no-task']);
   });

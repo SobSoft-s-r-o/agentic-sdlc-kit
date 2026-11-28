@@ -48,13 +48,28 @@ export interface PathCheck {
 /** Normalized for matching: forward slashes, no `./` or `..` segments. Case is kept. */
 const normalizePath = (relPath: string): string => posix.normalize(relPath.replace(/\\/g, '/'));
 
+/** A path that leaves its checkout root (`../x`) or is not relative to it at all: nothing to judge it by. */
+function escapesCheckout(path: string): boolean {
+  return path === '..' || path.startsWith('../') || posix.isAbsolute(path) || /^[a-z]:\//i.test(path);
+}
+
 /**
- * `sdlc.config.yaml` and everything under `.sdlc/` except `.sdlc/agents/custom/`. Matched without
- * regard to case, since the default macOS filesystem would open the same file.
+ * The files only the owner changes: `sdlc.config.yaml`, everything under `.sdlc/` except
+ * `.sdlc/agents/custom/`, and the git directory (`.git`, whose hooks and config switch the kit's git
+ * hooks off). A path that does not sit under its checkout root counts as protected too, so a
+ * checkout root and a file path that disagree (on case, say) can never let a protected file pass.
+ * Matched without regard to case, since the default macOS filesystem would open the same file.
  */
 function isProtectedPath(relPath: string): boolean {
   const path = normalizePath(relPath).toLowerCase();
-  return path === 'sdlc.config.yaml' || (path.startsWith('.sdlc/') && !path.startsWith('.sdlc/agents/custom/'));
+  return (
+
+    escapesCheckout(path) ||
+    path === 'sdlc.config.yaml' ||
+    path === '.git' ||
+    path.startsWith('.git/') ||
+    (path.startsWith('.sdlc/') && !path.startsWith('.sdlc/agents/custom/'))
+  );
 }
 
 /** Files that never need a task: anything under `docs/` and any Markdown file. */
@@ -74,8 +89,9 @@ export function needsTask(relPath: string): boolean {
 /**
  * The edit rule, per edited file, in this order:
  * 1. a file outside the project is not ours to police;
- * 2. a protected file (`isProtectedPath`) is a `protected-path` violation in enforce and nothing in
- *    observe; either way the checks below do not apply to it;
+ * 2. a protected file (`isProtectedPath`: the config, `.sdlc/`, the git directory, a path outside the
+ *    checkout) is a `protected-path` violation in enforce and nothing in observe; either way the
+ *    checks below do not apply to it;
  * 3. `docs/**` and `*.md` need no task;
  * 4. no issue, or no tracked task for it, is `no-task`;
  * 5. a failed task lookup is a warning, never a violation: the edit is allowed;
@@ -98,7 +114,7 @@ export function editViolations(
       if (mode === 'enforce') {
         add({
           rule: 'protected-path',
-          text: `${relPath} is protected: only the owner changes sdlc.config.yaml and .sdlc/ (except .sdlc/agents/custom/); ask the owner`,
+          text: `${relPath} is protected: only the owner changes sdlc.config.yaml, .sdlc/ (except .sdlc/agents/custom/) and the .git directory; ask the owner`,
         });
       }
       continue;

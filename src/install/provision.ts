@@ -258,11 +258,20 @@ export type GitRunner = (args: string[]) => Promise<{ stdout: string; code: numb
 
 const MAX_BUFFER = 16 * 1024 * 1024;
 
-/** The real `git`, run in `cwd` (the current directory by default). It rejects only when `git` cannot run at all. */
-export function createGitRunner(cwd?: string): GitRunner {
+export interface GitRunnerOptions {
+  /** Kills a git that runs longer than this many milliseconds: a failing result (code 1, "terminated by SIGTERM"). No limit by default. */
+  timeoutMs?: number;
+}
+
+/**
+ * The real `git`, run in `cwd` (the current directory by default). It rejects only when `git`
+ * cannot run at all; a git that is killed (on `timeoutMs`) is a failing result.
+ */
+export function createGitRunner(cwd?: string, options: GitRunnerOptions = {}): GitRunner {
   return args =>
     new Promise((resolve, reject) => {
-      execFile('git', args, { cwd, maxBuffer: MAX_BUFFER, encoding: 'utf8' }, (error, stdout, stderr) => {
+      const limit = options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs };
+      execFile('git', args, { cwd, maxBuffer: MAX_BUFFER, encoding: 'utf8', ...limit }, (error, stdout, stderr) => {
         if (!error) {
           resolve({ stdout, code: 0, stderr });
           return;

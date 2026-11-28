@@ -1,7 +1,7 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfigFromString, type Config } from '../../src/config/schema.js';
 import { ConfigError } from '../../src/core/taskTypes.js';
 import { GhError } from '../../src/github/gh.js';
@@ -419,6 +419,39 @@ describe('the real git runner', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('the real git runner: time limit', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  /** A `git` that never answers, first on PATH. */
+  async function hangingGit(dir: string): Promise<void> {
+    const file = join(dir, 'git');
+    await writeFile(file, '#!/bin/sh\nexec sleep 30\n');
+    await chmod(file, 0o755);
+    vi.stubEnv('PATH', `${dir}:${process.env.PATH ?? ''}`);
+  }
+
+  it('gives up on a git that outlives timeoutMs, as a failing result and not a hang', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sdlc-fakegit-'));
+    try {
+      await hangingGit(dir);
+      const started = Date.now();
+
+      const result = await createGitRunner(dir, { timeoutMs: 150 })(['rev-parse', '--show-toplevel']);
+
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toMatch(/terminated by SIGTERM/);
+      expect(Date.now() - started).toBeLessThan(5000);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('has no time limit unless one is given', async () => {
+    const result = await createGitRunner()(['--version']);
+    expect(result.code).toBe(0);
   });
 });
 
