@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "kit": "0.2.0",
+  "kit": "0.3.0",
   "entries": [
     {
       "path": ".claude/agents/sdlc-analyst.md",

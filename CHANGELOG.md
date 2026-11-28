@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-28
+
+Open-source packaging: the kit is published on npm, has CI and a release workflow, runs on itself in observe mode, and closes the hook and robustness items deferred from 0.2.0.
+
 ### Added
 
 - The package is published on npm as `agentic-sdlc-kit` (from 0.3.0), with provenance. `v0.1.0` and `v0.2.0` were GitHub releases only and never reached npm.
@@ -13,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A release workflow that publishes to npm from a version tag through trusted publishing (OIDC), without an npm token. It checks that the tag matches `package.json` and skips a version that is already published.
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) and `SECURITY.md` (reports through GitHub private reporting).
 - An opt-in end-to-end suite, `npm run test:e2e`, that walks a task through `task new`, `stage publish`, an owner approval, `reconcile`, `task checkpoint` and a cancel against a real sandbox repository. It is skipped unless `SDLC_E2E_REPO` is set and is never part of `npm test`.
+- A shell rule `api-merge` (enforce only) for merging through `gh api .../merge`; owner-only commands are recognised when run as `node .../dist/cli.js` or `node_modules/.bin/sdlc`.
+- `reconcile` mirrors a PR body's `Scope: partial` to the `sdlc:partial` label on that PR, and removes it otherwise.
+- `gh` calls time out after 60 s (SIGTERM, then SIGKILL); a timed-out call counts as GitHub unreachable, so queueable commands go to the outbox.
 
 ### Changed
 
@@ -20,6 +27,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `sdlc doctor` checks a release `kit_ref` with `npm view`, and a branch with `git ls-remote`, as before.
 - The npm package contains only `dist`, `templates`, `INSTALL.md`, `CHANGELOG.md`, `README.md` and `LICENSE`.
 - `README.md` and `INSTALL.md` describe the npm install and the requirements.
+- Hooks read `mode` from the main checkout's `sdlc.config.yaml`, so a worktree follows a mode change without a commit. Task-state lookups share a checkout cache and have tighter deadlines.
+- An owner approval is refused when the PR body was edited after the approving comment, and `--unverified` approvals are stamped no earlier than GitHub's own timestamps.
+- `reconcile` prints ignored owner commands, untracked issues and skipped tasks as one summary line; `--json` still lists each of them.
+- Labels are listed with pagination, so repositories with more than 100 labels are checked correctly.
+- `sdlc doctor` reads Codex hook switches written as inline tables (`features = { hooks = false }`) and is split into per-area modules.
+- `sdlc sync` takes over a stale lock atomically, so concurrent syncs never run together, and releases a lock it cannot read back.
+- JSON items appended to a one-line array stay on one line; `worktree finish` names an ignored `.env/` directory correctly; a reused `stage publish` comment is reported.
 
 ## [0.2.0] - 2026-11-28
 
@@ -48,6 +62,7 @@ First release. It installs an agentic SDLC into any repository: the task lifecyc
 - Secret guard: the pre-commit and pre-push hooks run 76 content rules and 10 file-name rules. Output is masked and the guard fails closed; gitleaks is optional.
 - `sdlc doctor`: preflight and install checks.
 
-[Unreleased]: https://github.com/SobSoft-s-r-o/agentic-sdlc-kit/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/SobSoft-s-r-o/agentic-sdlc-kit/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/SobSoft-s-r-o/agentic-sdlc-kit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/SobSoft-s-r-o/agentic-sdlc-kit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/SobSoft-s-r-o/agentic-sdlc-kit/releases/tag/v0.1.0
