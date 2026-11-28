@@ -453,17 +453,17 @@ describe('ensureBoard', () => {
   });
 
   it('uses user-scoped endpoints for a user-owned project', async () => {
-    const userCfg = configWith('{ owner: lubo, owner_type: user, number: 3 }');
+    const userCfg = configWith('{ owner: octo-user, owner_type: user, number: 3 }');
     const run = fakeGh([
       projectStep(provisionedFields(userCfg), ['Board'], { number: 3 }),
-      restFieldsStep('/users/lubo/projectsV2/3/fields?per_page=100'),
+      restFieldsStep('/users/octo-user/projectsV2/3/fields?per_page=100'),
       { match: ['POST'], stdout: '{}' },
       { match: ['POST'], stdout: '{}' },
       { match: ['POST'], stdout: '{}' },
     ]);
     await ensureBoard(run, userCfg, { dryRun: false });
     expect(inputAt(run, 0).query).toContain('user(login');
-    expect(run.calls[2]).toContain('/users/lubo/projectsV2/3/views');
+    expect(run.calls[2]).toContain('/users/octo-user/projectsV2/3/views');
   });
 
   it('skips views whose name already exists, ignoring case', async () => {
