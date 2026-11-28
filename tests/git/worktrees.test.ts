@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   isPathUnder,
   listWorktrees,
@@ -251,5 +254,49 @@ describe('orphanWorktrees', () => {
       'task-done',
       'detached',
     ]);
+  });
+
+  describe('when the repository root is spelled through a symlink', () => {
+    const dirs: string[] = [];
+    afterEach(() => {
+      for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    });
+
+    /** A real directory with a worktree directory in it, and a symlink to it. */
+    function linkedRepo(): { real: string; link: string } {
+      const base = realpathSync(mkdtempSync(join(tmpdir(), 'sdlc-orphans-')));
+      dirs.push(base);
+      const real = join(base, 'real');
+      mkdirSync(join(real, '.worktrees', '9-x'), { recursive: true });
+      const link = join(base, 'link');
+      symlinkSync(real, link);
+      return { real, link };
+    }
+
+    it('still finds the worktrees under .worktrees/, as git reports them by their real path', () => {
+      const { real, link } = linkedRepo();
+      const list = [wt(join(real, '.worktrees', '9-x'), { branch: 'task/9-x' }), wt(real, { branch: 'main' })];
+
+      expect(orphanWorktrees(list, link, tasks)).toEqual([
+        { path: join(real, '.worktrees', '9-x'), branch: 'task/9-x', reason: 'no-task' },
+      ]);
+    });
+
+    it('also when the worktree path is the one spelled through the symlink', () => {
+      const { real, link } = linkedRepo();
+      const list = [wt(join(link, '.worktrees', '9-x'), { branch: 'task/9-x' })];
+
+      expect(orphanWorktrees(list, real, tasks)).toEqual([
+        { path: join(link, '.worktrees', '9-x'), branch: 'task/9-x', reason: 'no-task' },
+      ]);
+    });
+
+    it('does not report the main checkout or a sibling directory of .worktrees/', () => {
+      const { real, link } = linkedRepo();
+      mkdirSync(join(real, '.worktrees-old', '9-x'), { recursive: true });
+      const list = [wt(real, { branch: 'task/9-main' }), wt(join(real, '.worktrees-old', '9-x'), { branch: 'task/9-x' })];
+
+      expect(orphanWorktrees(list, link, tasks)).toEqual([]);
+    });
   });
 });

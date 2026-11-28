@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
@@ -419,6 +419,132 @@ describe('sdlc worktree finish', () => {
     expect(has(h.calls, 'branch', '-d')).toBe(false);
     expect(existsSync(h.worktree)).toBe(true);
     expect(branches(h)).toEqual([BRANCH]);
+  });
+
+  it('still sees untracked files when the user hides them from git status', async () => {
+    const h = setup(merged);
+    await started(h);
+    h.git(['config', 'status.showUntrackedFiles', 'no']);
+    writeFileSync(join(h.worktree, 'notes.txt'), 'draft\n');
+    // The setting does hide them from a plain status, which is what a naive check would read.
+    expect(h.git(['status', '--porcelain'], h.worktree)).toBe('');
+
+    await run(h, 'finish', '5');
+
+    expect(process.exitCode).toBe(1);
+    expect(h.err).toHaveLength(1);
+    expect(h.err[0]).toContain(`${DIR} has changes`);
+    expect(h.err[0]).toContain('?? notes.txt');
+    expect(has(h.calls, 'worktree', 'remove')).toBe(false);
+    expect(existsSync(join(h.worktree, 'notes.txt'))).toBe(true);
+    expect(branches(h)).toEqual([BRANCH]);
+  });
+
+  it('counts untracked files of the main checkout as changes when the user hides them from git status', async () => {
+    const h = setup(merged);
+    await started(h);
+    h.git(['config', 'status.showUntrackedFiles', 'no']);
+    writeFileSync(join(h.root, 'scratch.txt'), 'mine\n');
+
+    await run(h, 'finish', '5');
+
+    expect(has(h.calls, 'merge')).toBe(false);
+    expect(h.out.join('\n')).toContain('main checkout not updated: it has changes');
+    expect(readFileSync(join(h.root, 'scratch.txt'), 'utf8')).toBe('mine\n');
+    expect(existsSync(h.worktree)).toBe(false);
+  });
+
+  describe('ignored files', () => {
+    /** Ignores local settings, build output and dependencies in every worktree of the repository. */
+    const ignoreLocalFiles = (h: Harness): void => {
+      appendFileSync(join(h.root, '.git', 'info', 'exclude'), '.env\n.env.*\ndist/\nnode_modules/\n');
+    };
+
+    it('refuses while the worktree holds an ignored .env file, naming it, and removes nothing', async () => {
+      const h = setup(merged);
+      ignoreLocalFiles(h);
+      await started(h);
+      writeFileSync(join(h.worktree, '.env'), 'TOKEN=x\n');
+      mkdirSync(join(h.worktree, 'config'));
+      writeFileSync(join(h.worktree, 'config', '.env.production'), 'TOKEN=y\n');
+
+      await run(h, 'finish', '5');
+
+      expect(process.exitCode).toBe(1);
+      expect(h.err).toHaveLength(1);
+      expect(h.err[0]).toContain(`${DIR} holds ignored local files (.env, config/.env.production)`);
+      expect(h.err[0]).toContain('move them out, then run `sdlc worktree finish 5` again');
+      expect(has(h.calls, 'worktree', 'remove')).toBe(false);
+      expect(has(h.calls, 'merge')).toBe(false);
+      expect(readFileSync(join(h.worktree, '.env'), 'utf8')).toBe('TOKEN=x\n');
+      expect(branches(h)).toEqual([BRANCH]);
+    });
+
+    it('finishes once the .env file has been moved out', async () => {
+      const h = setup(merged);
+      ignoreLocalFiles(h);
+      await started(h);
+      writeFileSync(join(h.worktree, '.env'), 'TOKEN=x\n');
+      await run(h, 'finish', '5');
+      expect(process.exitCode).toBe(1);
+      process.exitCode = exitCode;
+      h.err.length = 0;
+      rmSync(join(h.worktree, '.env'));
+
+      await run(h, 'finish', '5');
+
+      expect(h.err).toEqual([]);
+      expect(existsSync(h.worktree)).toBe(false);
+    });
+
+    it('does not mind other ignored files: build output and dependencies go with the worktree', async () => {
+      const h = setup(merged);
+      ignoreLocalFiles(h);
+      await started(h);
+      mkdirSync(join(h.worktree, 'dist'));
+      writeFileSync(join(h.worktree, 'dist', 'app.js'), 'built\n');
+      mkdirSync(join(h.worktree, 'node_modules'));
+      writeFileSync(join(h.worktree, 'node_modules', 'dep.js'), 'dep\n');
+      expect(h.git(['status', '--porcelain', '--ignored'], h.worktree)).toContain('!! dist/');
+
+      await run(h, 'finish', '5');
+
+      expect(h.err).toEqual([]);
+      expect(process.exitCode).toBe(exitCode);
+      expect(existsSync(h.worktree)).toBe(false);
+      expect(branches(h)).toEqual([]);
+    });
+
+    it('reports an ignored .env file together with the other reasons, and also with --dry-run', async () => {
+      const h = setup();
+      ignoreLocalFiles(h);
+      await started(h);
+      writeFileSync(join(h.worktree, '.env'), 'TOKEN=x\n');
+      writeFileSync(join(h.worktree, 'notes.txt'), 'draft\n');
+
+      await run(h, 'finish', '5', '--dry-run');
+
+      expect(h.err).toHaveLength(1);
+      expect(h.err[0]).toContain('#5 has no merged PR yet');
+      expect(h.err[0]).toContain('?? notes.txt');
+      expect(h.err[0]).toContain('holds ignored local files (.env)');
+      expect(h.err[0]).not.toContain('!! .env');
+      expect(process.exitCode).toBe(1);
+    });
+
+    it('says in its --help that ignored files are removed with the worktree', () => {
+      const h = setup();
+      const program = new Command();
+      registerWorktreeCommand(program, () => h.ctx);
+      const finish = program.commands.find(c => c.name() === 'worktree')?.commands.find(c => c.name() === 'finish');
+      const help: string[] = [];
+      finish!.configureOutput({ writeOut: text => help.push(text), writeErr: text => help.push(text) });
+
+      finish!.outputHelp();
+
+      expect(help.join('')).toMatch(/ignored files .* are removed together with (it|the worktree)/i);
+      expect(help.join('')).toContain('.env');
+    });
   });
 
   it('refuses while #5 has no merged PR and is not awaiting deployment or done', async () => {

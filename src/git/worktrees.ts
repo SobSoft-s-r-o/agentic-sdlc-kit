@@ -1,6 +1,7 @@
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { taskIssueOf } from '../commands/githook.js';
 import type { Status } from '../core/types.js';
+import { realPathOf } from '../hooks/resolve.js';
 import type { GitRunner } from '../install/provision.js';
 
 /** Where the task worktrees live, under the root of the main checkout. */
@@ -104,18 +105,20 @@ function orphanReason(worktree: Worktree, tasks: Map<number, { status: Status }>
 
 /**
  * The worktrees under `<repoRoot>/.worktrees/` that no live task needs, in the order git lists them.
- * Worktrees elsewhere (the main checkout, ones made by hand) are never reported. `repoRoot` and the
- * worktree paths must be spelled the same way: the real path of the main checkout, as git reports it.
+ * Worktrees elsewhere (the main checkout, ones made by hand) are never reported. `repoRoot` may be
+ * spelled through a symlink (the temp directory of macOS is one) or in another letter case: it and the
+ * worktree paths are compared as real paths, like `sdlc worktree finish` compares them. The paths in
+ * the result are the ones git reported.
  */
 export function orphanWorktrees(
   worktrees: Worktree[],
   repoRoot: string,
   tasks: Map<number, { status: Status }>,
 ): OrphanWorktree[] {
-  const base = join(repoRoot, WORKTREES_DIR);
+  const base = realPathOf(join(repoRoot, WORKTREES_DIR));
   const orphans: OrphanWorktree[] = [];
   for (const worktree of worktrees) {
-    if (worktree.bare || !isPathUnder(base, worktree.path)) continue;
+    if (worktree.bare || !isPathUnder(base, realPathOf(worktree.path))) continue;
     const reason = orphanReason(worktree, tasks);
     if (reason === undefined) continue;
     orphans.push({ path: worktree.path, ...(worktree.branch === undefined ? {} : { branch: worktree.branch }), reason });

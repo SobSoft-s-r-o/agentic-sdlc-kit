@@ -171,6 +171,35 @@ const PAST_MERGE: readonly Status[] = ['awaiting_deployment', 'done'];
 const merged = (task: TrackedTask): boolean =>
   task.state.prs.some(pr => pr.mergeSha !== undefined) || PAST_MERGE.includes(task.state.status);
 
+/**
+ * Always asked for: with `status.showUntrackedFiles=no` in the user's config a plain `git status` hides
+ * untracked files, which `git worktree remove` deletes all the same.
+ */
+const UNTRACKED_FILES = '--untracked-files=normal';
+
+/**
+ * Lists the ignored files, and not only their directory when that holds nothing else (`!! config/`
+ * hides `config/.env.production`); a directory an ignore pattern names (`dist/`) stays one entry.
+ */
+const IGNORED_FILES = '--ignored=matching';
+
+const IGNORED_ENTRY = '!! ';
+
+/** A file that holds local settings: `.env`, `.env.local`, `.env.production`, ... */
+const ENV_FILE = /^\.env(\..+)?$/;
+
+/** The ignored `.env` files among the lines of `git status --porcelain --ignored`, as paths. */
+function ignoredEnvFiles(lines: string[]): string[] {
+  return lines
+    .filter(line => line.startsWith(IGNORED_ENTRY))
+    .map(line => line.slice(IGNORED_ENTRY.length))
+    .filter(path => {
+      // git quotes a path with unusual characters, and ends a directory with a slash.
+      const bare = path.replace(/^"(.*)"$/, '$1').replace(/\/$/, '');
+      return ENV_FILE.test(bare.slice(bare.lastIndexOf('/') + 1));
+    });
+}
+
 type MainCheckout = { update: true } | { update: false; reason: string };
 
 /** Whether the main checkout may be fast-forwarded: on the default branch and without changes. */
@@ -182,7 +211,7 @@ async function mainCheckoutOf(ctx: WorktreeContext): Promise<MainCheckout> {
   if (head.code !== 0) return { update: false, reason: `its branch could not be read: ${firstLine(reasonOf(head))}` };
   const branch = head.stdout.trim();
   if (branch !== defaultBranch) return { update: false, reason: `it is on ${branch}, not ${defaultBranch}` };
-  const status = await ctx.git(['status', '--porcelain']);
+  const status = await ctx.git(['status', '--porcelain', UNTRACKED_FILES]);
   if (status.code !== 0) return { update: false, reason: `its changes could not be read: ${firstLine(reasonOf(status))}` };
   if (outputLines(status.stdout).length > 0) return { update: false, reason: 'it has changes' };
   return { update: true };
@@ -209,7 +238,8 @@ async function updateMainCheckout(ctx: WorktreeContext): Promise<{ updated: bool
 }
 
 /**
- * Cleans up after the merge of #issue: refuses while the worktree has changes or no PR of the task has
+ * Cleans up after the merge of #issue: refuses while the worktree has changes (untracked files included,
+ * whatever the user's git config hides), holds ignored `.env` files, or no PR of the task has
  * merged (unless it is awaiting deployment or done), and when the command runs inside that worktree
  * (its directory would vanish under the caller: run it from the main checkout). Then it fast-forwards
  * the main checkout to the fetched default branch when that checkout is on it and clean (and only reports
@@ -235,11 +265,19 @@ export async function worktreeFinish(
   if (!merged(await fetchTask(ctx, issue))) blockers.push(`#${issue} has no merged PR yet`);
   // A worktree whose directory is gone has no changes to look at; `worktree remove` clears its record.
   if (!worktree.prunable) {
-    const status = await ctx.git(['-C', worktree.path, 'status', '--porcelain']);
+    const status = await ctx.git(['-C', worktree.path, 'status', '--porcelain', UNTRACKED_FILES, IGNORED_FILES]);
     if (status.code !== 0) blockers.push(`could not read the state of ${dir}: ${firstLine(reasonOf(status))}`);
     else {
-      const changes = outputLines(status.stdout);
+      const lines = outputLines(status.stdout);
+      const changes = lines.filter(line => !line.startsWith(IGNORED_ENTRY));
       if (changes.length > 0) blockers.push([`${dir} has changes:`, ...changes.map(line => `  ${line}`)].join('\n'));
+      // Ignored files (build output, node_modules) go with the worktree, but local settings may exist nowhere else.
+      const env = ignoredEnvFiles(lines);
+      if (env.length > 0) {
+        blockers.push(
+          `${dir} holds ignored local files (${env.join(', ')}); move them out, then run \`sdlc worktree finish ${issue}\` again`,
+        );
+      }
     }
   }
   if (blockers.length > 0) throw new Error(blockers.join('\n'));
@@ -324,6 +362,10 @@ export function registerWorktreeCommand(program: Command, makeContext: WorktreeC
   worktree
     .command('finish')
     .description('After the merge: update the main checkout, remove the task worktree and delete its branch, never forced')
+    .addHelpText(
+      'after',
+      '\nIgnored files in the worktree (build output, node_modules) are removed together with it; an ignored .env file makes finish refuse, so move it out first.',
+    )
     .argument('<issue>', 'issue number')
     .option('--dry-run', 'show what would run without changing anything')
     .option('--json', 'print machine-readable JSON')

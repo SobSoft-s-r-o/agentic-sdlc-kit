@@ -365,11 +365,11 @@ describe('orphan worktrees', () => {
         'Queued for sync: 1 write(s), 0 gap(s)',
         '',
         'Orphan worktrees:',
-        '  /repo/.worktrees/9-lost (task/9-lost): no-task - no tracked task has this branch',
+        '  /repo/.worktrees/9-lost (task/9-lost): no-task - no open or recently closed task has this branch (check with `sdlc status --all`)',
       ].join('\n'),
     );
     expect(describeStatus(await report([orphan]), 7)).toBe(
-      'No tracked tasks.\n\nOrphan worktrees:\n  /repo/.worktrees/9-lost (task/9-lost): no-task - no tracked task has this branch',
+      'No tracked tasks.\n\nOrphan worktrees:\n  /repo/.worktrees/9-lost (task/9-lost): no-task - no open or recently closed task has this branch (check with `sdlc status --all`)',
     );
   });
 

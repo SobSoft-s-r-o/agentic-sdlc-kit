@@ -39,7 +39,7 @@ function actionLine(action: ReconcileAction): string {
 function orphanLine(orphan: OrphanWorktree): string {
   const issue = taskIssueOf(orphan.branch);
   const meaning: Record<OrphanWorktree['reason'], string> = {
-    'no-task': 'no tracked task has this branch',
+    'no-task': 'no open or recently closed task has this branch (check with `sdlc status --all`)',
     'task-done': `the task is done; run \`sdlc worktree finish ${issue ?? '<issue>'}\``,
     detached: 'HEAD is detached, so it is no task branch',
     prunable: 'its directory is gone',

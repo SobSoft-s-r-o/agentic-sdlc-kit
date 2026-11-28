@@ -347,6 +347,75 @@ describe('orphanWorktrees', () => {
     ]);
   });
 
+  describe('a worktree whose task is not in the scan', () => {
+    /** #9 closed a year ago, long before the lookback: the scan does not hold it. */
+    function closedLongAgo(h: ReturnType<typeof setup>, overrides: Partial<TaskState> = {}): void {
+      h.tracker.seedTask(
+        task(9, 'feature', { status: 'done', phase: 'delivery', outcome: 'completed', ...overrides }),
+        { open: false, updatedAt: ago(400) },
+      );
+    }
+    const lost = { path: '/repo/.worktrees/9-lost', branch: 'task/9-lost' };
+
+    it('is task-done when its task closed before the lookback and is done', async () => {
+      const h = seeded();
+      closedLongAgo(h);
+      const scanned = await h.tracker.scanTasks({ closedSince: ago(30) });
+      expect(scanned.tracked.map(t => t.issue)).not.toContain(9);
+
+      const report = await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git, repoRoot: '/repo' });
+
+      expect(report.orphanWorktrees).toContainEqual({ ...lost, reason: 'task-done' });
+    });
+
+    it('stays no-task when the task is not done', async () => {
+      const h = seeded();
+      closedLongAgo(h, { status: 'in_progress', phase: 'implementation', outcome: 'cancelled' });
+
+      const report = await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git, repoRoot: '/repo' });
+
+      expect(report.orphanWorktrees).toContainEqual({ ...lost, reason: 'no-task' });
+    });
+
+    it('stays no-task when the lookup fails, and so does the rest of the report', async () => {
+      const h = seeded();
+      closedLongAgo(h);
+      h.tracker.failNext('getTask');
+
+      const report = await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git, repoRoot: '/repo' });
+
+      expect(report.orphanWorktrees.map(orphan => orphan.reason)).toEqual(['task-done', 'no-task', 'detached']);
+      expect(issues(report.byStatus.in_progress)).toEqual([1]);
+    });
+
+    it('stays no-task when no issue has that number', async () => {
+      const h = seeded();
+
+      const report = await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git, repoRoot: '/repo' });
+
+      expect(report.orphanWorktrees).toContainEqual({ ...lost, reason: 'no-task' });
+    });
+
+    it('is looked up only for worktrees the scan does not know, and not at all with --all', async () => {
+      const h = seeded();
+      closedLongAgo(h);
+      const lookups: string[] = [];
+      const getTask = h.tracker.getTask.bind(h.tracker);
+      h.tracker.getTask = async issue => {
+        lookups.push(`#${issue}`);
+        return getTask(issue);
+      };
+
+      await statusReport(h.ctx, { staleDays: 7, git: fakeGit().git, repoRoot: '/repo' });
+      expect(lookups).toEqual(['#9']);
+
+      lookups.length = 0;
+      const all = await statusReport(h.ctx, { staleDays: 7, all: true, git: fakeGit().git, repoRoot: '/repo' });
+      expect(lookups).toEqual([]);
+      expect(all.orphanWorktrees).toContainEqual({ ...lost, reason: 'task-done' });
+    });
+  });
+
   it('takes the repository root from the context when the options have none', async () => {
     const h = seeded();
     h.ctx.repoRoot = '/repo';
