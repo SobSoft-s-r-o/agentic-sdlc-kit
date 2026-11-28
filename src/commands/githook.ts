@@ -182,6 +182,18 @@ export async function decidePrePush(
 const NO_SUCH_ISSUE = /could not resolve to an? issue/i;
 
 /**
+ * Whether `error` from `Tracker.getTask` means there is no tracked task: the issue exists without
+ * readable task state, or does not exist. Any other failure (offline, no `gh`, rate limit) is not.
+ */
+export function isNoTaskError(error: unknown): boolean {
+  return (
+    error instanceof NoStateCommentError ||
+    error instanceof StateCommentError ||
+    (error instanceof GhError && NO_SUCH_ISSUE.test(error.stderr))
+  );
+}
+
+/**
  * `TaskLookup` over the tracker: true for a tracked task. An issue that exists without readable
  * task state, or does not exist, is false; any other failure (offline, no `gh`, rate limit) rejects.
  */
@@ -191,8 +203,7 @@ export function lookupTrackedTask(tracker: Pick<Tracker, 'getTask'>): TaskLookup
       await tracker.getTask(issue);
       return true;
     } catch (error) {
-      if (error instanceof NoStateCommentError || error instanceof StateCommentError) return false;
-      if (error instanceof GhError && NO_SUCH_ISSUE.test(error.stderr)) return false;
+      if (isNoTaskError(error)) return false;
       throw error;
     }
   };
@@ -251,14 +262,14 @@ export async function runSteps(ctx: GitHookContext, hook: HookName, steps: reado
  * Calls made after the deadline are refused without being started. `stop` must be called when the
  * hook is done.
  */
-interface Deadline {
+export interface Deadline {
   /** A tracker call was still running at the deadline; it keeps running in the background. */
   readonly abandoned: boolean;
   run<T>(work: () => Promise<T>): Promise<T>;
   stop(): void;
 }
 
-function deadlineOf(totalMs: number): Deadline {
+export function deadlineOf(totalMs: number): Deadline {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let expiry: Promise<never> | undefined;
   let passed = false;

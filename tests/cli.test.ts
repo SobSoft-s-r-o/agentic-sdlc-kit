@@ -18,7 +18,7 @@ const cliPath = join(root, 'dist', 'cli.js');
 const version = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version;
 const validConfig = join(root, 'tests', 'fixtures', 'config', 'valid.yaml');
 
-const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board', 'config', 'githook', 'init', 'upgrade', 'uninstall', 'doctor'];
+const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board', 'config', 'githook', 'hook', 'init', 'upgrade', 'uninstall', 'doctor'];
 
 let dir: string;
 beforeAll(() => {
@@ -601,6 +601,105 @@ describe('sdlc githook (built)', () => {
     }
     // The child is the real `sdlc reconcile`; with no gh on its PATH it stops at the first call.
     expect(text).toContain('gh CLI not found');
+  });
+});
+
+describe('sdlc hook (built)', () => {
+  /** No git setting of the developer's own, and no GIT_* variable from a hook this run may be inside of. */
+  function hookEnv(): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {};
+    for (const [key, value] of Object.entries(process.env)) if (!key.startsWith('GIT_')) env[key] = value;
+    const home = join(dir, 'home');
+    mkdirSync(home, { recursive: true });
+    return { ...env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  }
+
+  /** A repository on `main` with the valid test config in enforce mode (or none). */
+  function hookRepo(withConfig = true): string {
+    const root = join(dir, 'repo');
+    mkdirSync(root);
+    execFileSync('git', ['init', '-q'], { cwd: root, env: hookEnv() });
+    execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: root, env: hookEnv() });
+    if (withConfig) {
+      writeFileSync(join(root, 'sdlc.config.yaml'), readFileSync(validConfig, 'utf8').replace('mode: observe', 'mode: enforce'));
+    }
+    return root;
+  }
+
+  /** A PATH that finds git and nothing else, so the hook cannot reach `gh` and the real GitHub. */
+  function gitOnlyPath(): string {
+    const bin = join(dir, 'only-git');
+    mkdirSync(bin);
+    symlinkSync(execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim(), join(bin, 'git'));
+    return bin;
+  }
+
+  const payload = (cwd: string, tool: string, input: Record<string, unknown>): string =>
+    JSON.stringify({ session_id: 's1', cwd, tool_name: tool, tool_input: input });
+
+  it('answers a forbidden command with the deny protocol, exit 0, and logs the gap', () => {
+    const root = hookRepo();
+
+    const result = sdlc(['hook', 'claude', 'pre-tool'], {
+      cwd: root,
+      env: hookEnv(),
+      input: payload(root, 'Bash', { command: 'gh pr merge 1 --admin' }),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    const answer = JSON.parse(result.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+    expect(answer.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(answer.hookSpecificOutput.permissionDecisionReason).toMatch(/^sdlc \(enforce\): /);
+    const gaps = readFileSync(join(root, '.sdlc', 'cache', 'gaps.jsonl'), 'utf8').trim().split('\n');
+    expect(gaps).toHaveLength(1);
+    expect(JSON.parse(gaps[0] as string)).toMatchObject({ rule: 'admin-merge', harness: 'claude', blocked: true });
+  });
+
+  it('allows silently an edit that needs no task (docs), without reaching GitHub', () => {
+    const root = hookRepo();
+
+    const result = sdlc(['hook', 'codex', 'pre-tool'], {
+      cwd: root,
+      env: { ...hookEnv(), PATH: gitOnlyPath() },
+      input: payload(root, 'apply_patch', { command: '*** Begin Patch\n*** Add File: docs/new.md\n+x\n*** End Patch' }),
+    });
+
+    expect(result).toEqual({ status: 0, stdout: '', stderr: '' });
+  });
+
+  it.each([
+    ['claude', ''],
+    ['codex', ''],
+    ['gemini', '{}\n'],
+  ])('%s: stdin that is not JSON is skipped with one stderr line and exit 0', (harness, stdout) => {
+    const result = sdlc(['hook', harness, 'pre-tool'], { cwd: hookRepo(), env: hookEnv(), input: 'not json' });
+
+    expect(result).toEqual({ status: 0, stdout, stderr: 'sdlc: hook skipped: stdin is not valid JSON\n' });
+  });
+
+  it('a repository without a config is skipped, exit 0', () => {
+    const root = hookRepo(false);
+
+    const result = sdlc(['hook', 'claude', 'pre-tool'], {
+      cwd: root,
+      env: hookEnv(),
+      input: payload(root, 'Bash', { command: 'gh pr merge 1 --admin' }),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(/^sdlc: hook skipped: no sdlc\.config\.yaml in .+\n$/);
+  });
+
+  it.each([
+    [['hook', 'bogus', 'pre-tool'], 'unknown harness "bogus"'],
+    [['hook', 'claude', 'bogus'], 'unknown event "bogus"'],
+    [['hook'], 'unknown harness ""'],
+  ])('%j is skipped, exit 0', (args, reason) => {
+    const result = sdlc(args, { cwd: hookRepo(), env: hookEnv(), input: '{}' });
+
+    expect(result).toEqual({ status: 0, stdout: '', stderr: `sdlc: hook skipped: ${reason}\n` });
   });
 });
 

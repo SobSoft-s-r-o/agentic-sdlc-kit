@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
@@ -18,6 +18,7 @@ import {
   spawnDetachedLogged,
   type GitHookContext,
 } from './commands/githook.js';
+import { registerHookCommand, type HookContext } from './commands/hook.js';
 import { registerInitCommand } from './commands/init.js';
 import type { InstallContext, InstallContextFactory } from './commands/install.js';
 import { registerReconcileCommand } from './commands/reconcile.js';
@@ -47,6 +48,8 @@ export interface CliDeps {
   makeConfigContext?: () => ConfigCommandContext | Promise<ConfigCommandContext>;
   /** Builds the context of `githook`, which loads the config and builds the tracker only if a hook needs them. */
   makeGitHookContext?: () => GitHookContext | Promise<GitHookContext>;
+  /** Builds the context of `hook`, which reads the config and builds the tracker only when a rule needs them. */
+  makeHookContext?: () => HookContext | Promise<HookContext>;
   /** Builds the context of `init`, `upgrade` and `uninstall`; defaults to the git root, git and `gh`. */
   makeInstallContext?: InstallContextFactory;
   /** Builds the context of `doctor`, which needs no loadable config; defaults to the git root, git, `gh` and the real PATH. */
@@ -218,6 +221,28 @@ export function buildProgram(deps: CliDeps = {}): Command {
       };
     });
 
+  const makeHookContext =
+    deps.makeHookContext ??
+    ((): HookContext => {
+      // The repository is the one of the payload's cwd, found by the hook itself; nothing here may throw.
+      const cwd = process.cwd();
+      const configOption = program.opts<{ config?: string }>().config;
+      return {
+        cwd,
+        readStdin: () => readAllStdin(),
+        loadConfig: root => {
+          const path = configOption === undefined ? join(root, CONFIG_FILE) : resolve(cwd, configOption);
+          return existsSync(path) ? loadConfig(path) : undefined;
+        },
+        makeTracker: (cfg, root) => new GitHubTracker(defaultGhRunner, cfg, { repoRoot: root }),
+        gitFor: dir => createGitRunner(dir),
+        now: () => new Date().toISOString(),
+        out,
+        err,
+        exit: code => exitAfterFlush(code),
+      };
+    });
+
   // Commander gives `--json` to the program wherever it appears, so hand it on to the command that runs.
   program.hook('preAction', (_program, command) => {
     if (program.opts<{ json?: boolean }>().json) command.setOptionValue('json', true);
@@ -234,6 +259,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
   registerBoardCommand(program, makeBoardContext);
   registerConfigCommand(program, makeConfigContext);
   registerGitHookCommand(program, makeGitHookContext);
+  registerHookCommand(program, makeHookContext);
   registerInitCommand(program, makeInstallContext);
   registerUpgradeCommand(program, makeInstallContext);
   registerUninstallCommand(program, makeInstallContext);

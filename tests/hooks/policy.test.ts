@@ -6,6 +6,7 @@ import type { Phase, TaskState, TaskTypeDef } from '../../src/core/types.js';
 import {
   decide,
   editViolations,
+  needsTask,
   subagentViolation,
   type PathCheck,
   type Violation,
@@ -271,5 +272,22 @@ describe('decide', () => {
       context: [],
       warnings: [`sdlc: ${lookup}`],
     });
+  });
+});
+
+describe('needsTask', () => {
+  it.each(['src/a.ts', 'mydocs/x.ts', 'apps/web/index.html'])('%s needs the task', relPath => {
+    expect(needsTask(relPath)).toBe(true);
+  });
+
+  it.each(['docs/a.ts', 'README.md', 'sdlc.config.yaml', '.sdlc/config.json', 'SDLC.CONFIG.YAML'])(
+    '%s is decided by its path alone',
+    relPath => {
+      expect(needsTask(relPath)).toBe(false);
+    },
+  );
+
+  it('still needs the task for the custom agents directory, which is not protected', () => {
+    expect(needsTask('.sdlc/agents/custom/a.toml')).toBe(true);
   });
 });

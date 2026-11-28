@@ -64,6 +64,14 @@ function isDocsPath(relPath: string): boolean {
 }
 
 /**
+ * Whether the edit rule needs the task of a file at all: protected and docs paths are decided by
+ * their path alone, so the entrypoint skips reading the task for them.
+ */
+export function needsTask(relPath: string): boolean {
+  return !isProtectedPath(relPath) && !isDocsPath(relPath);
+}
+
+/**
  * The edit rule, per edited file, in this order:
  * 1. a file outside the project is not ours to police;
  * 2. a protected file (`isProtectedPath`) is a `protected-path` violation in enforce and nothing in

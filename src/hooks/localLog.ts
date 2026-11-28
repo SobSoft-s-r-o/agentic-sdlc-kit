@@ -1,0 +1,74 @@
+import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import type { Gap } from '../core/types.js';
+
+/**
+ * The hook's local files, under `<repository root>/.sdlc/cache/` (git-ignored). A hook writes
+ * here instead of to GitHub on every tool call; `sdlc sync` flushes the gaps later.
+ */
+export const CACHE_DIR = '.sdlc/cache';
+/** One `LoggedGap` per line. */
+export const GAPS_FILE = 'gaps.jsonl';
+/** One prompt record per line (a hash, never the prompt text). */
+export const PROMPTS_FILE = 'prompts.jsonl';
+/** The task states the edit rule has read lately, keyed by issue. */
+export const TASK_CACHE_FILE = 'hook-tasks.json';
+
+/** A gap as the hook logs it: the issue is the task the violation was found for, when there is one. */
+export interface LoggedGap extends Gap {
+  issue?: number;
+}
+
+const pathOf = (root: string, file: string): string => join(root, ...CACHE_DIR.split('/'), file);
+
+const isMissing = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+};
+
+/** Appends `value` as one JSON line, creating the cache directory and the file when needed. */
+export async function appendJsonLine(root: string, file: string, value: unknown): Promise<void> {
+  const path = pathOf(root, file);
+  await mkdir(dirname(path), { recursive: true });
+  await appendFile(path, `${JSON.stringify(value)}\n`);
+}
+
+/** The lines of a JSON-lines file, oldest first. A missing file is empty; a line that is not JSON is skipped. */
+export async function readJsonLines<T>(root: string, file: string): Promise<T[]> {
+  let text: string;
+  try {
+    text = await readFile(pathOf(root, file), 'utf8');
+  } catch (error) {
+    if (isMissing(error)) return [];
+    throw error;
+  }
+  const values: T[] = [];
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue;
+    try {
+      values.push(JSON.parse(line) as T);
+    } catch {
+      // A line cut short by a crash, or edited by hand: the rest of the file is still good.
+    }
+  }
+  return values;
+}
+
+/** A JSON file of the cache; `undefined` when it is missing or not JSON. */
+export async function readJsonFile<T>(root: string, file: string): Promise<T | undefined> {
+  try {
+    return JSON.parse(await readFile(pathOf(root, file), 'utf8')) as T;
+  } catch (error) {
+    if (isMissing(error) || error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+}
+
+/** Replaces a JSON file of the cache; written aside and renamed, so a reader never sees half of it. */
+export async function writeJsonFile(root: string, file: string, value: unknown): Promise<void> {
+  const path = pathOf(root, file);
+  const temporary = `${path}.${process.pid}.tmp`;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(temporary, `${JSON.stringify(value)}\n`);
+  await rename(temporary, path);
+}
