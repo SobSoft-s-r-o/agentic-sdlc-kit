@@ -360,25 +360,38 @@ const GH_API_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 const MERGE_ENDPOINT = /(?:^|\/)pulls\/[^/]+\/merge\/?(?:[?#].*)?$/;
 const GRAPHQL_ENDPOINT = /(?:^|\/)graphql\/?$/;
 
+/** The value `arg` gives the method option of `gh api`: `-X M`, `-XM`, `-X=M`, `--method M`, `--method=M`; the last one wins. */
+function methodOf(arg: string, next: string | undefined): string | undefined {
+  if (arg === '-X' || arg === '--method') return next;
+  if (arg.startsWith('--method=')) return arg.slice('--method='.length);
+  if (arg.startsWith('-X')) return arg.slice(arg.startsWith('-X=') ? 3 : 2);
+  return undefined;
+}
+
 /**
  * Whether the arguments of `gh api` (after `api`) merge a pull request: the REST endpoint
- * `.../pulls/<n>/merge` with any method, or a GraphQL call that mentions `mergePullRequest` in any
- * word, the `query=` field included. The words are read as written, not through `withoutTextValues`,
- * which would drop the value of `-F query=...`. A query read from a file or from stdin
- * (`-f query=@file`, `--input`) is not seen.
+ * `.../pulls/<n>/merge`, or a GraphQL call that mentions `mergePullRequest` in any word, the
+ * `query=` field included. A method that is explicitly GET or HEAD only reads, so it is let through
+ * (`gh api` otherwise picks POST when it has fields, and the merge endpoint is a PUT). The words are
+ * read as written, not through `withoutTextValues`, which would drop the value of `-F query=...`. A
+ * query read from a file or from stdin (`-f query=@file`, `--input`) is not seen.
  */
 function mergesThroughApi(args: readonly string[]): boolean {
   let endpoint: string | undefined;
+  let method: string | undefined;
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
     if (arg === '--') {
       endpoint ??= args[i + 1];
       break;
     }
-    if (arg.startsWith('-')) i += GH_API_VALUE_OPTIONS.has(arg) ? 1 : 0;
-    else endpoint ??= arg;
+    if (arg.startsWith('-')) {
+      method = methodOf(arg, args[i + 1]) ?? method;
+      i += GH_API_VALUE_OPTIONS.has(arg) ? 1 : 0;
+    } else endpoint ??= arg;
   }
   if (endpoint === undefined) return false;
+  if (method !== undefined && ['GET', 'HEAD'].includes(method.toUpperCase())) return false;
   if (MERGE_ENDPOINT.test(endpoint)) return true;
   return GRAPHQL_ENDPOINT.test(endpoint) && args.some(arg => arg.includes('mergePullRequest'));
 }
@@ -403,8 +416,12 @@ function sdlcViolations(args: readonly string[]): Violation[] {
   return found;
 }
 
-/** The kit's own entry file run through `node`: `.../dist/cli.js` (any depth under a `dist` directory). */
-const KIT_ENTRY = /(?:^|[/\\])dist[/\\](?:[^/\\]+[/\\])*cli\.js$/;
+/**
+ * The kit's own entry file run through `node`: `cli.js` directly in a `dist` directory (`dist/cli.js`,
+ * `.../agentic-sdlc-kit/dist/cli.js`, which is where the package's `bin` points). A `cli.js` nested
+ * deeper (`dist/tools/cli.js`) is some other program's.
+ */
+const KIT_ENTRY = /(?:^|[/\\])dist[/\\]cli\.js$/;
 /** The kit's launcher in `node_modules/.bin`, which `node` can run as a script too. */
 const KIT_BIN = /(?:^|[/\\])node_modules[/\\]\.bin[/\\]sdlc$/;
 
@@ -425,8 +442,8 @@ const NODE_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 const NODE_EVAL_OPTIONS: ReadonlySet<string> = new Set(['-e', '--eval', '-p', '--print', '-pe']);
 
 /**
- * The arguments `sdlc` gets when `node` runs the kit's entry file (`dist/cli.js` under any
- * directory, or `node_modules/.bin/sdlc`) as its script; `undefined` for any other script. Options
+ * The arguments `sdlc` gets when `node` runs the kit's entry file (`dist/cli.js`, or
+ * `node_modules/.bin/sdlc`) as its script; `undefined` for any other script. Options
  * of `node` come first (`--enable-source-maps`, `-r <module>`).
  */
 function nodeKitArgs(args: readonly string[]): readonly string[] | undefined {
