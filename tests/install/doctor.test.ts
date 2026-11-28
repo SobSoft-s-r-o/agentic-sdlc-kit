@@ -2622,8 +2622,12 @@ describe('worktrees.orphans', () => {
       const done = runDoctor(h.env, h.cfg).finally(() => {
         settled = true;
       });
-      // The deadline starts when the lookup does, after real file reads: advance until the run is over.
-      for (let step = 0; step < 100 && !settled; step += 1) await vi.advanceTimersByTimeAsync(1_000);
+      // The deadline starts when the lookup does, after real file reads: advance until the run is over, yielding to
+      // real I/O between steps (setImmediate is not faked) so a slow runner cannot use up the steps before the reads end.
+      for (let step = 0; step < 400 && !settled; step += 1) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
       const check = byId(await done, 'worktrees.orphans');
 
       expect(check.status).toBe('warn');
@@ -2631,7 +2635,7 @@ describe('worktrees.orphans', () => {
     } finally {
       vi.useRealTimers();
     }
-  });
+  }, 20_000);
 
   it('makes no GitHub mutation, and asks only about the issues of worktrees no task was found for', async () => {
     const { tracker, asked } = trackerWith({ 5: 'in_progress', 6: 'done' });
