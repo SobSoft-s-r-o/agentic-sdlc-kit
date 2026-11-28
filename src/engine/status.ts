@@ -1,5 +1,6 @@
 import type { CommandContext } from '../commands/context.js';
 import type { Phase, Status, TaskState } from '../core/types.js';
+import { queuedCounts } from '../outbox/outbox.js';
 import type { TaskScan, TrackedTask } from '../tracker/types.js';
 import { lookbackScan, reconcile, type ReconcileAction } from './reconcile.js';
 
@@ -29,6 +30,8 @@ export interface StatusReport {
   untracked: { issue: number; title: string }[];
   /** What a dry-run reconcile would change, plus its errors; one `error` when the dry run itself failed. */
   pendingReconcile: ReconcileAction[];
+  /** What waits in the local queues for `sdlc sync`: commands that could not reach GitHub, and gaps the hooks logged. */
+  queued: { outbox: number; gaps: number };
 }
 
 const STATUS_ORDER: readonly Status[] = [
@@ -86,6 +89,9 @@ const pausedOn = (state: TaskState, who: TaskState['waitingOn']): boolean =>
  * tasks fails the report; a failing dry-run reconcile only becomes the single `pendingReconcile`
  * entry, so the rest of the picture is still shown.
  *
+ * `queued` counts what waits for `sdlc sync` in the main checkout's cache (nothing when the context has no
+ * repository root).
+ *
  * Like reconcile, it reads the open tasks and those closed within `reconcile.closedLookbackDays`;
  * `all` reads every task, however long ago it closed.
  */
@@ -123,6 +129,7 @@ export async function statusReport(
     stalePausedOnAgent,
     untracked: untracked.map(({ issue, title }) => ({ issue, title })),
     pendingReconcile: await pendingReconcile(ctx, scan),
+    queued: ctx.repoRoot === undefined ? { outbox: 0, gaps: 0 } : await queuedCounts(ctx.repoRoot),
   };
 }
 

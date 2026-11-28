@@ -18,7 +18,7 @@ const cliPath = join(root, 'dist', 'cli.js');
 const version = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version;
 const validConfig = join(root, 'tests', 'fixtures', 'config', 'valid.yaml');
 
-const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'board', 'config', 'githook', 'hook', 'init', 'upgrade', 'uninstall', 'doctor'];
+const COMMANDS = ['task', 'stage', 'evidence', 'review', 'approve', 'deploy', 'reconcile', 'status', 'sync', 'board', 'config', 'githook', 'hook', 'init', 'upgrade', 'uninstall', 'doctor'];
 
 let dir: string;
 beforeAll(() => {
@@ -725,7 +725,12 @@ describe('sdlc hook (built)', () => {
   it('session-start with queued gaps starts a detached sdlc sync that logs to .sdlc/cache/sync.log', async () => {
     const root = hookRepo();
     mkdirSync(join(root, '.sdlc', 'cache'), { recursive: true });
-    writeFileSync(join(root, '.sdlc', 'cache', 'gaps.jsonl'), '{"rule":"no-task"}\n');
+    // A gap that names no task: the real sync drops it without needing the config or `gh`.
+    const gaps = join(root, '.sdlc', 'cache', 'gaps.jsonl');
+    writeFileSync(
+      gaps,
+      `${JSON.stringify({ at: '2026-06-01T00:00:00.000Z', rule: 'no-task', text: 'edit src/a.ts', harness: 'claude', blocked: false })}\n`,
+    );
 
     const result = sdlc(['hook', 'claude', 'session-start'], {
       cwd: root,
@@ -741,8 +746,10 @@ describe('sdlc hook (built)', () => {
       await new Promise(resolve => setTimeout(resolve, 50));
       text = existsSync(log) ? readFileSync(log, 'utf8') : '';
     }
-    // The child is the real program started with `sync`; the command arrives with a later task, so for now it is unknown.
-    expect(text).toContain("unknown command 'sync'");
+    // The child is the real program started with `sync`: it dropped the gap and gave the lock back.
+    expect(text).toContain('Dropped 1 gap(s) that could not be recorded.');
+    expect(readFileSync(gaps, 'utf8')).toBe('');
+    expect(existsSync(join(root, '.sdlc', 'cache', 'sync.lock'))).toBe(false);
   });
 
   it('a prompt is recorded by its hash, and /approve without a task is told so', () => {
@@ -851,6 +858,122 @@ describe('runCli', () => {
 
     expect(h.io.err).toEqual(['config is broken']);
     expect(process.exitCode).toBe(1);
+  });
+});
+
+describe('sdlc sync (built)', () => {
+  /** A `PATH` with git and a `gh` that always fails with `stderr`: the network, or GitHub, answering badly. */
+  function pathWithGh(stderr: string): string {
+    const bin = join(dir, 'bin');
+    mkdirSync(bin, { recursive: true });
+    const gh = join(bin, 'gh');
+    writeFileSync(gh, `#!/bin/sh\necho '${stderr}' >&2\nexit 1\n`, { mode: 0o755 });
+    const git = join(bin, 'git');
+    if (!existsSync(git)) symlinkSync(execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim(), git);
+    return bin;
+  }
+
+  function env(path: string): NodeJS.ProcessEnv {
+    const home = join(dir, 'home');
+    mkdirSync(home, { recursive: true });
+    return { HOME: home, PATH: path, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  }
+
+  function repoWithConfig(): string {
+    const repoRoot = join(dir, 'repo');
+    mkdirSync(repoRoot);
+    execFileSync('git', ['init', '-q'], { cwd: repoRoot, env: env(pathWithGh('x')) });
+    writeFileSync(join(repoRoot, 'sdlc.config.yaml'), readFileSync(validConfig, 'utf8'));
+    return repoRoot;
+  }
+
+  const cacheDir = (repoRoot: string): string => join(repoRoot, '.sdlc', 'cache');
+  const outboxLines = (repoRoot: string, file = 'outbox.jsonl'): Record<string, unknown>[] =>
+    readFileSync(join(cacheDir(repoRoot), file), 'utf8')
+      .split('\n')
+      .filter(line => line !== '')
+      .map(line => JSON.parse(line) as Record<string, unknown>);
+
+  it('queues a task command while GitHub is unreachable, and sync keeps it until GitHub answers', () => {
+    const repoRoot = repoWithConfig();
+    const offline = env(pathWithGh('dial tcp: could not resolve host: api.github.com'));
+
+    const queued = sdlc(['approve', '5', 'approve', '--unverified'], { cwd: repoRoot, env: offline });
+
+    expect(queued.status).toBe(0);
+    expect(queued.stdout).toBe('queued for `sdlc sync` (GitHub unreachable): sdlc approve 5 approve --unverified\n');
+    expect(outboxLines(repoRoot)).toEqual([
+      { id: expect.any(String), at: expect.any(String), argv: ['approve', '5', 'approve', '--unverified'] },
+    ]);
+
+    const plan = sdlc(['sync', '--dry-run'], { cwd: repoRoot, env: offline });
+    expect(plan.status).toBe(0);
+    expect(plan.stdout).toBe('Would replay 1 queued command(s):\n  sdlc approve 5 approve --unverified\n');
+
+    // The replay runs the command with queueing off: it exits 75 and stays queued instead of queueing itself again.
+    const still = sdlc(['sync'], { cwd: repoRoot, env: offline });
+    expect(still.status).toBe(75);
+    expect(still.stdout).toContain('GitHub is unreachable');
+    expect(outboxLines(repoRoot)).toHaveLength(1);
+    expect(existsSync(join(repoRoot, '.sdlc', 'cache', 'sync.lock'))).toBe(false);
+  });
+
+  it('moves a queued command that fails for good to outbox-failed.jsonl', () => {
+    const repoRoot = repoWithConfig();
+    sdlc(['approve', '5', 'approve', '--unverified'], {
+      cwd: repoRoot,
+      env: env(pathWithGh('dial tcp: could not resolve host: api.github.com')),
+    });
+
+    const result = sdlc(['sync', '--json'], { cwd: repoRoot, env: env(pathWithGh('HTTP 404: Not Found')) });
+
+    expect(result.status).toBe(1);
+    const report = JSON.parse(result.stdout) as { replayed: number; failed: { argv: string[]; error: string }[]; remaining: number };
+    expect(report).toMatchObject({ replayed: 0, remaining: 0 });
+    expect(report.failed).toEqual([{ argv: ['approve', '5', 'approve', '--unverified'], error: expect.stringContaining('HTTP 404') }]);
+    expect(outboxLines(repoRoot)).toEqual([]);
+    expect(outboxLines(repoRoot, 'outbox-failed.jsonl')).toEqual([
+      expect.objectContaining({ argv: ['approve', '5', 'approve', '--unverified'], error: expect.stringContaining('HTTP 404') }),
+    ]);
+  });
+
+  it('does not queue a command that fails for another reason', () => {
+    const repoRoot = repoWithConfig();
+
+    const result = sdlc(['approve', '5', 'approve', '--unverified'], {
+      cwd: repoRoot,
+      env: env(pathWithGh('HTTP 404: Not Found')),
+    });
+
+    expect(result.status).toBe(1);
+    expect(existsSync(join(cacheDir(repoRoot), 'outbox.jsonl'))).toBe(false);
+  });
+
+  it('exits 75 instead of queueing when SDLC_NO_QUEUE=1', () => {
+    const repoRoot = repoWithConfig();
+
+    const result = sdlc(['approve', '5', 'approve', '--unverified'], {
+      cwd: repoRoot,
+      env: { ...env(pathWithGh('dial tcp: could not resolve host: api.github.com')), SDLC_NO_QUEUE: '1' },
+    });
+
+    expect(result.status).toBe(75);
+    expect(existsSync(join(cacheDir(repoRoot), 'outbox.jsonl'))).toBe(false);
+  });
+
+  it('queues into the main checkout when run from a worktree', () => {
+    const repoRoot = repoWithConfig();
+    const offline = env(pathWithGh('dial tcp: could not resolve host: api.github.com'));
+    const git = (...args: string[]): string => execFileSync('git', args, { cwd: repoRoot, env: offline, encoding: 'utf8' });
+    git('add', '-A');
+    git('-c', 'user.name=t', '-c', 'user.email=t@example.test', 'commit', '-q', '-m', 'init');
+    git('worktree', 'add', '-q', '-b', 'task/5-x', join(repoRoot, '.worktrees', '5-x'));
+
+    const result = sdlc(['approve', '5', 'approve', '--unverified'], { cwd: join(repoRoot, '.worktrees', '5-x'), env: offline });
+
+    expect(result.status).toBe(0);
+    expect(outboxLines(repoRoot)).toHaveLength(1);
+    expect(existsSync(join(repoRoot, '.worktrees', '5-x', '.sdlc', 'cache', 'outbox.jsonl'))).toBe(false);
   });
 });
 

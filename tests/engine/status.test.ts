@@ -216,6 +216,7 @@ describe('statusReport', () => {
       stalePausedOnAgent: [],
       untracked: [],
       pendingReconcile: [],
+      queued: { outbox: 0, gaps: 0 },
     });
   });
 

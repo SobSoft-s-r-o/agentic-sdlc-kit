@@ -933,6 +933,10 @@ describe('runHook session-start', () => {
       tracker.seedTask(feature(5, true));
     });
 
+    // Lines `sdlc sync` can act on: a gap as the hooks log it, a command as the outbox queues it.
+    const gapLine = JSON.stringify({ at: NOW, rule: 'no-task', text: 'edit src/a.ts', harness: 'claude', blocked: false });
+    const entryLine = JSON.stringify({ id: 'a', at: NOW, argv: ['approve', '5'] });
+
     it('starts no sync, and says nothing of a queue, when nothing is queued', async () => {
       const spawnSync = vi.fn();
       repo.write('.sdlc/cache/gaps.jsonl', '');
@@ -944,9 +948,33 @@ describe('runHook session-start', () => {
       expect(contextLines(result.stdout)).toHaveLength(1);
     });
 
+    it('counts only the lines sync would act on: malformed ones start no sync and are not named', async () => {
+      const spawnSync = vi.fn();
+      repo.write('.sdlc/cache/gaps.jsonl', `{"rule":"no-task"}\n{not json\n[]\n`);
+      repo.write('.sdlc/cache/outbox.jsonl', `{"argv":["approve","5","approve"]}\n{not json\n`);
+
+      const result = await run('claude', 'session-start', { stdin: sessionStart(), spawnSync });
+
+      expect(spawnSync).not.toHaveBeenCalled();
+      expect(contextLines(result.stdout)).toHaveLength(1);
+    });
+
+    it('does not count a malformed line next to good ones', async () => {
+      const spawnSync = vi.fn();
+      repo.write('.sdlc/cache/gaps.jsonl', `${gapLine}\n{not json\n${gapLine}\n`);
+      repo.write('.sdlc/cache/outbox.jsonl', `{not json\n${entryLine}\n`);
+
+      const result = await run('claude', 'session-start', { stdin: sessionStart(), spawnSync });
+
+      expect(spawnSync).toHaveBeenCalledTimes(1);
+      expect(contextLines(result.stdout).at(-1)).toBe(
+        'Queued for sync: 1 write(s), 2 gap(s); `sdlc sync` is running in the background.',
+      );
+    });
+
     it.each([
-      ['gaps.jsonl', '{"rule":"no-task"}\n{"rule":"rm-rf"}\n', 'Queued for sync: 0 write(s), 2 gap(s); `sdlc sync` is running in the background.'],
-      ['outbox.jsonl', '{"argv":["approve","5","approve"]}\n', 'Queued for sync: 1 write(s), 0 gap(s); `sdlc sync` is running in the background.'],
+      ['gaps.jsonl', `${gapLine}\n${gapLine}\n`, 'Queued for sync: 0 write(s), 2 gap(s); `sdlc sync` is running in the background.'],
+      ['outbox.jsonl', `${entryLine}\n`, 'Queued for sync: 1 write(s), 0 gap(s); `sdlc sync` is running in the background.'],
     ])('starts sync for the repository when %s has lines, and says what is queued', async (file, content, line) => {
       const spawnSync = vi.fn();
       repo.write(`.sdlc/cache/${file}`, content);
@@ -961,7 +989,7 @@ describe('runHook session-start', () => {
     it('starts sync with the main checkout, whose cache holds the queue, when the session is in a worktree', async () => {
       repo.git('worktree', 'add', '-q', '-b', 'task/7-y', '.worktrees/7-y');
       tracker.seedTask(feature(7, true));
-      repo.write('.sdlc/cache/gaps.jsonl', '{"rule":"no-task"}\n');
+      repo.write('.sdlc/cache/gaps.jsonl', `${gapLine}\n`);
       const spawnSync = vi.fn();
 
       const result = await run('claude', 'session-start', {
@@ -974,7 +1002,7 @@ describe('runHook session-start', () => {
     });
 
     it('is not stopped by a sync that cannot be started: a warning on stderr, the context as usual', async () => {
-      repo.write('.sdlc/cache/gaps.jsonl', '{"rule":"no-task"}\n');
+      repo.write('.sdlc/cache/gaps.jsonl', `${gapLine}\n`);
       const spawnSync = vi.fn(() => {
         throw new Error('spawn denied');
       });
@@ -989,7 +1017,7 @@ describe('runHook session-start', () => {
     });
 
     it('works without a way to start sync, and says to run it', async () => {
-      repo.write('.sdlc/cache/gaps.jsonl', '{"rule":"no-task"}\n');
+      repo.write('.sdlc/cache/gaps.jsonl', `${gapLine}\n`);
 
       const result = await run('claude', 'session-start', { stdin: sessionStart() });
 

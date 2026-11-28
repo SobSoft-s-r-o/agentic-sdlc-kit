@@ -1276,10 +1276,11 @@ describe('gap_recorded', () => {
     expect(next.gaps?.at(-1)).toEqual(gap(100));
   });
 
-  it('changes neither status, phase nor waitingOn, and sets updatedAt to the event time', () => {
+  it('changes neither status, phase, waitingOn nor updatedAt: a note is not work on the task', () => {
     const inReview = featureInReview(['web']);
     const next = applyEvent(inReview, { kind: 'gap_recorded', gaps: [gap(1)] }, feature, ts(30));
-    expect(next).toEqual({ ...inReview, gaps: [gap(1)], updatedAt: ts(30) });
+    expect(next).toEqual({ ...inReview, gaps: [gap(1)] });
+    expect(next.updatedAt).toBe(inReview.updatedAt);
   });
 
   it('is accepted on a done task and while awaiting deployment', () => {

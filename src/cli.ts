@@ -25,6 +25,7 @@ import { registerReconcileCommand } from './commands/reconcile.js';
 import { registerReviewCommand } from './commands/review.js';
 import { registerStageCommand } from './commands/stage.js';
 import { registerStatusCommand } from './commands/status.js';
+import { registerSyncCommand, spawnReplay, type SyncContext } from './commands/sync.js';
 import { registerTaskCommand } from './commands/task.js';
 import { registerUninstallCommand } from './commands/uninstall.js';
 import { registerUpgradeCommand } from './commands/upgrade.js';
@@ -33,6 +34,7 @@ import { loadConfig, type Config } from './config/schema.js';
 import { defaultGhRunner } from './github/gh.js';
 import { GitHubTracker } from './github/githubTracker.js';
 import { CACHE_DIR, SYNC_LOG_FILE } from './hooks/localLog.js';
+import { mainRootOf } from './hooks/resolve.js';
 import { nodeRepoFs } from './install/repoFs.js';
 import { createGitRunner } from './install/provision.js';
 import { execProgram, findOnPath } from './secrets/gitleaks.js';
@@ -51,14 +53,66 @@ export interface CliDeps {
   makeGitHookContext?: () => GitHookContext | Promise<GitHookContext>;
   /** Builds the context of `hook`, which reads the config and builds the tracker only when a rule needs them. */
   makeHookContext?: () => HookContext | Promise<HookContext>;
+  /** Builds the context of `sync`, which loads the config only when a gap has to be recorded; defaults to the main checkout, this program and `gh`. */
+  makeSyncContext?: () => SyncContext | Promise<SyncContext>;
   /** Builds the context of `init`, `upgrade` and `uninstall`; defaults to the git root, git and `gh`. */
   makeInstallContext?: InstallContextFactory;
   /** Builds the context of `doctor`, which needs no loadable config; defaults to the git root, git, `gh` and the real PATH. */
   makeDoctorContext?: () => DoctorContext | Promise<DoctorContext>;
+  /**
+   * The command line the program runs with (what follows `sdlc`), which a queued command is replayed
+   * from; defaults to the arguments `runCli` was given, else `process.argv`.
+   */
+  argv?: string[];
   /** Where results go; defaults to stdout. */
   out?: (text: string) => void;
   /** Where errors go; defaults to stderr. */
   err?: (text: string) => void;
+}
+
+/**
+ * The commands that may be queued for `sdlc sync` when GitHub cannot be reached: each one re-applies
+ * its event to the state it finds, so running it later is safe. `task new` is not here (a replay would
+ * create a second issue), nor is `deploy record` (a replay would run its `--verify` command later),
+ * nor are the commands that only read.
+ */
+const QUEUEABLE: ReadonlySet<string> = new Set([
+  'stage start',
+  'stage publish',
+  'evidence add',
+  'review handoff',
+  'approve',
+  'task checkpoint',
+]);
+
+/** The words that name `command`: `stage publish`. */
+function commandPath(command: Command): string {
+  const names: string[] = [];
+  for (let current: Command | null = command; current?.parent; current = current.parent) names.unshift(current.name());
+  return names.join(' ');
+}
+
+/** Options whose value is a file; a queued command runs from another directory, so it needs the full path. */
+const PATH_OPTIONS: ReadonlySet<string> = new Set(['--file', '--config']);
+
+/** `argv` with the files its options name (`--file`, `--config`) as absolute paths, in both `--file x` and `--file=x` forms. */
+function withAbsolutePaths(argv: readonly string[], cwd: string): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index] as string;
+    const equals = arg.indexOf('=');
+    if (equals > 0 && PATH_OPTIONS.has(arg.slice(0, equals))) {
+      result.push(`${arg.slice(0, equals)}=${resolve(cwd, arg.slice(equals + 1))}`);
+      continue;
+    }
+    result.push(arg);
+    const value = argv[index + 1];
+    if (PATH_OPTIONS.has(arg) && value !== undefined) {
+      result.push(resolve(cwd, value));
+      index += 1;
+    }
+  }
+  return result;
 }
 
 const writeLine = (stream: NodeJS.WriteStream) => (text: string) => void stream.write(`${text}\n`);
@@ -77,6 +131,26 @@ function gitRoot(cwd: string): string | undefined {
   }
 }
 
+/**
+ * The top-level directory of the checkout containing `cwd` and the root of the main checkout, which
+ * is the same unless `cwd` is in a linked worktree. The kit's local files (`.sdlc/cache/`) live in the
+ * main one. `undefined` outside a repository.
+ */
+function gitRoots(cwd: string): { root: string; mainRoot: string } | undefined {
+  try {
+    const [root, commonDir] = execFileSync(
+      'git',
+      ['rev-parse', '--show-toplevel', '--path-format=absolute', '--git-common-dir'],
+      { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).split(/\r?\n/);
+    if (root && commonDir) return { root, mainRoot: mainRootOf({ root, commonDir }) };
+  } catch {
+    // A git that does not know `--path-format` (before 2.31), or no repository: the plain answer below.
+  }
+  const root = gitRoot(cwd);
+  return root === undefined ? undefined : { root, mainRoot: root };
+}
+
 /** The text of a file, `undefined` when there is no such file; any other failure (permissions, a directory) throws. */
 function readFileIfPresent(path: string): string | undefined {
   try {
@@ -92,15 +166,18 @@ function readFileIfPresent(path: string): string | undefined {
  * Reads the config: `configOption` when given, else `sdlc.config.yaml` in the git root. Runs
  * only when a command needs it, so `--help` and `--version` work anywhere.
  */
-function loadEnvironment(configOption: string | undefined, cwd: string): { cfg: Config; repoRoot: string } {
-  const root = gitRoot(cwd);
-  if (configOption === undefined && root === undefined) {
+function loadEnvironment(
+  configOption: string | undefined,
+  cwd: string,
+): { cfg: Config; repoRoot: string; mainRoot?: string } {
+  const roots = gitRoots(cwd);
+  if (configOption === undefined && roots === undefined) {
     throw new Error(
       'Not inside a git repository: run sdlc from your repository, or pass the config file with --config <path>',
     );
   }
-  const configPath = configOption === undefined ? join(root as string, CONFIG_FILE) : resolve(cwd, configOption);
-  return { cfg: loadConfig(configPath), repoRoot: root ?? cwd };
+  const configPath = configOption === undefined ? join(roots?.root as string, CONFIG_FILE) : resolve(cwd, configOption);
+  return { cfg: loadConfig(configPath), repoRoot: roots?.root ?? cwd, mainRoot: roots?.mainRoot };
 }
 
 export { formatCliError };
@@ -120,13 +197,15 @@ export function buildProgram(deps: CliDeps = {}): Command {
   const makeContext: ContextFactory =
     deps.makeContext ??
     ((): CommandContext => {
-      const { cfg, repoRoot } = environment();
+      const { cfg, repoRoot, mainRoot } = environment();
       return {
         tracker: new GitHubTracker(defaultGhRunner, cfg, { repoRoot }),
         cfg,
         now: () => new Date().toISOString(),
         out: data => out(typeof data === 'string' ? data : JSON.stringify(data, null, 2)),
         err,
+        // Where a command that cannot reach GitHub is queued: outside a repository nothing is.
+        ...(mainRoot === undefined ? {} : { repoRoot: mainRoot }),
       };
     });
   const makeBoardContext =
@@ -147,6 +226,36 @@ export function buildProgram(deps: CliDeps = {}): Command {
         configPath,
         // Loads the config only when asked, which `config set` does after it has checked the config.
         login: () => new GitHubTracker(defaultGhRunner, loadConfig(configPath), { repoRoot }).authenticatedLogin(),
+        out,
+        err,
+      };
+    });
+
+  const makeSyncContext =
+    deps.makeSyncContext ??
+    ((): SyncContext => {
+      const cwd = process.cwd();
+      const roots = gitRoots(cwd);
+      if (roots === undefined) throw new Error('Not inside a git repository: run sdlc sync from your repository');
+      // The same program that runs this command replays the queue, as for the reconcile of the git hook.
+      const entry = process.argv[1];
+      if (entry === undefined) throw new Error('cannot tell which program is running');
+      const now = (): string => new Date().toISOString();
+      return {
+        repoRoot: roots.mainRoot,
+        replay: spawnReplay(entry, roots.mainRoot),
+        makeCommandContext: async (): Promise<CommandContext> => {
+          const { cfg } = environment();
+          return {
+            tracker: new GitHubTracker(defaultGhRunner, cfg, { repoRoot: roots.mainRoot }),
+            cfg,
+            now,
+            out: data => out(typeof data === 'string' ? data : JSON.stringify(data, null, 2)),
+            err,
+            repoRoot: roots.mainRoot,
+          };
+        },
+        now,
         out,
         err,
       };
@@ -260,8 +369,12 @@ export function buildProgram(deps: CliDeps = {}): Command {
     });
 
   // Commander gives `--json` to the program wherever it appears, so hand it on to the command that runs.
+  // A command that may be queued also gets the command line to queue (`runCommand` does the queueing).
   program.hook('preAction', (_program, command) => {
     if (program.opts<{ json?: boolean }>().json) command.setOptionValue('json', true);
+    if (QUEUEABLE.has(commandPath(command))) {
+      command.setOptionValue('queueArgv', withAbsolutePaths(deps.argv ?? process.argv.slice(2), process.cwd()));
+    }
   });
 
   registerTaskCommand(program, makeContext);
@@ -272,6 +385,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
   registerDeployCommand(program, makeContext);
   registerReconcileCommand(program, makeContext);
   registerStatusCommand(program, makeContext);
+  registerSyncCommand(program, makeSyncContext);
   registerBoardCommand(program, makeBoardContext);
   registerConfigCommand(program, makeConfigContext);
   registerGitHookCommand(program, makeGitHookContext);
@@ -291,7 +405,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
 export async function runCli(args: string[], deps: CliDeps = {}): Promise<void> {
   const out = deps.out ?? writeLine(process.stdout);
   const err = deps.err ?? writeLine(process.stderr);
-  const program = buildProgram(deps);
+  const program = buildProgram({ ...deps, argv: deps.argv ?? args });
   try {
     await program.parseAsync(args, { from: 'user' });
   } catch (error) {

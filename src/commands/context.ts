@@ -3,6 +3,7 @@ import { displayPhase, projectTask, STATUS_LABELS, WAITING_ON_LABELS } from '../
 import { applyEvent } from '../core/stateMachine.js';
 import { ConfigError } from '../core/taskTypes.js';
 import type { EvidenceKind, Phase, TaskEvent, TaskState, TaskTypeDef, WaitingOn } from '../core/types.js';
+import { enqueue, EXIT_TEMPFAIL, isTransportError, NO_QUEUE_ENV } from '../outbox/outbox.js';
 import type { ExpectedStateComment, TrackedTask, Tracker } from '../tracker/types.js';
 import { errorAsJson, formatCliError } from './errors.js';
 
@@ -17,6 +18,11 @@ export interface CommandContext {
   out: (data: unknown) => void;
   /** Where error text goes without `--json`; defaults to stderr. */
   err?: (text: string) => void;
+  /**
+   * The root of the MAIN checkout, where `.sdlc/cache/` lives whichever worktree runs the command:
+   * the outbox of a command that could not reach GitHub is queued there. Without it nothing is queued.
+   */
+  repoRoot?: string;
 }
 
 export type ContextFactory = () => CommandContext | Promise<CommandContext>;
@@ -210,15 +216,58 @@ export function describeState(state: TaskState): string {
 
 const printLine = (stream: NodeJS.WriteStream) => (text: string) => void stream.write(`${text}\n`);
 
+export interface RunOptions {
+  json?: boolean;
+  /**
+   * The command line (what follows `sdlc`) to queue for `sdlc sync` when GitHub cannot be reached.
+   * Set only for the commands that are safe to run again later; see `QUEUEABLE` in `cli.ts`.
+   */
+  queueArgv?: string[];
+}
+
+const queueingOff = (): boolean => process.env[NO_QUEUE_ENV] === '1';
+
+/** A queueable command that failed on an unreachable GitHub while queueing is off: try again later (exit 75). */
+const tempFailure = (options: RunOptions, error: unknown): boolean =>
+  options.queueArgv !== undefined && queueingOff() && isTransportError(error);
+
+/**
+ * Queues the command line when `error` is GitHub being unreachable and the command may queue
+ * (`queueArgv`, a repository to queue in, queueing not turned off by `SDLC_NO_QUEUE=1`), and says so.
+ * False when it did not queue: the failure is then reported as any other. A queue that cannot be
+ * written is such a case; the error reported is the command's own.
+ */
+async function queueForSync(ctx: CommandContext, options: RunOptions, error: unknown): Promise<boolean> {
+  const { queueArgv } = options;
+  if (queueArgv === undefined || ctx.repoRoot === undefined || queueingOff()) return false;
+  if (!isTransportError(error)) return false;
+  let id: string;
+  try {
+    ({ id } = await enqueue(ctx.repoRoot, queueArgv, ctx.now()));
+  } catch {
+    return false;
+  }
+  ctx.out(
+    options.json
+      ? JSON.stringify({ queued: true, id }, null, 2)
+      : `queued for \`sdlc sync\` (GitHub unreachable): sdlc ${queueArgv.join(' ')}`,
+  );
+  return true;
+}
+
 /**
  * Runs one CLI action: builds the context, runs `run` and prints its result (`describe` for human
  * output, the result as JSON with `--json`). Any failure is printed (to `err`, or as `{"error": ...}`
  * through `out` with `--json`), with the arguments and stderr of a failed `gh` call behind it, and
  * sets the exit code to 1; it never rejects.
+ *
+ * A command with `queueArgv` that fails because GitHub is unreachable is queued instead and exits 0
+ * (`{"queued":true,"id":...}` with `--json`). With `SDLC_NO_QUEUE=1` (set by `sdlc sync` when it
+ * replays) it is not queued and exits 75 (`EXIT_TEMPFAIL`).
  */
 export async function runCommand<T>(
   makeContext: ContextFactory,
-  options: { json?: boolean },
+  options: RunOptions,
   run: (ctx: CommandContext) => Promise<T>,
   describe: (result: T) => string,
 ): Promise<void> {
@@ -228,7 +277,8 @@ export async function runCommand<T>(
     const result = await run(ctx);
     ctx.out(options.json ? JSON.stringify(result, null, 2) : describe(result));
   } catch (error) {
-    process.exitCode = 1;
+    if (ctx !== undefined && (await queueForSync(ctx, options, error))) return;
+    process.exitCode = tempFailure(options, error) ? EXIT_TEMPFAIL : 1;
     if (options.json) (ctx?.out ?? printLine(process.stdout))(JSON.stringify(errorAsJson(error), null, 2));
     else (ctx?.err ?? printLine(process.stderr))(formatCliError(error));
   }

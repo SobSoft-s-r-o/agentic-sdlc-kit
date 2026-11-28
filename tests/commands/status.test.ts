@@ -1,3 +1,5 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
@@ -8,6 +10,7 @@ import { loadConfig, typeRegistry } from '../../src/config/schema.js';
 import { newTask } from '../../src/core/stateMachine.js';
 import type { TaskState } from '../../src/core/types.js';
 import { statusReport } from '../../src/engine/status.js';
+import { GAPS_FILE, OUTBOX_FILE } from '../../src/hooks/localLog.js';
 import { FakeTracker } from '../support/fakeTracker.js';
 
 const cfg = loadConfig(join(dirname(fileURLToPath(import.meta.url)), '../fixtures/config/valid.yaml'));
@@ -217,6 +220,86 @@ describe('sdlc status', () => {
 
     expect(h.err[0]).toContain('scanTasks');
     expect(process.exitCode).toBe(1);
+  });
+});
+
+describe('queued work', () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'sdlc-status-queued-'));
+    mkdirSync(join(root, '.sdlc', 'cache'), { recursive: true });
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  const cache = (file: string, ...lines: string[]): void =>
+    writeFileSync(join(root, '.sdlc', 'cache', file), lines.map(line => `${line}\n`).join(''));
+  const entry = (id: string): string => JSON.stringify({ id, at: NOW, argv: ['approve', '5'] });
+  const gapLine = JSON.stringify({ at: NOW, rule: 'no-task', text: 'edit a.ts', harness: 'claude', blocked: false });
+
+  function withRoot(h: Harness): Harness {
+    h.ctx.repoRoot = root;
+    return h;
+  }
+
+  it('shows how many writes and gaps wait for sdlc sync', async () => {
+    const h = withRoot(setup());
+    h.tracker.seedTask(task(1, { status: 'in_progress', phase: 'implementation', updatedAt: ago(1) }));
+    cache(OUTBOX_FILE, entry('a'), entry('b'));
+    cache(GAPS_FILE, gapLine);
+
+    await run(h);
+
+    const text = h.out[0] as string;
+    expect(text).toContain('In progress (1)');
+    expect(text.trimEnd().endsWith('Queued for sync: 2 write(s), 1 gap(s)')).toBe(true);
+  });
+
+  it('shows the line for an empty repository too', async () => {
+    const h = withRoot(setup());
+    cache(GAPS_FILE, gapLine, gapLine);
+
+    await run(h);
+
+    expect(h.out[0]).toBe('No tracked tasks.\n\nQueued for sync: 0 write(s), 2 gap(s)');
+  });
+
+  it('leaves the line out when nothing is queued, or the context has no repository root', async () => {
+    const h = withRoot(setup());
+    await run(h);
+    expect(h.out[0]).toBe('No tracked tasks.');
+
+    cache(OUTBOX_FILE, entry('a'));
+    const noRoot = setup();
+    await run(noRoot);
+    expect(noRoot.out[0]).toBe('No tracked tasks.');
+  });
+
+  it('counts only the lines sync would act on', async () => {
+    const h = withRoot(setup());
+    cache(OUTBOX_FILE, entry('a'), '{not json', JSON.stringify({ argv: ['approve', '5', 'approve'] }));
+    cache(GAPS_FILE, gapLine, JSON.stringify({ rule: 'no-task' }), '[]');
+
+    await run(h);
+
+    expect(h.out[0]).toBe('No tracked tasks.\n\nQueued for sync: 1 write(s), 1 gap(s)');
+  });
+
+  it('puts the counts in the JSON report', async () => {
+    const h = withRoot(setup());
+    cache(OUTBOX_FILE, entry('a'));
+    cache(GAPS_FILE, gapLine, gapLine, gapLine);
+
+    await run(h, '--json');
+
+    expect(JSON.parse(h.out[0] as string)).toMatchObject({ queued: { outbox: 1, gaps: 3 } });
+  });
+
+  it('reports zero counts when the context has no repository root', async () => {
+    const h = setup();
+
+    await run(h, '--json');
+
+    expect(JSON.parse(h.out[0] as string)).toMatchObject({ queued: { outbox: 0, gaps: 0 } });
   });
 });
 

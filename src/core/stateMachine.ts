@@ -360,7 +360,8 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
 
     case 'gap_recorded': {
       next.gaps = mergeGaps(state.gaps ?? [], event.gaps);
-      break;
+      // A note is not work on the task: `updatedAt` stays, so a flush of old gaps never makes a stale task look fresh.
+      return next;
     }
 
     default:

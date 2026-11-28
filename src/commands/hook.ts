@@ -11,10 +11,8 @@ import { HookPayloadError, normalizePayload } from '../hooks/payload.js';
 import {
   appendJsonLine,
   GAPS_FILE,
-  OUTBOX_FILE,
   PROMPTS_FILE,
   readJsonFile,
-  readJsonLines,
   TASK_CACHE_FILE,
   writeJsonFile,
   type LoggedGap,
@@ -48,6 +46,7 @@ import {
   type ToolCall,
 } from '../hooks/types.js';
 import type { GitRunner } from '../install/provision.js';
+import { queuedCounts } from '../outbox/outbox.js';
 import type { TrackedTask, Tracker } from '../tracker/types.js';
 import { applyApproval } from './approve.js';
 import { CommandError, loadTask, trackerStep, type CommandContext, type LoadedTask } from './context.js';
@@ -380,18 +379,6 @@ function timedOut(error: unknown): boolean {
   return false;
 }
 
-/** How many lines wait in the local queues for `sdlc sync`; a file that cannot be read counts as empty. */
-async function queuedWork(root: string): Promise<{ outbox: number; gaps: number }> {
-  const count = async (file: string): Promise<number> => {
-    try {
-      return (await readJsonLines(root, file)).length;
-    } catch {
-      return 0;
-    }
-  };
-  return { outbox: await count(OUTBOX_FILE), gaps: await count(GAPS_FILE) };
-}
-
 /**
  * The task of the branch and what a reconcile would do for it, as context for the agent. Starts
  * `sdlc sync` when something is queued. A task that cannot be read is said so; a reconcile that
@@ -400,7 +387,8 @@ async function queuedWork(root: string): Promise<{ outbox: number; gaps: number 
 async function sessionStart(env: HookEnv): Promise<HookOutcome> {
   const { ctx, checkout, cfg } = env;
   const mainRoot = mainRootOf(checkout);
-  const queued = await queuedWork(mainRoot);
+  // Only well-formed lines count: the ones `sdlc sync` would act on.
+  const queued = await queuedCounts(mainRoot);
   // Only a sync that was started is said to be running; otherwise the agent is told to run it.
   let syncRunning = false;
   if (queued.outbox + queued.gaps > 0 && ctx.spawnSync !== undefined) {

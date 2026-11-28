@@ -35,7 +35,8 @@ function section(heading: string, lines: string[]): string {
 
 /**
  * Plain-text radar: the tasks grouped by status, then each attention section that has entries
- * (waiting on the owner, stale ones past `staleDays`, untracked issues, pending reconcile actions).
+ * (waiting on the owner, stale ones past `staleDays`, untracked issues, pending reconcile actions),
+ * and a last line when something waits for `sdlc sync`.
  */
 export function describeStatus(report: StatusReport, staleDays: number): string {
   const groups = Object.entries(report.byStatus)
@@ -55,6 +56,8 @@ export function describeStatus(report: StatusReport, staleDays: number): string 
   for (const [heading, lines] of attention) {
     if (lines.length > 0) blocks.push(section(heading, lines));
   }
+  const { outbox, gaps } = report.queued;
+  if (outbox > 0 || gaps > 0) blocks.push(`Queued for sync: ${outbox} write(s), ${gaps} gap(s)`);
   return blocks.join('\n\n');
 }
 
