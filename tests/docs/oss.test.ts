@@ -50,8 +50,13 @@ describe('open-source files', () => {
     expect(read(name).length, name).toBeGreaterThan(200);
   });
 
-  it('does not carry its own pull request template: init renders the managed one', () => {
-    expect(existsSync(join(root, '.github/pull_request_template.md'))).toBe(false);
+  it('carries the pull request template that init renders, listed in the install manifest', () => {
+    const template = read('.github/pull_request_template.md');
+    expect(template).toMatch(/^Related to #$/m);
+    expect(template).toMatch(/^Scope: final$/m);
+    expect(template).toContain('Owner commands (/approve, /accept, /ran, /cancel) go in a plain comment, not in a review.');
+    const manifest = JSON.parse(read('.sdlc/manifest.json')) as { entries: Array<{ path: string; kind: string }> };
+    expect(manifest.entries).toContainEqual(expect.objectContaining({ path: '.github/pull_request_template.md', kind: 'file' }));
   });
 
   it('SECURITY.md sends reports through GitHub private reporting and points at the threat model', () => {

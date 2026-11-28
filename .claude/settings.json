@@ -1,0 +1,38 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$(cd \"${CLAUDE_PROJECT_DIR:-.}\" && git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" claude session-start",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$(cd \"${CLAUDE_PROJECT_DIR:-.}\" && git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" claude prompt",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit|Bash|PowerShell|Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$(cd \"${CLAUDE_PROJECT_DIR:-.}\" && git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" claude pre-tool",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

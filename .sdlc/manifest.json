@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "kit": "0.2.0",
+  "entries": [
+    {
+      "path": ".claude/agents/sdlc-analyst.md",
+      "kind": "file",
+      "hash": "sha256:3b965ede92baaf4fb6e31b391c4b27b87c47badfdff5fd6afc246da733ad07da"
+    },
+    {
+      "path": ".claude/agents/sdlc-architect.md",
+      "kind": "file",
+      "hash": "sha256:bdce476cafcb394b1e559f5c9056b7525a845fe04e1426c6554b005e8fab1943"
+    },
+    {
+      "path": ".claude/agents/sdlc-developer.md",
+      "kind": "file",
+      "hash": "sha256:8f78aa479b81e0507ddedd1fbe7813cb30ac9dbd9ea29154a196f19ce2203179"
+    },
+    {
+      "path": ".claude/agents/sdlc-diagnostician.md",
+      "kind": "file",
+      "hash": "sha256:4dc9db704e54b25b941d9e9599370eec4c655c73839ac076860f3dc391719fd1"
+    },
+    {
+      "path": ".claude/agents/sdlc-docs-writer.md",
+      "kind": "file",
+      "hash": "sha256:12665a0ccf06cc10c8c91cb279c8c175d30dbddae5163d75c705a974de4342d1"
+    },
+    {
+      "path": ".claude/agents/sdlc-final-reviewer.md",
+      "kind": "file",
+      "hash": "sha256:6a2a708f67674ed4ae5d3d4e80e9d1b23d734d925d4249293b1c40b47f41bdd7"
+    },
+    {
+      "path": ".claude/agents/sdlc-release-manager.md",
+      "kind": "file",
+      "hash": "sha256:6372d30c82554636aaefd8344cf5c3f5231eab961f996f769c860aeb73d44c76"
+    },
+    {
+      "path": ".claude/agents/sdlc-reviewer.md",
+      "kind": "file",
+      "hash": "sha256:de5a76623f0f56cc9ef18e7d5d2973341d7948a9643671fc9ca78939bd04377d"
+    },
+    {
+      "path": ".claude/agents/sdlc-scout.md",
+      "kind": "file",
+      "hash": "sha256:5698058a437d298a7dfaf39c2d856be90121f6fd14fd46ff1e3a8162a0faf471"
+    },
+    {
+      "path": ".claude/agents/sdlc-security-reviewer.md",
+      "kind": "file",
+      "hash": "sha256:d3303069194fec40f554faf47650b79fc43788a3cecf87e82b97be4ca9a115ad"
+    },
+    {
+      "path": ".claude/agents/sdlc-tester.md",
+      "kind": "file",
+      "hash": "sha256:1044bde591754d9c10cedd7ea687a48f0f17bcc1a205db0271112246c2467f77"
+    },
+    {
+      "path": ".claude/settings.json",
+      "kind": "json-keys",
+      "key": "hooks/PreToolUse",
+      "hash": "sha256:b144d7c506465bf2e7af2fc434ef35afc5f530617bda6ef2b5d2b3abc3855d56",
+      "marker": ".sdlc/hooks/run.sh",
+      "createdFile": true
+    },
+    {
+      "path": ".claude/settings.json",
+      "kind": "json-keys",
+      "key": "hooks/SessionStart",
+      "hash": "sha256:de377ba0f6740126124cac45b0b1e0dd458a2e4b2393f133b68f4ed7d5cf2996",
+      "marker": ".sdlc/hooks/run.sh",
+      "createdFile": true
+    },
+    {
+      "path": ".claude/settings.json",
+      "kind": "json-keys",
+      "key": "hooks/UserPromptSubmit",
+      "hash": "sha256:adbd88d4bfc6a5aa76d0e3b463d17acf9538ea31fcc912567e68ca53b2448f04",
+      "marker": ".sdlc/hooks/run.sh",
+      "createdFile": true
+    },
+    {
+      "path": ".claude/skills/sdlc-delivery/SKILL.md",
+      "kind": "file",
+      "hash": "sha256:55864b3e67e7094a7092ce348a5d8cb4d8aea8f4111ef4dfe92c75e636c72511"
+    },
+    {
+      "path": ".claude/skills/sdlc-orientation/SKILL.md",
+      "kind": "file",
+      "hash": "sha256:2b16760baa106f0980e7081d64473f569b2406880096c14ddeef27e93719a6b1"
+    },
+    {
+      "path": ".claude/skills/sdlc-task-tracking/SKILL.md",
+      "kind": "file",
+      "hash": "sha256:54eeecf57537649e05a2c46b513b81e7233f37e22e43b79d2427495914735916"
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "kind": "file",
+      "hash": "sha256:d74f5fbd4c95e861220c8bf50fa8d65867ceac7ab4a79a85fdb1729e7aa80707"
+    },
+    {
+      "path": ".gitignore",
+      "kind": "line-block",
+      "hash": "sha256:a3b1b2f514ee190104b605a3a0f920d5da1826938a6864c78521d62d488c2b47"
+    },
+    {
+      "path": ".mcp.json",
+      "kind": "json-keys",
+      "key": "mcpServers/github",
+      "hash": "sha256:74ec75acc2600c36ec5cb66fb24fe55d2321ca63d4e265bebf8fb42bfbb73a3d",
+      "createdFile": true
+    },
+    {
+      "path": ".sdlc/githooks/post-checkout",
+      "kind": "file",
+      "hash": "sha256:d0faee8bee75b1c7484d464bf5ba0017d599f82f52a33877a0a9316fc587910c"
+    },
+    {
+      "path": ".sdlc/githooks/post-merge",
+      "kind": "file",
+      "hash": "sha256:dd1f15abf687d26bbf637e08959b3968bebf6403bf45d05346bf138aa532faf5"
+    },
+    {
+      "path": ".sdlc/githooks/pre-commit",
+      "kind": "file",
+      "hash": "sha256:81f63ca4681d3350fc8a8e9db8331274db4ba62264060219f8ac7db5a1eb5a05"
+    },
+    {
+      "path": ".sdlc/githooks/pre-push",
+      "kind": "file",
+      "hash": "sha256:08f3e37e0240c2c42b71000e0f6f047359f15bf6a6fac35bc60a5713a5828b03"
+    },
+    {
+      "path": ".sdlc/hooks/run.sh",
+      "kind": "file",
+      "hash": "sha256:2a9a2e10da17129a97aaf8670eb80f58b6e9615707fd31113587212d32c59f4e"
+    },
+    {
+      "path": "CLAUDE.md",
+      "kind": "md-block",
+      "hash": "sha256:dc717fa0904829b0ba38fb9fe0905045e7dc2e242c1e3732328ebaf3f1128b00"
+    }
+  ]
+}
