@@ -326,7 +326,8 @@ export function buildProgram(deps: CliDeps = {}): Command {
         },
         // With `--config` the one file decides, for every root; without it the mode comes from the main checkout.
         explicitConfig: configOption !== undefined,
-        makeTracker: (cfg, root) => new GitHubTracker(defaultGhRunner, cfg, { repoRoot: root }),
+        // A skipped read is a warning on stderr, as in the command contexts: the hook's stdout is its answer to the harness.
+        makeTracker: (cfg, root) => new GitHubTracker(defaultGhRunner, cfg, { repoRoot: root, warn: text => err(`warning: ${text}`) }),
         gitFor: dir => createGitRunner(dir, { timeoutMs: GIT_TIMEOUT_MS }),
         now: () => new Date().toISOString(),
         spawnSync: root => {

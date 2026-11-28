@@ -31,6 +31,15 @@ export class GhError extends Error {
 /** How long one `gh` call may take before it is killed; a hung `gh` (an auth prompt, a stalled network) would stall the command, the hook and the Actions job. */
 export const GH_TIMEOUT_MS = 60_000;
 
+/**
+ * What a `gh` killed on the timeout is reported as. It is not worded as a network failure ("timed out"): the request may
+ * have reached GitHub and been applied, so the outbox must not take it for "unreachable" and queue a write to replay it.
+ * The command fails instead and the person checks what GitHub has before running it again.
+ */
+export function ghTimeoutText(timeoutMs: number): string {
+  return `gh did not finish within ${timeoutMs / 1000} s; the request may or may not have reached GitHub, so check before re-running`;
+}
+
 /** How long a `gh` that was sent SIGTERM may take to end before it is sent SIGKILL. */
 export const GH_KILL_GRACE_MS = 2_000;
 
@@ -38,8 +47,8 @@ export const GH_KILL_GRACE_MS = 2_000;
  * A runner for the real `gh` CLI. A non-zero exit is returned, not thrown; it rejects only when `gh`
  * cannot be run at all (not installed, output over the buffer limit, ...) or runs longer than `timeoutMs`
  * (`GH_TIMEOUT_MS` by default): then it is sent SIGTERM (SIGKILL after `killGraceMs`, if it is still running)
- * and the error says so. The error text matches what the outbox counts as GitHub being unreachable, so a
- * command that timed out is queued like one that could not connect.
+ * and the error says so (`ghTimeoutText`). That is not "GitHub is unreachable": the outbox does not queue a command that
+ * timed out, because the request may already have been applied; the command fails and the person checks first.
  */
 export function createGhRunner(opts: { timeoutMs?: number; killGraceMs?: number } = {}): GhRunner {
   const timeoutMs = opts.timeoutMs ?? GH_TIMEOUT_MS;
@@ -84,7 +93,7 @@ export function createGhRunner(opts: { timeoutMs?: number; killGraceMs?: number 
         child.stdout?.destroy();
         child.stderr?.destroy();
         child.unref();
-        const stderr = `gh timed out after ${timeoutMs / 1000} s`;
+        const stderr = ghTimeoutText(timeoutMs);
         reject(new GhError(args, stderr, `${stderr}: ${describeCommand(args)}`));
       }, timeoutMs);
       // `gh` may exit before reading stdin; that must not surface as an unhandled stream error.

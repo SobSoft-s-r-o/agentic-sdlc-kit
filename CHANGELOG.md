@@ -19,12 +19,12 @@ Open-source packaging: the kit is published on npm, has CI and a release workflo
 - An opt-in end-to-end suite, `npm run test:e2e`, that walks a task through `task new`, `stage publish`, an owner approval, `reconcile`, `task checkpoint` and a cancel against a real sandbox repository. It is skipped unless `SDLC_E2E_REPO` is set and is never part of `npm test`.
 - A shell rule `api-merge` (enforce only) for merging through `gh api .../merge` or a GraphQL `mergePullRequest` or `enablePullRequestAutoMerge` mutation (`gh pr merge --auto` without `--admin` stays allowed: branch protection governs it, see the threat model); owner-only commands are recognised when run as `node .../dist/cli.js` or `node_modules/.bin/sdlc`.
 - `reconcile` mirrors a PR body's `Scope: partial` to the `sdlc:partial` label on that PR, and removes it otherwise.
-- `gh` calls time out after 60 s (SIGTERM, then SIGKILL); a timed-out call counts as GitHub unreachable, so queueable commands go to the outbox.
+- `gh` calls time out after 60 s (SIGTERM, then SIGKILL); a timed-out call is not counted as GitHub unreachable, because GitHub may already have applied the request: the command fails (exit non-zero) with a message saying so, instead of being queued and replayed. Network timeouts that `gh` itself reports are still queued.
 
 ### Changed
 
-- A `kit_ref` that is a release tag (`v0.3.0` and later) now renders the registry form `npx -y agentic-sdlc-kit@<version>` in the instructions, skills and reconcile workflow. A branch or commit keeps the `github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>` form.
-- `sdlc doctor` checks a release `kit_ref` with `npm view`, and a branch with `git ls-remote`, as before.
+- A `kit_ref` that is a release tag from `v0.3.0` on now renders the registry form `npx -y agentic-sdlc-kit@<version>` in the instructions, skills and reconcile workflow. A branch, a commit and the git-only tags `v0.1.0` and `v0.2.0` keep the `github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>` form.
+- `sdlc doctor` checks a release `kit_ref` from `v0.3.0` on with `npm view`, and a branch or a tag below `v0.3.0` with `git ls-remote`, as before; `v0.1.0` and `v0.2.0` pass with a note to move to `v0.3.0` or later.
 - The npm package contains only `dist`, `templates`, `INSTALL.md`, `CHANGELOG.md`, `README.md` and `LICENSE`.
 - `README.md` and `INSTALL.md` describe the npm install and the requirements.
 - Hooks read `mode` from the main checkout's `sdlc.config.yaml`, so a worktree follows a mode change without a commit. Task-state lookups share a checkout cache and have tighter deadlines.

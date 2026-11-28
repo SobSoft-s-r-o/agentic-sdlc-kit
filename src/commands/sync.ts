@@ -184,9 +184,10 @@ async function readBackShows(path: string, token: string): Promise<boolean> {
 /**
  * Takes the right to take over a stale lock: one sync at a time moves it aside, so none of them can
  * move aside a fresh lock another one created after judging the old lock stale. `undefined` when
- * another sync holds that right; a claim left by a sync that died is broken after `TAKEOVER_STALE_MS`.
+ * another sync holds that right; a claim left by a sync that died is broken after `TAKEOVER_STALE_MS`, by the sync's
+ * clock (`ctx.now()`), the one the age of the lock itself is judged by.
  */
-async function claimTakeover(path: string): Promise<string | undefined> {
+async function claimTakeover(ctx: SyncContext, path: string): Promise<string | undefined> {
   const claim = `${path}.takeover`;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -196,7 +197,7 @@ async function claimTakeover(path: string): Promise<string | undefined> {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
     const age = await stat(claim).then(
-      found => Date.now() - found.mtimeMs,
+      found => Date.parse(ctx.now()) - found.mtimeMs,
       () => undefined,
     );
     // No age: the claim was released between the two calls, or cannot be read. Try to create it again; never
@@ -211,7 +212,8 @@ async function claimTakeover(path: string): Promise<string | undefined> {
 /**
  * Moves the stale lock to `<lock>.stale-<token>` and removes it. `false` when there is a fresh lock
  * instead: another sync replaced the stale one meanwhile, and the renamed file, which is then that
- * fresh lock, is given back (`link` never overwrites).
+ * fresh lock, is given back (`link` never overwrites: when yet another sync has created a lock at the path meanwhile,
+ * that lock stays untouched and only the renamed file is removed). Only `<lock>.stale-<token>` is ever unlinked here.
  */
 async function removeStale(ctx: SyncContext, path: string, token: string): Promise<boolean> {
   const written = await lockTime(path);
@@ -259,7 +261,7 @@ export async function acquireLock(ctx: SyncContext): Promise<string | undefined>
     const written = await lockTime(path);
     if (written === undefined) continue; // released meanwhile: create it again
     if (!isStale(ctx, written)) return undefined;
-    const claim = await claimTakeover(path);
+    const claim = await claimTakeover(ctx, path);
     if (claim === undefined) return undefined;
     let free: boolean;
     try {

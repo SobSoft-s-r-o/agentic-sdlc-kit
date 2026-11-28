@@ -271,7 +271,7 @@ const REQUIRED_TOPICS: Array<{ about: string; terms: string[] }> = [
     terms: [
       'A release tag from `v0.3.0` on is run from the npm registry: `npx -y agentic-sdlc-kit@<version>`',
       '`main`, another branch or a commit is run from git: `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>`',
-      '`v0.1.0` and `v0.2.0` were never published to npm, so a config pinned to either must switch to `v0.3.0` or later',
+      '`v0.1.0` and `v0.2.0` were never published to npm, so they are run from git too: a config pinned to either keeps working, and `doctor` suggests moving to `v0.3.0` or later',
     ],
   },
   { about: 'kit_ref being published or existing', terms: ['`kit.ref`: `npm view agentic-sdlc-kit@<version>` for a release tag, `git ls-remote` for a branch', 'set `v0.3.0` or later, or `main`'] },

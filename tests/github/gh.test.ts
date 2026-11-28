@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isTransportError } from '../../src/outbox/outbox.js';
-import { createGhRunner, defaultGhRunner, GH_TIMEOUT_MS, GhError, ghJson, graphql } from '../../src/github/gh.js';
+import { createGhRunner, defaultGhRunner, GH_TIMEOUT_MS, GhError, ghJson, ghTimeoutText, graphql } from '../../src/github/gh.js';
 import { fakeGh } from '../support/fakeGh.js';
 
 describe('ghJson', () => {
@@ -151,11 +151,12 @@ describe.skipIf(process.platform === 'win32')('defaultGhRunner', () => {
     const error = await createGhRunner({ timeoutMs: 100 })(['api', 'x']).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(GhError);
-    expect((error as GhError).message).toMatch(/^gh timed out after 0\.1 s: gh api x$/);
+    expect((error as GhError).message).toBe(`${ghTimeoutText(100)}: gh api x`);
+    expect((error as GhError).message).toMatch(/^gh did not finish within 0\.1 s; the request may or may not have reached GitHub/);
     expect((error as GhError).args).toEqual(['api', 'x']);
     expect(Date.now() - started).toBeLessThan(3000);
-    // The outbox sees a timeout like any other "GitHub did not answer", so the command is queued.
-    expect(isTransportError(error)).toBe(true);
+    // A write GitHub may already have applied must not be queued and replayed: a timeout is not "unreachable".
+    expect(isTransportError(error)).toBe(false);
   });
 
   it('kills the gh process when it times out', async () => {
@@ -212,7 +213,7 @@ describe.skipIf(process.platform === 'win32')('defaultGhRunner', () => {
   it('words the timeout in seconds', async () => {
     await withFakeGh('sleep 5');
     const error = await createGhRunner({ timeoutMs: 2000 })(['api']).catch((e: unknown) => e);
-    expect((error as GhError).message).toMatch(/^gh timed out after 2 s: gh api$/);
+    expect((error as GhError).message).toMatch(/^gh did not finish within 2 s; /);
   });
 
   it('allows a minute by default', () => {

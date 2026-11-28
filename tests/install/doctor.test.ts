@@ -889,6 +889,27 @@ describe('runDoctor', () => {
       expect(npmCalls(h)).toEqual([]);
     });
 
+    describe('a release tag below v0.3.0 (git-only, never on npm)', () => {
+      it.each(['v0.1.0', 'v0.2.0', 'v0.3.0-rc.1'])('%s is looked up in git, never npm, and does not fail; it says to move to v0.3.0 or later', async ref => {
+        const cfg = cfgOf(`${CONFIG}kit_ref: ${ref}\n`);
+        const h = harness({ cfg });
+        const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
+        expect(check.status).toBe('ok');
+        expect(check.message).toContain(`kit_ref ${ref} exists in the kit's repository`);
+        expect(check.message).toContain('v0.3.0 or later');
+        expect(gitCalls(h)).toEqual([['git', ['ls-remote', '--exit-code', 'https://github.com/SobSoft-s-r-o/agentic-sdlc-kit.git', ref]]]);
+        expect(npmCalls(h)).toEqual([]);
+      });
+
+      it('warns, and never fails, when the tag is not in the repository', async () => {
+        const cfg = cfgOf(`${CONFIG}kit_ref: v0.2.0\n`);
+        const h = harness({ cfg, exec: { git: { stdout: '', code: 2, stderr: '' } } });
+        const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
+        expect(check.status).toBe('warn');
+        expect(npmCalls(h)).toEqual([]);
+      });
+    });
+
     describe('a release tag is checked against the npm registry', () => {
       const release = (ref = 'v0.3.0'): Config => cfgOf(`${CONFIG}kit_ref: ${ref}\n`);
 

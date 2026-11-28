@@ -10,6 +10,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   utimesSync,
@@ -834,6 +835,38 @@ describe('syncAll: the lock', () => {
       expect(tokenOf(lockPath())).toBe('third');
     });
 
+    it('leaves the live lock untouched when giving the renamed one back fails because another sync created a lock meanwhile', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const h = setup();
+      let calls = 0;
+      let live: { ino: number; mtimeMs: number } | undefined;
+      h.ctx.now = () => {
+        calls += 1;
+        // The second judgement, under the claim, is made; then the stale lock is replaced, just before the rename.
+        if (calls === 2) writeFileSync(lockPath(), freshLock('first'));
+        // The judgement of the renamed (fresh) file: the lock is gone from its path, and another sync creates its own there,
+        // so the link back (which never overwrites) fails with EEXIST.
+        if (calls === 3) {
+          expect(lockFiles().some(name => name.includes('.stale-'))).toBe(true);
+          writeFileSync(lockPath(), freshLock('live'), { flag: 'wx' });
+          const { ino, mtimeMs } = statSync(lockPath());
+          live = { ino, mtimeMs };
+        }
+        return NOW;
+      };
+
+      // Held: it is reported as such, never taken.
+      expect(await acquireLock(h.ctx)).toBeUndefined();
+
+      // The live lock is the very file its sync created, unchanged; only the file this sync renamed is gone.
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(readFileSync(lockPath(), 'utf8')).toBe(freshLock('live'));
+      const now = statSync(lockPath());
+      expect({ ino: now.ino, mtimeMs: now.mtimeMs }).toEqual(live);
+      // The sync that holds it can still refresh and release it.
+      expect(tokenOf(lockPath())).toBe('live');
+    });
+
     it('reports the lock as held while another sync is taking it over, and leaves both files alone', async () => {
       writeLock(LOCK_STALE_MS + MINUTE);
       const before = readFileSync(lockPath(), 'utf8');
@@ -849,11 +882,34 @@ describe('syncAll: the lock', () => {
       writeLock(LOCK_STALE_MS + MINUTE);
       const claim = `${lockPath()}.takeover`;
       writeFileSync(claim, '');
-      const old = new Date(Date.now() - 10 * MINUTE);
+      // Ten minutes before the time of the sync's clock (`ctx.now()`, the one the lock's age is judged by).
+      const old = new Date(Date.parse(NOW) - 10 * MINUTE);
       utimesSync(claim, old, old);
 
       const token = await acquireLock(setup().ctx);
 
+      expect(token).toEqual(expect.any(String));
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe(token);
+    });
+
+    it('judges the age of a takeover claim by the sync clock, as it does the lock, not by the wall clock', async () => {
+      const claim = `${lockPath()}.takeover`;
+      const stamp = (at: Date): void => utimesSync(claim, at, at);
+
+      // Old by the wall clock, but the sync's clock (NOW, months back) says the claim is not yet written: held.
+      writeLock(LOCK_STALE_MS + MINUTE);
+      writeFileSync(claim, '');
+      stamp(new Date(Date.now() - 10 * MINUTE));
+      expect(await acquireLock(setup().ctx)).toBeUndefined();
+      expect(lockFiles()).toEqual(['sync.lock', 'sync.lock.takeover']);
+
+      // Fresh by the wall clock, but the sync's clock is ten minutes on: the claim is dead, and is broken.
+      const h = setup();
+      h.clock.now = new Date(Date.now() + 10 * MINUTE).toISOString();
+      writeFileSync(lockPath(), JSON.stringify({ pid: 999999, at: new Date(Date.parse(h.clock.now) - LOCK_STALE_MS - MINUTE).toISOString() }));
+      stamp(new Date());
+      const token = await acquireLock(h.ctx);
       expect(token).toEqual(expect.any(String));
       expect(lockFiles()).toEqual(['sync.lock']);
       expect(tokenOf(lockPath())).toBe(token);

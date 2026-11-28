@@ -2,7 +2,7 @@ import type { Config } from '../../config/schema.js';
 import { ensureBoard } from '../../github/board.js';
 import { GhError, ghJson } from '../../github/gh.js';
 import { WORKFLOW_PATH } from '../../render/github.js';
-import { KIT_GIT_URL, KIT_PACKAGE, releaseVersion } from '../../render/instructions.js';
+import { isGitOnlyReleaseTag, KIT_GIT_URL, KIT_PACKAGE, releaseVersion } from '../../render/instructions.js';
 import { ensureLabels } from '../provision.js';
 import { describeError, printable, ok, warn, fail, ghReason, failure, list, type Check, type DoctorEnv } from './types.js';
 
@@ -12,13 +12,19 @@ const KIT_REF_TIMEOUT_MS = 15_000;
 const COMMIT_SHA = /^[0-9a-f]{7,40}$/;
 
 /**
- * `kit_ref` must resolve, or every generated `npx -y ...` command fails: a release tag (`v0.3.0`) must be published on npm,
- * a branch must exist in the kit's repository, and a commit is not checked. Network trouble is "cannot verify".
+ * `kit_ref` must resolve, or every generated `npx -y ...` command fails: a release tag from `v0.3.0` on must be published on npm,
+ * a branch (or a git-only tag, `v0.1.0` and `v0.2.0`: run from git, never on npm) must exist in the kit's repository,
+ * and a commit is not checked. Network trouble is "cannot verify".
  */
 export async function checkKitRef(env: DoctorEnv, cfg: Config): Promise<Check> {
   const version = releaseVersion(cfg.kitRef);
   if (version !== undefined) return checkPublishedVersion(env, cfg.kitRef, version);
-  return checkGitRef(env, cfg.kitRef);
+  const check = await checkGitRef(env, cfg.kitRef);
+  // The tag works, but it is a git build; say where to go from here.
+  if (check.status === 'ok' && isGitOnlyReleaseTag(cfg.kitRef)) {
+    return ok(check.id, `${check.message}; it was never published on npm, so it is run from git: move kit_ref to v0.3.0 or later (the registry form) or main`);
+  }
+  return check;
 }
 
 type ExecAnswer = Awaited<ReturnType<DoctorEnv['exec']>>;
