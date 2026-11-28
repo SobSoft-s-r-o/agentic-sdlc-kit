@@ -201,7 +201,8 @@ const REQUIRED_TOPICS: Array<{ about: string; terms: string[] }> = [
       'secret-tool store --label=github-mcp service github-mcp',
       'secret-tool lookup service github-mcp',
       'Install-Module Microsoft.PowerShell.SecretManagement',
-      'Get-Secret -Vault CredMan -Name github-mcp -AsPlainText',
+      'Set-Secret -Name github-mcp -Vault CredMan',
+      'Get-Secret -Name github-mcp -Vault CredMan -AsPlainText',
       "op read 'op://<vault>/<item>/<field>'",
     ],
   },
@@ -223,6 +224,16 @@ const REQUIRED_TOPICS: Array<{ about: string; terms: string[] }> = [
     ],
   },
   { about: 'the git hooks needing sdlc', terms: ['`core.hooksPath` to `.sdlc/githooks`', 'npx --no-install sdlc', 'the secret guard is NOT active', 'move the dev dependency to the same version'] },
+  {
+    about: 'every clone setting the hooks path',
+    terms: ['**Every clone.**', '`core.hooksPath` is local git config', 'git config core.hooksPath .sdlc/githooks', 'every cloud agent sandbox', '"prepare": "git config core.hooksPath .sdlc/githooks || true"'],
+  },
+  { about: 'the hooks the repository already has', terms: ['each kit hook runs the one of the same name after its own step', '`git.legacyHooks`'] },
+  { about: 'kit_ref existing', terms: ['until that release tag exists, set it to `main` or the ref you installed from', '`kit.ref`'] },
+  { about: 'pnpm and the build of a git dependency', terms: ['pnpm 10.26 and newer', 'onlyBuiltDependencies', 'allowBuilds'] },
+  { about: 'the fine-grained token for an organization board', terms: ['add the organization permission Projects', 'they use a classic token'] },
+  { about: 'the cost of the hourly workflow', terms: ['**Actions minutes.**', 'On a private repository each run counts'] },
+  { about: 'doctor under npx -y', terms: ['missing packages', 'Step 4 was skipped', 'it ignores the temporary package npx put on its own PATH'] },
   { about: 'how sdlc is run after the install', terms: ['plain `sdlc` works only after a global install', 'A global install protects only that machine'] },
   { about: 'the dev dependency', terms: ['the PR body of Step 5 must list it', 'pnpm add -D', 'yarn add -D', 'the repository\'s own package manager'] },
   { about: 'the stack installs', terms: ['/plugin install superpowers@claude-plugins-official', 'gemini extensions install https://github.com/obra/superpowers', 'uv tool install graphifyy'] },
@@ -256,6 +267,16 @@ describe('INSTALL.md', () => {
     const positions = QUESTION_TOPICS.map(({ heading }) => headings.findIndex(line => heading.test(line)));
     expect(positions.every(position => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  });
+
+  it('reads a Windows secret with the same command as the instruction block', () => {
+    const block = readFileSync(join(root, 'templates/instructions/block.md'), 'utf8');
+    const read = /Get-Secret -Name (\S+) -Vault CredMan -AsPlainText/;
+    expect(install).toMatch(read);
+    expect(block).toMatch(read);
+    const generic = (text: string) => (read.exec(text)?.[0] ?? '').replace(read, 'Get-Secret -Name <name> -Vault CredMan -AsPlainText');
+    expect(generic(block)).toBe(generic(install));
+    for (const text of [install, block]) expect(text).not.toContain('Get-StoredCredential');
   });
 
   it.each(REQUIRED_TOPICS)('covers $about', ({ terms }) => {

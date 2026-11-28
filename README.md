@@ -28,10 +28,10 @@ npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init --dry-run           # th
 npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init                     # files, git hooks, board, labels, protection
 $EDITOR sdlc.config.yaml                    # init printed "Created project #N": set github.project.number to N
 npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>          # the git hooks need sdlc to resolve
-npx --no-install sdlc doctor                # expect only actions.secret and mcp.token to complain
+npx --no-install sdlc doctor                # expect only actions.secret and mcp.token to complain (possibly also secrets.pushProtection, mcp.claude)
 ```
 
-Those two go away with the owner-only steps in [INSTALL.md](INSTALL.md): `gh secret set SDLC_TOKEN`, and a GitHub token in your OS keystore exported as `GITHUB_PERSONAL_ACCESS_TOKEN`. Then commit the result on a branch, open a pull request, and give the agents their work as tasks: `npx --no-install sdlc task new --type <type> --title "..." --summary "..."`.
+Those go away with the owner-only steps in [INSTALL.md](INSTALL.md): `gh secret set SDLC_TOKEN`, and a GitHub token in your OS keystore exported as `GITHUB_PERSONAL_ACCESS_TOKEN`. Then commit the result on a branch, open a pull request, and give the agents their work as tasks: `npx --no-install sdlc task new --type <type> --title "..." --summary "..."`.
 
 ## CLI
 

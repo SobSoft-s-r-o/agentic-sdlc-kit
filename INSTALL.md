@@ -34,7 +34,7 @@ A fine-grained token has no scopes `gh` can list: the preflight then warns and y
 npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> config suggest
 ```
 
-This prints a `sdlc.config.yaml` detected from the repository (YAML on stdout, notes on stderr; `--write` creates the file only when it does not exist). It writes `version`, `harnesses`, `mode`, `github`, `owners`, `agents`, `merge_policy`, `quality_gate`, `task_types` and `targets`. The other keys keep their defaults until you add them: `content_language`, `models`, `stack`, `mcp`, `secrets`, `reconcile` and `kit_ref`.
+This prints a `sdlc.config.yaml` detected from the repository (YAML on stdout, notes on stderr; `--write` creates the file only when it does not exist). It writes `version`, `harnesses`, `mode`, `kit_ref`, `github`, `owners`, `agents`, `merge_policy`, `quality_gate`, `task_types` and `targets`. The other keys keep their defaults until you add them: `content_language`, `models`, `stack`, `mcp`, `secrets` and `reconcile`. The suggested `kit_ref` is `v` plus the kit's version, with a comment: until that release tag exists, set it to `main` or the ref you installed from.
 
 Now ask the questions below in order, one at a time. For each, state the detected default and the key it sets, and keep the owner's answer for Step 3.
 
@@ -116,7 +116,7 @@ Write `sdlc.config.yaml` from the answers (edit the suggestion, or write it fres
 npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> config validate
 ```
 
-Set `kit_ref` to the `<ref>` you installed from: the generated instructions and the reconcile workflow run `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<kit_ref>`, and the default is `v` plus the installed version, which must exist as a tag. Show the file to the owner and wait for a yes. A complete example:
+Set `kit_ref` to the `<ref>` you installed from: the generated instructions and the reconcile workflow run `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<kit_ref>`, and the default is `v` plus the installed version, which must exist as a tag. `doctor` checks that it exists (`kit.ref`, with `git ls-remote`). Show the file to the owner and wait for a yes. A complete example:
 
 ```yaml
 version: 1
@@ -160,6 +160,8 @@ npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init --dry-run
 
 Show the plan to the owner, then run `init` without `--dry-run`. It writes the managed files (instruction blocks, agent roles, skills, MCP config, the PR template, the reconcile workflow, `.sdlc/manifest.json`, the git hooks and `.gitignore` lines), sets `core.hooksPath` to `.sdlc/githooks` (the hooks `pre-commit` and `pre-push`, which run the secret guard and the branch rules, then `post-merge` and `post-checkout`), and provisions the board, labels, default-branch protection and secret scanning push protection. It commits nothing. `init` is idempotent: run it again and nothing changes.
 
+- Hooks the repository already has in `.git/hooks` (a hand-written hook, the pre-commit framework, lefthook) keep running: with `core.hooksPath` set git no longer calls them itself, so each kit hook runs the one of the same name after its own step, with the same arguments and input, and its exit code counts. `init` lists the hooks it chains, and the ones it cannot run because they are not executable (`chmod +x` them). `doctor` reports them as `git.legacyHooks`.
+
 - Files that already exist and are not the kit's are kept (notice `exists, not managed by sdlc; kept`); files you or the owner edited are kept (notice `modified locally; kept`); `--overwrite-modified` replaces them.
 - If `init` created a board, it printed `Created project #N`. Put `number: N` under `github.project` in `sdlc.config.yaml` now: `sdlc task new` and `doctor` need it, and without it every `init` creates another board.
 - `--skip-github` leaves GitHub alone (no board, labels, branch protection or push protection). Use it only when the owner provisions the board and the labels themselves, because Step 5 needs both before it can create the task. An account that is not an admin does not need it: `init` reports the admin-only parts as unavailable and goes on.
@@ -170,7 +172,23 @@ Then make `sdlc` resolvable, because the git hooks call it and, when they cannot
 npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>   # pnpm add -D ...  /  yarn add -D ...  with the same specifier
 ```
 
+The kit builds itself from git in its `prepare` script. pnpm 10.26 and newer do not run the build scripts of a git dependency unless it is allowlisted, and the install then has no working `sdlc`. With pnpm, allow it in `pnpm-workspace.yaml` before `pnpm add -D` (`allowBuilds` in pnpm versions that replaced `onlyBuiltDependencies`), or install with npm or globally instead:
+
+```yaml
+onlyBuiltDependencies:
+  - agentic-sdlc-kit
+```
+
 The hooks then find `sdlc` through `npx --no-install sdlc`, and from here on you run `npx --no-install sdlc <command>`. A repository without a `package.json`, or one that uses Yarn Plug'n'Play (no `node_modules/.bin`), needs a global install instead: `npm install --global github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>`, after which plain `sdlc <command>` works. A global install protects only that machine: tell the owner that every other clone and every other contributor needs the same install, or the guard is not active there.
+
+**Every clone.** `core.hooksPath` is local git config: it is not committed or cloned. Every collaborator, every new clone and every cloud agent sandbox runs, once, from the repository root:
+
+```sh
+git config core.hooksPath .sdlc/githooks
+npm install          # installs the dev dependency, so the hooks find sdlc (or the global install above)
+```
+
+Put this in the README or CONTRIBUTING file of the repository. With npm you can make it automatic with a `prepare` script in `package.json`, which npm runs after every `npm install`: `"prepare": "git config core.hooksPath .sdlc/githooks || true"` (merge it with an existing `prepare` script). The generated instructions also tell agents to check `git config core.hooksPath` and set it when it is not `.sdlc/githooks`.
 
 ## Step 5: Commit, open the PR, track it
 
@@ -200,7 +218,7 @@ If the commit is blocked, the secret guard found something: see "Secret guard". 
 npx --no-install sdlc doctor
 ```
 
-Each line starts with `✓` (ok), `!` (warning) or `✗` (failure), and a failure exits non-zero. Until the owner finishes Step 7, expect `actions.secret` to fail (`SDLC_TOKEN` is not set) and `mcp.token` to warn (the variable is not exported); a failing `secrets.guard` means `sdlc` is not installed yet (Step 4). Report anything else to the owner instead of hiding it. The checks and their fixes are in "Troubleshooting".
+Each line starts with `✓` (ok), `!` (warning) or `✗` (failure), and a failure exits non-zero. Until the owner finishes Step 7, expect `actions.secret` to fail (`SDLC_TOKEN` is not set) and `mcp.token` to warn (the variable is not exported); `secrets.pushProtection` may warn (no admin rights, or the plan has none) and `mcp.claude` may warn until the owner approves or adds the server. A failing `secrets.guard` means `sdlc` is not installed yet (Step 4): an `npm error npx canceled due to missing packages` from `npx --no-install sdlc` means the same, Step 4 was skipped. `doctor` run through `npx -y github:...` reports this correctly too: it ignores the temporary package npx put on its own PATH. `kit.ref` warns when `kit_ref` does not exist in the kit's repository, or when it cannot be checked (no network). Report anything else to the owner instead of hiding it. The checks and their fixes are in "Troubleshooting".
 
 ## Step 7: Owner-only steps
 
@@ -219,11 +237,11 @@ The policy, set by the owner and written into every agent's instructions:
 
 - Secrets for local testing live in the OS keystore and are exported into the shell from it when needed. They are never written to a file in the repository, and never printed.
 - Production secrets live only in the store named by `secrets.production_store`. An agent that needs one asks the owner to put it there and never asks for the value.
-- `.env` files exist only gitignored. The `.gitignore` block that `init` adds covers `.env` and `.env.*` (not `.env.example`).
+- `.env` files exist only gitignored. The `.gitignore` block that `init` adds covers `.env` and `.env.*` (not `.env.example`, `.env.sample` or `.env.template`).
 
 **The GitHub token for the MCP server.** The owner creates it under the account the agents act as (the one listed in `agents`; the owner's own when there is no separate account), either fine-grained at https://github.com/settings/personal-access-tokens or classic at https://github.com/settings/tokens, with an expiry and the least it needs:
 
-- Fine-grained: limited to this repository, with Contents, Issues and Pull requests (read is enough when the agents only read through MCP; Metadata read is automatic). GitHub's fine-grained tokens do not cover a board owned by a user account, only an organization's; for such a board use a classic token.
+- Fine-grained: limited to this repository, with Contents, Issues and Pull requests (read is enough when the agents only read through MCP; Metadata read is automatic). For an organization's board, choose that organization as the resource owner and add the organization permission Projects. GitHub's fine-grained tokens do not cover a board owned by a user account; for such a board use a classic token. Outside collaborators and agent accounts that are not members of the organization cannot get a fine-grained token for its resources either: they use a classic token.
 - Classic: the scopes `repo` and `project`.
 
 `sdlc` itself uses `gh`, not this token. The token goes straight into the keystore with the command below. It is never written to a file and never pasted into the chat.
@@ -244,9 +262,9 @@ Windows, in PowerShell, with the SecretManagement modules and their Credential M
 ```powershell
 Install-Module Microsoft.PowerShell.SecretManagement, SecretManagement.JustinGrote.CredMan -Scope CurrentUser
 Register-SecretVault -Name CredMan -ModuleName SecretManagement.JustinGrote.CredMan
-Set-Secret -Vault CredMan -Name github-mcp -Secret (Read-Host 'GitHub token' -AsSecureString)
+Set-Secret -Name github-mcp -Vault CredMan    # prompts for the value
 # in $PROFILE:
-$env:GITHUB_PERSONAL_ACCESS_TOKEN = Get-Secret -Vault CredMan -Name github-mcp -AsPlainText
+$env:GITHUB_PERSONAL_ACCESS_TOKEN = Get-Secret -Name github-mcp -Vault CredMan -AsPlainText
 ```
 
 ## Secret guard
@@ -283,7 +301,8 @@ Limits you must tell the owner:
 
 - **Agents should write under a separate account**, listed under `agents` in the config (a bot or machine account, or a GitHub App's `<app>[bot]` login). The state comments of the logins in `agents` are trusted like the owners', but their comments never count as an owner approval. A login cannot be both an owner and an agent (config error).
 - **If they do not**, because the agents run `gh` with the owner's own account, an owner's `/approve` comment is written by the same login `sdlc` acts as, and the tool cannot tell it from the agent approving its own work. In `enforce` mode it is refused ("authored by the agent's own login"); in `observe` mode it is recorded as `unverified`. The same happens in `enforce` when the tool's login cannot be read (an Actions `GITHUB_TOKEN` or an App token) and `agents` is empty: owner comments are refused as indistinguishable. `doctor` warns about that case (`approvals.trust`, in `enforce` mode with `stack.actions` on and `agents` empty).
-- **The workflow token.** The reconcile workflow reads the secret `SDLC_TOKEN` (set with `gh secret set SDLC_TOKEN`) and fails with a message when it is missing. Use a token with the scopes `repo` and `project` for an account that can write to the repository and the board. The Actions-provided `GITHUB_TOKEN` is not enough for the board. Make that account the one listed under `agents`, not the owner's: with the owner's token the workflow runs as the owner, and in `enforce` mode the owner's own `/approve` comments are then refused as the tool's login.
+- **The workflow token.** The reconcile workflow reads the secret `SDLC_TOKEN` (set with `gh secret set SDLC_TOKEN`) and fails with a message when it is missing. Use a token with the scopes `repo` and `project` for an account that can write to the repository and the board. The Actions-provided `GITHUB_TOKEN` is not enough for the board. Make that account the one listed under `agents`, not the owner's: with the owner's token the workflow runs as the owner, and in `enforce` mode the owner's own `/approve` comments are then refused as the tool's login. The workflow installs the kit in a step without the token, pins its actions by commit SHA and skips Dependabot runs.
+- **Actions minutes.** The workflow also runs every hour. On a private repository each run counts against the account's Actions minutes (on a public repository it is free): roughly 720 short runs a month, each billed as at least one minute. Tell the owner; to save minutes, lower the frequency in the `cron:` line, keeping at least one run per `reconcile.closed_lookback_days`.
 
 In short: owner decides under the owner login; agents and the workflow act under the agent account listed in `agents`.
 
@@ -304,7 +323,7 @@ Role files are templates: `{{...}}` is filled in when the file is rendered. To w
 ## Upgrading and uninstalling
 
 - Upgrade: set `kit_ref` to the new ref, move the dev dependency to it (the command in Step 4), then run `npx --no-install sdlc upgrade --dry-run` and `npx --no-install sdlc upgrade`. Without a dev dependency, run `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<new-ref> upgrade` instead. It re-renders the managed files from the installed kit version and removes what the kit no longer generates, keeps everything outside managed blocks, edited files and custom roles, and never touches GitHub. Commit the result through a task PR.
-- Uninstall: `npx --no-install sdlc uninstall --dry-run`, then `npx --no-install sdlc uninstall`. It removes the managed files and unsets `core.hooksPath` when it is the kit's. It keeps `sdlc.config.yaml`, `.sdlc/agents/custom/`, the cache and any file that was edited. The board, labels, issues, branch protection and push protection stay on GitHub. Remove the dev dependency yourself.
+- Uninstall: `npx --no-install sdlc uninstall --dry-run`, then `npx --no-install sdlc uninstall`. It removes the managed files and unsets `core.hooksPath` when it is the kit's. It keeps `sdlc.config.yaml`, `.sdlc/agents/custom/`, the cache and any file that was edited. It removes the `.gitignore` block too, so `.env`, `.env.*` and `.sdlc/cache/` are no longer ignored: add back the lines you need. The board, labels, issues, branch protection and push protection stay on GitHub. Remove the dev dependency yourself.
 
 ## Troubleshooting and limits
 
@@ -315,10 +334,12 @@ Role files are templates: `{{...}}` is filled in when the file is rendered. To w
 | `config.valid` | the config does not load: `sdlc config validate` lists the issues |
 | `manifest.present`, `files.managed` | the kit is not installed, or managed files are missing (failure: `sdlc init`) or edited (warning: your edits are kept, `--overwrite-modified` replaces them) |
 | `git.hooksPath` | `core.hooksPath` is unset or something else (husky, say), so the kit's hooks do not run: `init` leaves another value alone, so run `git config core.hooksPath .sdlc/githooks`, or call the scripts in `.sdlc/githooks` from your own hooks |
-| `sdlc.onPath` (warning), `secrets.guard` (failure) | the hooks cannot find `sdlc` (they look on the PATH, then run `npx --no-install sdlc`), so the secret guard is not active: install the dev dependency or a global install (Step 4) |
+| `git.legacyHooks` | the repository's own hooks in `.git/hooks` that the kit's hooks run after their own step; a warning names one that is not executable and is skipped: `chmod +x` it |
+| `sdlc.onPath` (warning), `secrets.guard` (failure) | the hooks cannot find `sdlc` (they look on the PATH, then run `npx --no-install sdlc`), so the secret guard is not active: install the dev dependency or a global install (Step 4). Under `npx -y` doctor leaves out the PATH entries npx added for its own run, as a hook does not see them |
+| `kit.ref` | `kit_ref` does not exist in the kit's repository, so the generated `npx -y github:...#<kit_ref>` commands fail: set it to `main` or the ref you installed from. "cannot verify" means `git ls-remote` could not reach GitHub |
 | `board.fields`, `labels` | no board number in the config, or fields, options or views missing: `sdlc board ensure`; labels missing: `sdlc init`. A view the API cannot create is a warning and a manual step |
 | `actions.workflow`, `actions.secret` | the workflow file is missing (`sdlc init`) or `SDLC_TOKEN` is not set (`gh secret set SDLC_TOKEN`); without admin rights the secret cannot be checked and `doctor` only warns |
-| `mcp.token`, `mcp.claude` | export `GITHUB_PERSONAL_ACCESS_TOKEN`; approve or add the MCP server |
+| `mcp.token`, `mcp.claude` | export `GITHUB_PERSONAL_ACCESS_TOKEN` from the OS keystore in the shell profile ("Secrets"); approve or add the MCP server |
 | `secrets.pushProtection` | enable secret scanning and push protection; a plan or account without admin rights cannot, and the local guard still works |
 | `secrets.trackedFiles` | a tracked file has a secret-looking name: `git rm --cached <file>`, rotate the secret, or allow its fingerprint |
 | `approvals.trust` | see "Owner, agents and tokens" |

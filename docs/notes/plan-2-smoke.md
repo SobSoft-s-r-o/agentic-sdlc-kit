@@ -32,5 +32,8 @@ Fixture: a fresh repository with a README and a one-line `CLAUDE.md`.
    even for the owner. Accurate but could name the plan case first.
 3. `doctor` correctly fails until `sdlc` is installed; INSTALL.md's dev-dependency step is needed for
    the secret guard to be active.
+   This result came from `node dist/cli.js`. Under `npx -y github:...#<ref> doctor` the temporary npx
+   package used to make `sdlc` resolve, so doctor reported the guard active; the final-review fix
+   makes doctor ignore the PATH entries npx adds for its own run (see `sdlc.onPath`).
 
 No crash, no secret printed, no mutation in dry run, second init idempotent.

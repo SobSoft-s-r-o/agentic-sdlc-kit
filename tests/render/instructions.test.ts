@@ -417,23 +417,23 @@ describe('the Secrets section', () => {
     const text = blockText(full());
     expect(text).toContain('security find-generic-password -s <service> -w');
     expect(text).toContain('secret-tool lookup service <service>');
-    expect(text).toContain('Get-StoredCredential');
+    expect(text).toContain('Get-Secret -Name <service> -Vault CredMan -AsPlainText');
   });
 
   it('keychain shows only the macOS command', () => {
     const text = blockText(full('secrets: { local_store: keychain }\n'));
     expect(text).toContain('security find-generic-password -s <service> -w');
     expect(text).not.toContain('secret-tool');
-    expect(text).not.toContain('Get-StoredCredential');
+    expect(text).not.toContain('Get-Secret -Name <service> -Vault CredMan -AsPlainText');
   });
 
   it('secret-service shows only the Linux command and wincred only the Windows one', () => {
     const linux = blockText(full('secrets: { local_store: secret-service }\n'));
     expect(linux).toContain('secret-tool lookup service <service>');
     expect(linux).not.toContain('security find-generic-password');
-    expect(linux).not.toContain('Get-StoredCredential');
+    expect(linux).not.toContain('Get-Secret -Name <service> -Vault CredMan -AsPlainText');
     const windows = blockText(full('secrets: { local_store: wincred }\n'));
-    expect(windows).toContain('Get-StoredCredential');
+    expect(windows).toContain('Get-Secret -Name <service> -Vault CredMan -AsPlainText');
     expect(windows).not.toContain('security find-generic-password');
     expect(windows).not.toContain('secret-tool');
   });
@@ -443,7 +443,7 @@ describe('the Secrets section', () => {
     expect(text).toContain('`op`');
     expect(text).not.toContain('security find-generic-password');
     expect(text).not.toContain('secret-tool');
-    expect(text).not.toContain('Get-StoredCredential');
+    expect(text).not.toContain('Get-Secret -Name <service> -Vault CredMan -AsPlainText');
   });
 });
 

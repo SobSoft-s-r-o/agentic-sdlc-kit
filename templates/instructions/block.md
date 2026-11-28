@@ -3,14 +3,14 @@
 Managed by agentic-sdlc-kit: edits between the markers are overwritten, so change `sdlc.config.yaml` instead. Detail lives in the skills `sdlc-task-tracking`, `sdlc-delivery` and `sdlc-orientation`; read the one you need.
 {{#if enforce}}
 
-Mode: **enforce**. Hooks block commits to `{{defaultBranch}}`, pushes of `task/*` branches without a tracked task and, where the harness supports it, edits before the plan is approved. Fix the cause of a block; never work around it.
+Mode: **enforce**. The git hooks block commits to `{{defaultBranch}}` and pushes of `task/*` branches without a tracked task, and `sdlc` refuses steps the rules do not allow. Harness hooks that block edits before the plan is approved are coming; until then, keep that rule yourself. Fix the cause of a block; never work around it.
 {{else}}
 
 Mode: **observe**. Gaps are recorded and warned about, not blocked. Follow every rule here anyway.
 {{/if}}
 
 ### What this is
-Work is tracked with the `sdlc` CLI as GitHub issues on a Projects board, and the board must always be current. Record every phase, approval, PR and deployment through `sdlc`, never by hand. `sdlc` below means `{{kit.npx}}` unless `sdlc` is on PATH. Language of issues, PRs and comments: `{{contentLanguage}}`.
+Work is tracked with the `sdlc` CLI as GitHub issues on a Projects board, and the board must always be current. Record every phase, approval, PR and deployment through `sdlc`, never by hand. `sdlc` below means `sdlc` when it is on PATH, else `npx --no-install sdlc` when the kit is a dev dependency, else `{{kit.npx}}`. The git hooks run only while `git config core.hooksPath` prints `.sdlc/githooks` (local config, not cloned): if it does not, run `git config core.hooksPath .sdlc/githooks` and tell the owner. Language of issues, PRs and comments: `{{contentLanguage}}`.
 
 ### Starting work
 - New work request: run `sdlc task new --type <id> --title "<title>" --summary "<one line>"` before any brainstorming, diagnosis or edit. Propose the type; the owner can correct it (`sdlc task set-type`). An existing issue is adopted with `sdlc task new --issue <n> --type <id>`.
@@ -32,7 +32,7 @@ Use the Superpowers skills in this order: `brainstorming` (design, before any co
 {{/if}}
 ### Review and pull requests
 - Branch `task/<issue>-<slug>` (the slug is a few kebab-case words from the title), in the task's worktree; PRs target `{{defaultBranch}}`.
-- The PR body says `Related to #<issue>` (never `Fixes`, `Closes` or `Resolves`: the tracker closes the issue itself) and `Scope: partial` or `Scope: final`{{#if targets}}, plus a `Targets:` line with target names{{/if}}. Only a merged final PR can end the task.
+- The PR body says `Related to #<issue>` (never `Fixes`, `Closes` or `Resolves`: the tracker closes the issue itself) and `Scope: partial` or `Scope: final`{{#if targets}}, plus a `Targets:` line with target names{{/if}}. Only a merged final PR, or the owner's `/accept` for a type that ends on acceptance, can end the task.
 {{#if qualityGate}}
 - Before handoff run the quality gate and fix every failure:
 {{#each qualityGate}}
@@ -80,7 +80,7 @@ One worktree per task, from fresh `origin/{{defaultBranch}}`: `git fetch origin 
   - Linux: `export <VAR>="$(secret-tool lookup service <service>)"`
 {{/if}}
 {{#if secrets.localWindows}}
-  - Windows (Credential Manager, CredentialManager module): `$env:<VAR> = (Get-StoredCredential -Target <service>).GetNetworkCredential().Password`
+  - Windows (PowerShell SecretManagement, `CredMan` vault from `SecretManagement.JustinGrote.CredMan`): `$env:<VAR> = Get-Secret -Name <service> -Vault CredMan -AsPlainText`
 {{/if}}
 {{#if secrets.localOther}}
   - `{{cfg.secrets.localStore}}`: read it with that password manager's CLI, by its documented command.
