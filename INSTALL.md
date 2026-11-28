@@ -172,23 +172,28 @@ Then make `sdlc` resolvable, because the git hooks call it and, when they cannot
 npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>   # pnpm add -D ...  /  yarn add -D ...  with the same specifier
 ```
 
-The kit builds itself from git in its `prepare` script. pnpm 10.26 and newer do not run the build scripts of a git dependency unless it is allowlisted, and the install then has no working `sdlc`. With pnpm, allow it in `pnpm-workspace.yaml` before `pnpm add -D` (`allowBuilds` in pnpm versions that replaced `onlyBuiltDependencies`), or install with npm or globally instead:
+The kit builds itself from git in its `prepare` script, and recent pnpm versions run that build only when it is approved; without it the install has no working `sdlc`. The simple path is npm (the command above) or a global install. With pnpm:
 
-```yaml
-onlyBuiltDependencies:
-  - agentic-sdlc-kit
-```
+- pnpm 10.26 to 10.x: allow it in `pnpm-workspace.yaml` before `pnpm add -D`:
+
+  ```yaml
+  onlyBuiltDependencies:
+    - agentic-sdlc-kit
+  ```
+
+- pnpm 11 and newer: `onlyBuiltDependencies` is gone; builds are approved in the `allowBuilds:` map of `pnpm-workspace.yaml`. A bare package name never approves a git dependency: the key is the package name, `@`, and the repository URL without `#<ref>`, and it must match exactly. The easiest way to get the exact key is `pnpm approve-builds`, or the placeholder entry pnpm writes into `pnpm-workspace.yaml` when an install blocks the build; set it to `true`. See https://pnpm.io/settings/build.
 
 The hooks then find `sdlc` through `npx --no-install sdlc`, and from here on you run `npx --no-install sdlc <command>`. A repository without a `package.json`, or one that uses Yarn Plug'n'Play (no `node_modules/.bin`), needs a global install instead: `npm install --global github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>`, after which plain `sdlc <command>` works. A global install protects only that machine: tell the owner that every other clone and every other contributor needs the same install, or the guard is not active there.
 
 **Every clone.** `core.hooksPath` is local git config: it is not committed or cloned. Every collaborator, every new clone and every cloud agent sandbox runs, once, from the repository root:
 
 ```sh
-git config core.hooksPath .sdlc/githooks
-npm install          # installs the dev dependency, so the hooks find sdlc (or the global install above)
+git config core.hooksPath || git config core.hooksPath .sdlc/githooks   # sets it only when it is unset
 ```
 
-Put this in the README or CONTRIBUTING file of the repository. With npm you can make it automatic with a `prepare` script in `package.json`, which npm runs after every `npm install`: `"prepare": "git config core.hooksPath .sdlc/githooks || true"` (merge it with an existing `prepare` script). The generated instructions also tell agents to check `git config core.hooksPath` and set it when it is not `.sdlc/githooks`.
+then the repository's package manager install, as in Step 4 (`npm install`, `pnpm install` or `yarn install`), so the hooks find `sdlc` through the dev dependency (or use the global install above). If `git config core.hooksPath` prints something else (husky or another hook manager), do not change it: that tool owns the hooks, and the kit's hooks do not run until the owner decides (call the scripts in `.sdlc/githooks` from that tool's hooks, or switch).
+
+Put this in the README or CONTRIBUTING file of the repository. With npm you can make it automatic with a `prepare` script in `package.json`, which npm runs after every `npm install`: `"prepare": "git config core.hooksPath || git config core.hooksPath .sdlc/githooks || exit 0"` (merge it with an existing `prepare` script). It leaves a value that is already set alone, and `|| exit 0` keeps the install working outside a git checkout. The generated instructions also tell agents to check `git config core.hooksPath`: set it when it is unset, tell the owner when it points elsewhere.
 
 ## Step 5: Commit, open the PR, track it
 
