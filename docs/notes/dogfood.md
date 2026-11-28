@@ -1,6 +1,6 @@
 # Dogfood: the kit installed in its own repository
 
-Status: installed on 2026-11-28 in `observe` mode with `sdlc init --skip-github`. Nothing was written to GitHub: no board, no labels, no branch protection, no push protection, no secret. The owner still has the follow-ups at the end of this page.
+Status: installed on 2026-11-28 in `observe` mode with `sdlc init --skip-github`, then provisioned the same day with `sdlc init`: board project #2 (linked to this repository), the labels, branch protection on `main` (pull request required, 0 approvals, no force pushes or deletions) and push protection. The four CI checks were added as required status checks by hand. Follow-ups 1, 2 and 4 at the end of this page are done; 3 (`SDLC_TOKEN`) and 5 remain.
 
 ## How the repository runs its own build
 

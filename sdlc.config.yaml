@@ -8,7 +8,7 @@ kit_ref: main
 github:
   repo: SobSoft-s-r-o/agentic-sdlc-kit
   default_branch: main
-  project: {owner: SobSoft-s-r-o, owner_type: org}
+  project: {owner: SobSoft-s-r-o, owner_type: org, number: 2}
 owners: [lubo08]
 agents: []
 merge_policy: owner_only
