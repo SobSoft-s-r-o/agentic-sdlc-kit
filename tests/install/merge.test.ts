@@ -349,6 +349,103 @@ describe('mergeJsonKeys', () => {
   });
 });
 
+describe('mergeJsonKeys with owned array items', () => {
+  const MARKER = 'sdlc hook';
+  const mine = { matcher: 'Bash', hooks: [{ type: 'command', command: './mine.sh' }] };
+  const ours = (command: string) => ({ matcher: 'Bash', hooks: [{ type: 'command', command }] });
+  const items = (...commands: string[]) => ({
+    pointer: ['hooks', 'PreToolUse'],
+    value: commands.map(ours),
+    items: { marker: MARKER },
+  });
+  const text = (doc: unknown) => `${JSON.stringify(doc, null, 2)}\n`;
+  const userDoc = { permissions: { allow: ['Bash(ls)'] }, hooks: { PreToolUse: [mine] } };
+
+  it('appends after the user items and leaves everything else byte-identical', () => {
+    const user = text(userDoc);
+    const result = mergeJsonKeys(user, [items('sdlc hook pre-tool')], new Set(), 's.json');
+    expect(result.text).toBe(
+      text({ permissions: userDoc.permissions, hooks: { PreToolUse: [mine, ours('sdlc hook pre-tool')] } }),
+    );
+    // the bytes before the hooks key are the user's own
+    expect(result.text.startsWith(user.slice(0, user.indexOf('  "hooks"')))).toBe(true);
+    expect(result.skipped).toEqual([]);
+    expect(result.createdParents).toEqual([]);
+  });
+
+  it('keeps the indentation, line endings and final newline of the file', () => {
+    for (const indent of ['    ', '\t']) {
+      const user = `${JSON.stringify(userDoc, null, indent).split('\n').join('\r\n')}\r\n`;
+      const expected = { ...userDoc, hooks: { PreToolUse: [mine, ours('sdlc hook a')] } };
+      expect(mergeJsonKeys(user, [items('sdlc hook a')], new Set()).text).toBe(
+        `${JSON.stringify(expected, null, indent).split('\n').join('\r\n')}\r\n`,
+      );
+    }
+  });
+
+  it('creates the array and the parents it needs, and reports them outermost first', () => {
+    const created = mergeJsonKeys(undefined, [items('sdlc hook a')], new Set());
+    expect(JSON.parse(created.text)).toEqual({ hooks: { PreToolUse: [ours('sdlc hook a')] } });
+    expect(created.createdParents).toEqual(['hooks', 'hooks/PreToolUse']);
+    expect(mergeJsonKeys('{"hooks":{}}', [items('sdlc hook a')], new Set()).createdParents).toEqual(['hooks/PreToolUse']);
+    expect(mergeJsonKeys('{"hooks":{"PreToolUse":[]}}', [items('sdlc hook a')], new Set()).createdParents).toEqual([]);
+  });
+
+  it('replaces only the elements that contain the marker and appends the new ones last', () => {
+    const before = text({ hooks: { PreToolUse: [ours('sdlc hook old'), mine, ours('sdlc hook old 2')] } });
+    const result = mergeJsonKeys(before, [items('sdlc hook new', 'sdlc hook new 2')], new Set());
+    expect(JSON.parse(result.text).hooks.PreToolUse).toEqual([mine, ours('sdlc hook new'), ours('sdlc hook new 2')]);
+  });
+
+  it('returns the input untouched when the owned items are already what the entry says', () => {
+    const before = `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"command":"sdlc hook a","type":"command"}]}]}}  \n\n`;
+    expect(mergeJsonKeys(before, [items('sdlc hook a')], new Set()).text).toBe(before);
+    const withUser = text({ hooks: { PreToolUse: [mine, ours('sdlc hook a')] } });
+    expect(mergeJsonKeys(withUser, [items('sdlc hook a')], new Set()).text).toBe(withUser);
+  });
+
+  it('mixes with plain entries in one call, including in the same parent', () => {
+    const entries = [
+      { pointer: ['mcpServers', 'github'], value: { url: 'u' } },
+      { pointer: ['hooks', 'BeforeTool'], value: [ours('sdlc hook a')], items: { marker: MARKER } },
+    ];
+    const result = mergeJsonKeys('{"theme":"dark"}', entries, new Set());
+    expect(JSON.parse(result.text)).toEqual({
+      theme: 'dark',
+      mcpServers: { github: { url: 'u' } },
+      hooks: { BeforeTool: [ours('sdlc hook a')] },
+    });
+    expect(result.createdParents).toEqual(['mcpServers', 'hooks', 'hooks/BeforeTool']);
+  });
+
+  it('refuses a value at the pointer that is not an array', () => {
+    const before = text({ hooks: { PreToolUse: { matcher: 'Bash' } } });
+    expect(() => mergeJsonKeys(before, [items('sdlc hook a')], new Set(), 's.json')).toThrow(MergeError);
+    expect(() => mergeJsonKeys(before, [items('sdlc hook a')], new Set(), 's.json')).toThrow(
+      'expected an array at hooks/PreToolUse',
+    );
+    expect(() => mergeJsonKeys('{"hooks":{"PreToolUse":null}}', [items('sdlc hook a')], new Set())).toThrow(
+      'expected an array at hooks/PreToolUse',
+    );
+  });
+
+  it('refuses an entry whose items do not all contain the marker, or that has none', () => {
+    const bad = { pointer: ['hooks', 'PreToolUse'], value: [ours('sdlc hook a'), ours('other')], items: { marker: MARKER } };
+    expect(() => mergeJsonKeys(undefined, [bad], new Set(), 's.json')).toThrow(
+      's.json: hooks/PreToolUse: every item must contain "sdlc hook"',
+    );
+    expect(() => mergeJsonKeys(undefined, [{ ...bad, value: [] }], new Set(), 's.json')).toThrow(
+      's.json: hooks/PreToolUse: the value must be a non-empty array',
+    );
+    expect(() => mergeJsonKeys(undefined, [{ ...bad, value: 'x' }], new Set(), 's.json')).toThrow(
+      's.json: hooks/PreToolUse: the value must be a non-empty array',
+    );
+    expect(() => mergeJsonKeys(undefined, [{ ...bad, items: { marker: '' } }], new Set(), 's.json')).toThrow(
+      's.json: hooks/PreToolUse: the marker must not be empty',
+    );
+  });
+});
+
 describe('removeJsonKeys', () => {
   it('deletes the keys and the mcpServers object they leave empty', () => {
     const text = `${JSON.stringify({ mcpServers: { github: { a: 1 } }, other: true }, null, 2)}\n`;
@@ -410,6 +507,54 @@ describe('removeJsonKeys', () => {
   it('returns the text unchanged when the key is not there', () => {
     const text = '{"a":   1}';
     expect(removeJsonKeys(text, [['mcpServers', 'github']])).toBe(text);
+  });
+
+  describe('owned array items', () => {
+    const MARKER = 'sdlc hook';
+    const mine = { matcher: 'Bash', hooks: [{ type: 'command', command: './mine.sh' }] };
+    const ours = (command: string) => ({ matcher: 'Bash', hooks: [{ type: 'command', command }] });
+    const pre = { pointer: ['hooks', 'PreToolUse'], marker: MARKER };
+    const start = { pointer: ['hooks', 'SessionStart'], marker: MARKER };
+    const text = (doc: unknown) => `${JSON.stringify(doc, null, 2)}\n`;
+
+    it('removes the marker elements and keeps the others, in order', () => {
+      const before = text({ a: 1, hooks: { PreToolUse: [mine, ours('sdlc hook a'), { other: true }, ours('sdlc hook b')] } });
+      expect(removeJsonKeys(before, [pre])).toBe(text({ a: 1, hooks: { PreToolUse: [mine, { other: true }] } }));
+    });
+
+    it('returns the text unchanged when no element has the marker, or the key is missing or not an array', () => {
+      const plain = text({ hooks: { PreToolUse: [mine] } });
+      expect(removeJsonKeys(plain, [pre])).toBe(plain);
+      expect(removeJsonKeys('{"hooks":{}}', [pre])).toBe('{"hooks":{}}');
+      expect(removeJsonKeys('{"hooks":{"PreToolUse":{"x":"sdlc hook"}}}', [pre])).toBe('{"hooks":{"PreToolUse":{"x":"sdlc hook"}}}');
+    });
+
+    it('removes an array that is left empty, and the empty parents, by default', () => {
+      const before = text({ theme: 'dark', hooks: { PreToolUse: [ours('sdlc hook a')] } });
+      expect(removeJsonKeys(before, [pre])).toBe(text({ theme: 'dark' }));
+    });
+
+    it('prunes the array only when pruneEmpty allows its key; a parent needs its own entry in the list', () => {
+      const before = text({ hooks: { PreToolUse: [ours('sdlc hook a')], SessionStart: [ours('sdlc hook b')], Stop: [mine] } });
+      const run = (list: boolean | string[]) => JSON.parse(removeJsonKeys(before, [pre, start], 'a.json', { pruneEmpty: list }));
+      expect(run(false).hooks).toEqual({ PreToolUse: [], SessionStart: [], Stop: [mine] });
+      expect(run([]).hooks).toEqual({ PreToolUse: [], SessionStart: [], Stop: [mine] });
+      expect(run(['hooks/SessionStart']).hooks).toEqual({ PreToolUse: [], Stop: [mine] });
+      expect(run(['hooks/PreToolUse', 'hooks/SessionStart', 'hooks']).hooks).toEqual({ Stop: [mine] });
+      const alone = text({ hooks: { PreToolUse: [ours('sdlc hook a')] } });
+      expect(removeJsonKeys(alone, [pre], 'a.json', { pruneEmpty: ['hooks/PreToolUse'] })).toBe(text({ hooks: {} }));
+      expect(removeJsonKeys(alone, [pre], 'a.json', { pruneEmpty: ['hooks/PreToolUse', 'hooks'] })).toBe('{}\n');
+    });
+
+    it('keeps an array that still holds a user element even when it may be pruned', () => {
+      const before = text({ hooks: { PreToolUse: [mine, ours('sdlc hook a')] } });
+      expect(removeJsonKeys(before, [pre], 'a.json', { pruneEmpty: true })).toBe(text({ hooks: { PreToolUse: [mine] } }));
+    });
+
+    it('works together with plain pointers in one call', () => {
+      const before = text({ mcpServers: { github: {} }, hooks: { PreToolUse: [mine, ours('sdlc hook a')] } });
+      expect(removeJsonKeys(before, [['mcpServers', 'github'], pre])).toBe(text({ hooks: { PreToolUse: [mine] } }));
+    });
   });
 });
 

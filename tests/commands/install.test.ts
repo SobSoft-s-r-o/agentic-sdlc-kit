@@ -6,7 +6,7 @@ import { loadConfigFromString, type Config } from '../../src/config/schema.js';
 import { readManifest } from '../../src/install/manifest.js';
 import type { GitRunner, HookFileState } from '../../src/install/provision.js';
 import type { RepoFs } from '../../src/install/repoFs.js';
-import type { Change } from '../../src/render/changes.js';
+import type { Change, JsonKeysChange } from '../../src/render/changes.js';
 import { mergeChanges, renderAll } from '../../src/render/plan.js';
 import { packageVersion } from '../../src/version.js';
 import { fakeGh, type FakeGh, type FakeGhStep } from '../support/fakeGh.js';
@@ -306,6 +306,28 @@ describe('mergeChanges', () => {
     expect(() => mergeChanges([json([['mcpServers', 'a'], { url: 'u' }]), json([['mcpServers', 'a'], { url: 'w' }])])).toThrow(
       /mcpServers\/a/,
     );
+  });
+
+  describe('items entries', () => {
+    const hook = (command: string) => ({ matcher: 'Bash', hooks: [{ type: 'command', command }] });
+    const items = (event: string, value: unknown[], marker = 'sdlc hook') => ({ pointer: ['hooks', event], value, items: { marker } });
+    const gemini = (...entries: JsonKeysChange['entries']): Change => ({ kind: 'json-keys', path: '.gemini/settings.json', entries });
+    const server = { pointer: ['mcpServers', 'github'], value: { httpUrl: 'u' } };
+
+    it('fuses a plain mcpServers entry and a hooks items entry of one file into one change, items intact', () => {
+      const mcp = gemini(server);
+      const hooks = gemini(items('BeforeTool', [hook('sdlc hook before-tool')]));
+      expect(mergeChanges([mcp, hooks])).toEqual([gemini(server, items('BeforeTool', [hook('sdlc hook before-tool')]))]);
+      expect(mergeChanges([hooks, mcp])).toEqual([gemini(items('BeforeTool', [hook('sdlc hook before-tool')]), server)]);
+    });
+
+    it('keeps an identical items entry once and throws when the items or the marker differ', () => {
+      const a = gemini(items('BeforeTool', [hook('sdlc hook a')]));
+      expect(mergeChanges([a, a])).toEqual([a]);
+      expect(() => mergeChanges([a, gemini(items('BeforeTool', [hook('sdlc hook b')]))])).toThrow(/hooks\/BeforeTool/);
+      expect(() => mergeChanges([a, gemini(items('BeforeTool', [hook('sdlc hook a')], 'sdlc hook a'))])).toThrow(/hooks\/BeforeTool/);
+      expect(() => mergeChanges([a, gemini({ pointer: ['hooks', 'BeforeTool'], value: [hook('sdlc hook a')] })])).toThrow(/hooks\/BeforeTool/);
+    });
   });
 
   it('joins toml-block bodies of one path with a blank line and lists every table', () => {

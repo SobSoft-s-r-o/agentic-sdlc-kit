@@ -17,11 +17,13 @@ import {
   newManifest,
   serializeManifest,
   sortEntries,
+  valueHash,
   type Manifest,
   type ManifestEntry,
 } from './manifest.js';
 import {
-  assertJsonPointer,
+  assertItemsTarget,
+  assertJsonEntry,
   blockBody,
   canonicalBody,
   filterTomlBody,
@@ -39,6 +41,7 @@ import {
   tomlTableText,
   type BlockKind,
   type JsonEntry,
+  type JsonItemsRemoval,
 } from './merge.js';
 import type { RepoFs } from './repoFs.js';
 
@@ -339,7 +342,7 @@ function planStaleToml(path: string, disk: string | undefined, ctx: Context, ski
 }
 
 function planJson(path: string, jsonEntries: JsonEntry[], disk: string | undefined, ctx: Context): Planned {
-  for (const item of jsonEntries) assertJsonPointer(item.pointer, path);
+  for (const item of jsonEntries) assertJsonEntry(item, path);
   const root = parseJsonObject(disk, path);
   // The kit created this file (now, or on an earlier run): uninstall may then clean up after itself.
   const created = disk === undefined || ctx.prior.some(e => e.kind === 'json-keys' && e.createdFile === true);
@@ -351,16 +354,26 @@ function planJson(path: string, jsonEntries: JsonEntry[], disk: string | undefin
 
   for (const item of jsonEntries) {
     const key = jsonKey(item.pointer);
-    const fresh: ManifestEntry = { path, kind: 'json-keys', key, hash: hashText(canonicalJson(item.value)) };
+    const marker = item.items?.marker;
+    const fresh: ManifestEntry = {
+      path,
+      kind: 'json-keys',
+      key,
+      hash: hashText(canonicalJson(item.value)),
+      ...(marker === undefined ? {} : { marker }),
+    };
     const own = ctx.prior.find(e => e.kind === 'json-keys' && e.key === key);
     const current = jsonValueAt(root, item.pointer);
+    if (marker !== undefined) assertItemsTarget(current, item.pointer);
+    // What the entry owns on disk: the value at the key, or the items with its marker. Absent when there is none.
+    const onDisk = current.found ? valueHash(current.value, marker) : undefined;
     const modified = (): void => {
       notices.push({ path, message: `${key}: ${MODIFIED}` });
       if (own) entries.push(own);
     };
 
-    if (!current.found) {
-      // A server we wrote that is gone was removed by the user, unless the whole file is gone.
+    if (onDisk === undefined) {
+      // A server (or items) we wrote that is gone was removed by the user, unless the whole file is gone.
       if (own && disk !== undefined && !ctx.overwriteModified) modified();
       else {
         toMerge.push(item);
@@ -368,19 +381,18 @@ function planJson(path: string, jsonEntries: JsonEntry[], disk: string | undefin
         entries.push(fresh);
       }
     } else if (!own) {
-      // A value equal to ours is taken over silently; any other one is the user's (the merge reports it).
-      if (hashText(canonicalJson(current.value)) === fresh.hash) entries.push(fresh);
-      else toMerge.push(item);
-    } else {
-      const onDisk = hashText(canonicalJson(current.value));
+      // A value equal to ours is taken over silently; any other one is the user's (for a plain key the merge reports it).
       if (onDisk === fresh.hash) entries.push(fresh);
-      else if (onDisk === own.hash || ctx.overwriteModified) {
-        owned.add(key);
-        toMerge.push(item);
-        changesSomething = true;
-        entries.push(fresh);
-      } else modified();
-    }
+      else if (marker === undefined) toMerge.push(item);
+      else notices.push({ path, message: `${key} already defined by you; kept` });
+    } else if (onDisk === fresh.hash) {
+      entries.push(fresh);
+    } else if (onDisk === own.hash || ctx.overwriteModified) {
+      owned.add(key);
+      toMerge.push(item);
+      changesSomething = true;
+      entries.push(fresh);
+    } else modified();
   }
 
   const merged = toMerge.length === 0 ? undefined : mergeJsonKeys(disk, toMerge, owned, path);
@@ -450,18 +462,21 @@ function planRemovals(entries: ManifestEntry[], fs: RepoFs, modifiedMessage: str
       // had. Empty objects the user had, and an empty document of theirs, stay.
       const created = group.some(e => e.kind === 'json-keys' && e.createdFile === true);
       const parents = priorParents(group);
-      const pointers: string[][] = [];
+      const jsonRemovals: Array<string[] | JsonItemsRemoval> = [];
       for (const entry of removable) {
         if (entry.kind === 'md-block') text = removeMdBlock(text);
         else if (entry.kind === 'line-block') text = removeLineBlock(text);
         else if (entry.kind === 'toml-block') text = removeTomlBlock(text);
-        else if (entry.kind === 'json-keys') pointers.push((entry.key ?? '').split('/'));
+        else if (entry.kind === 'json-keys') {
+          const pointer = (entry.key ?? '').split('/');
+          jsonRemovals.push(entry.marker === undefined ? pointer : { pointer, marker: entry.marker });
+        }
       }
-      if (pointers.length > 0) text = removeJsonKeys(text, pointers, path, { pruneEmpty: created ? true : parents });
+      if (jsonRemovals.length > 0) text = removeJsonKeys(text, jsonRemovals, path, { pruneEmpty: created ? true : parents });
       if (text === disk) continue;
 
       const empty =
-        text === '' || (pointers.length > 0 && created && Object.keys(parseJsonObject(text, path)).length === 0);
+        text === '' || (jsonRemovals.length > 0 && created && Object.keys(parseJsonObject(text, path)).length === 0);
       plan.writes.push(
         empty ? { path, action: 'remove', ...previous } : { path, action: 'update', content: text, ...previous },
       );

@@ -81,7 +81,8 @@ function mergeJsonKeys(path: string, group: JsonKeysChange[]): JsonKeysChange {
   for (const change of group) {
     for (const entry of change.entries) {
       const key = JSON.stringify(entry.pointer);
-      const value = canonicalJson(entry.value);
+      // an items entry differs from a plain one, and from one with another marker, even for equal values
+      const value = canonicalJson([entry.value, entry.items ?? null]);
       const earlier = seen.get(key);
       if (earlier === undefined) {
         seen.set(key, value);

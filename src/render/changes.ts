@@ -26,11 +26,20 @@ export interface LineBlockChange {
   comment: '#';
 }
 
-/** Keys the kit owns in a JSON file; `pointer` is the key path, for example `['mcpServers', 'github']`. */
+/**
+ * Keys the kit owns in a JSON file; `pointer` is the key path, for example `['mcpServers', 'github']`.
+ *
+ * An entry with `items` owns only some elements of the array at `pointer`, not the array: `value` is
+ * an array of items, each of which contains `items.marker` (a string) once serialized with
+ * `JSON.stringify`. The merge removes the elements that contain the marker, appends `value`'s
+ * items, and leaves every other element (the user's) in place. The marker must stay the same
+ * between kit versions: it is how the kit finds its items again. An `items` entry and a plain entry
+ * never share a pointer.
+ */
 export interface JsonKeysChange {
   kind: 'json-keys';
   path: string;
-  entries: Array<{ pointer: string[]; value: unknown }>;
+  entries: Array<{ pointer: string[]; value: unknown; items?: { marker: string } }>;
 }
 
 /**

@@ -20,7 +20,7 @@ import {
 } from '../../src/install/manifest.js';
 import { blockBody } from '../../src/install/merge.js';
 import { nodeRepoFs, type RepoFs } from '../../src/install/repoFs.js';
-import type { Change } from '../../src/render/changes.js';
+import type { Change, JsonKeysChange } from '../../src/render/changes.js';
 import { packageVersion } from '../../src/version.js';
 import { memoryFs, type MemoryFs } from '../support/memoryFs.js';
 
@@ -1253,5 +1253,294 @@ describe('nodeRepoFs', () => {
     expect(existsSync(join(root, '.sdlc/agents/custom/mine.md'))).toBe(true);
     expect(existsSync(join(root, '.sdlc/githooks'))).toBe(false);
     expect(existsSync(join(root, MANIFEST_PATH))).toBe(false);
+  });
+});
+
+describe('owned array items in a JSON file', () => {
+  const SETTINGS = '.claude/settings.json';
+  const MARKER = 'sdlc hook';
+  const userItem = { matcher: 'Bash', hooks: [{ type: 'command', command: './mine.sh' }] };
+  const ours = (command: string) => ({ matcher: 'Bash', hooks: [{ type: 'command', command }] });
+  const PRE_V1 = 'sdlc hook pre-tool v1';
+  const START = 'sdlc hook session-start';
+  const settings = (pre: string[] = [PRE_V1], start: string[] = [START]): JsonKeysChange => ({
+    kind: 'json-keys',
+    path: SETTINGS,
+    entries: [
+      { pointer: ['hooks', 'PreToolUse'], value: pre.map(ours), items: { marker: MARKER } },
+      { pointer: ['hooks', 'SessionStart'], value: start.map(ours), items: { marker: MARKER } },
+    ],
+  });
+  const text = (doc: unknown): string => `${JSON.stringify(doc, null, 2)}\n`;
+  const userDoc = { permissions: { allow: ['Bash(ls)'] }, hooks: { PreToolUse: [userItem] } };
+  const userText = text(userDoc);
+  const uninstall = (fs: RepoFs) => applyPlan(planUninstall(fs, readManifest(fs)!), fs, { removeObsolete: false });
+  const entriesOf = (fs: RepoFs) => manifestOf(fs).entries.filter(e => e.path === SETTINGS);
+  const docOf = (fs: RepoFs) => JSON.parse(fs.read(SETTINGS)!);
+  /** The user edits the command of the one item of ours in `hooks.PreToolUse`. */
+  const editOurs = (fs: RepoFs): void => {
+    const doc = docOf(fs);
+    doc.hooks.PreToolUse[1].hooks[0].command = `${PRE_V1} --my-flag`;
+    fs.write(SETTINGS, text(doc));
+  };
+
+  it('appends our items after the user items, leaves the rest byte-identical and records what it did', () => {
+    const fs = memoryFs({ [SETTINGS]: userText });
+    const { result } = install([settings()], fs);
+    expect(result.errors).toEqual([]);
+    expect(result.notices).toEqual([]);
+
+    const doc = docOf(fs);
+    expect(Object.keys(doc)).toEqual(['permissions', 'hooks']);
+    expect(doc.hooks.PreToolUse).toEqual([userItem, ours(PRE_V1)]);
+    expect(doc.hooks.SessionStart).toEqual([ours(START)]);
+    expect(fs.read(SETTINGS)!.startsWith(userText.slice(0, userText.indexOf('  "hooks"')))).toBe(true);
+    expect(fs.read(SETTINGS)).toBe(
+      text({ permissions: userDoc.permissions, hooks: { PreToolUse: [userItem, ours(PRE_V1)], SessionStart: [ours(START)] } }),
+    );
+    // the array we created is recorded like a created parent; the one the user had is not
+    expect(entriesOf(fs)).toEqual([
+      {
+        path: SETTINGS,
+        kind: 'json-keys',
+        key: 'hooks/PreToolUse',
+        hash: hashText(canonicalJson([ours(PRE_V1)])),
+        marker: MARKER,
+        createdParents: ['hooks/SessionStart'],
+      },
+      {
+        path: SETTINGS,
+        kind: 'json-keys',
+        key: 'hooks/SessionStart',
+        hash: hashText(canonicalJson([ours(START)])),
+        marker: MARKER,
+        createdParents: ['hooks/SessionStart'],
+      },
+    ]);
+  });
+
+  it('re-applying the same items is a no-op: nothing to write, "up to date"', () => {
+    const fs = memoryFs({ [SETTINGS]: userText });
+    install([settings()], fs);
+    const before = fs.snapshot();
+    const again = plan([settings()], fs);
+    expect(again.writes).toEqual([]);
+    expect(again.notices).toEqual([]);
+    expect(again.errors).toEqual([]);
+    expect(formatPlan(again, false)).toBe('Everything is up to date');
+    install([settings()], fs);
+    expect(fs.snapshot()).toEqual(before);
+  });
+
+  it('a changed item replaces ours only, at the end, and keeps the user items and the created record', () => {
+    const fs = memoryFs({ [SETTINGS]: userText });
+    install([settings()], fs);
+    const { result } = install([settings(['sdlc hook pre-tool v2'])], fs);
+    expect(result.written).toEqual([SETTINGS]);
+
+    const doc = docOf(fs);
+    expect(doc.hooks.PreToolUse).toEqual([userItem, ours('sdlc hook pre-tool v2')]);
+    expect(doc.hooks.SessionStart).toEqual([ours(START)]);
+    expect(doc.permissions).toEqual(userDoc.permissions);
+    expect(entriesOf(fs).map(e => [e.key, e.hash, e.createdParents])).toEqual([
+      ['hooks/PreToolUse', hashText(canonicalJson([ours('sdlc hook pre-tool v2')])), ['hooks/SessionStart']],
+      ['hooks/SessionStart', hashText(canonicalJson([ours(START)])), ['hooks/SessionStart']],
+    ]);
+  });
+
+  it('uninstall leaves exactly the user item and takes back the array it created', () => {
+    const fs = memoryFs({ [SETTINGS]: userText });
+    install([settings()], fs);
+    const { errors, notices } = uninstall(fs);
+    expect(errors).toEqual([]);
+    expect(notices).toEqual([]);
+    expect(fs.snapshot()).toEqual({ [SETTINGS]: userText });
+    expect(docOf(fs).hooks).toEqual({ PreToolUse: [userItem] });
+  });
+
+  it('a file the kit created is deleted by uninstall once only our items were in it', () => {
+    const fs = memoryFs();
+    install([settings()], fs);
+    expect(entriesOf(fs).every(e => e.createdFile === true && e.createdParents === undefined)).toBe(true);
+    uninstall(fs);
+    expect(fs.snapshot()).toEqual({});
+  });
+
+  it('a user item added after init stays, with the array we created and its parent', () => {
+    const fs = memoryFs({ [SETTINGS]: '{\n  "theme": "dark"\n}\n' });
+    install([settings()], fs);
+    expect(entriesOf(fs).map(e => e.createdParents)).toEqual([
+      ['hooks', 'hooks/PreToolUse', 'hooks/SessionStart'],
+      ['hooks', 'hooks/PreToolUse', 'hooks/SessionStart'],
+    ]);
+    const doc = docOf(fs);
+    doc.hooks.PreToolUse.unshift(userItem);
+    fs.write(SETTINGS, text(doc));
+
+    uninstall(fs);
+    expect(fs.read(SETTINGS)).toBe(text({ theme: 'dark', hooks: { PreToolUse: [userItem] } }));
+  });
+
+  it('an array of the user that was empty comes back empty, not removed', () => {
+    const user = text({ hooks: { PreToolUse: [] } });
+    const fs = memoryFs({ [SETTINGS]: user });
+    install([settings()], fs);
+    expect(docOf(fs).hooks.PreToolUse).toEqual([ours(PRE_V1)]);
+    uninstall(fs);
+    expect(fs.read(SETTINGS)).toBe(user);
+  });
+
+  describe('a user edit inside one of our items (the marker is still there)', () => {
+    it('is kept with the usual notice, and the manifest keeps the old hash', () => {
+      const fs = memoryFs({ [SETTINGS]: userText });
+      install([settings()], fs);
+      const oldHash = entriesOf(fs).find(e => e.key === 'hooks/PreToolUse')?.hash;
+      editOurs(fs);
+      const edited = fs.read(SETTINGS);
+
+      const p = plan([settings(['sdlc hook pre-tool v2'], [START, 'sdlc hook session-start 2'])], fs);
+      expect(p.notices).toEqual([{ path: SETTINGS, message: `hooks/PreToolUse: ${MODIFIED}` }]);
+      expect(MODIFIED).toBe('modified locally; kept (rerun with --overwrite-modified to replace)');
+      expect(formatPlan(p, false)).toContain(`keep ${SETTINGS} (hooks/PreToolUse: ${MODIFIED})`);
+
+      const { result } = install([settings(['sdlc hook pre-tool v2'], [START, 'sdlc hook session-start 2'])], fs);
+      expect(result.errors).toEqual([]);
+      // the other key of the same file is still updated; the edited one is untouched
+      const doc = docOf(fs);
+      expect(doc.hooks.PreToolUse).toEqual(JSON.parse(edited!).hooks.PreToolUse);
+      expect(doc.hooks.SessionStart).toEqual([ours(START), ours('sdlc hook session-start 2')]);
+      expect(entriesOf(fs).find(e => e.key === 'hooks/PreToolUse')?.hash).toBe(oldHash);
+    });
+
+    it('is replaced with overwriteModified', () => {
+      const fs = memoryFs({ [SETTINGS]: userText });
+      install([settings()], fs);
+      editOurs(fs);
+      const { plan: p } = install([settings()], fs, { overwriteModified: true });
+      expect(p.notices).toEqual([]);
+      expect(docOf(fs).hooks.PreToolUse).toEqual([userItem, ours(PRE_V1)]);
+    });
+
+    it('is kept by uninstall with its notice; the rest of ours still goes', () => {
+      const fs = memoryFs({ [SETTINGS]: userText });
+      install([settings()], fs);
+      editOurs(fs);
+      const { notices, errors } = uninstall(fs);
+      expect(errors).toEqual([]);
+      expect(notices).toEqual([{ path: SETTINGS, message: 'hooks/PreToolUse: modified locally; kept' }]);
+      expect(docOf(fs).hooks).toEqual({ PreToolUse: [userItem, ours(`${PRE_V1} --my-flag`)] });
+    });
+  });
+
+  it('our items removed by the user are not put back, unless overwriteModified says so', () => {
+    const fs = memoryFs({ [SETTINGS]: userText });
+    install([settings()], fs);
+    const doc = docOf(fs);
+    doc.hooks.PreToolUse = [userItem];
+    fs.write(SETTINGS, text(doc));
+
+    const { plan: p } = install([settings()], fs);
+    expect(p.notices).toEqual([{ path: SETTINGS, message: `hooks/PreToolUse: ${MODIFIED}` }]);
+    expect(docOf(fs).hooks.PreToolUse).toEqual([userItem]);
+
+    install([settings()], fs, { overwriteModified: true });
+    expect(docOf(fs).hooks.PreToolUse).toEqual([userItem, ours(PRE_V1)]);
+  });
+
+  it('a value at the pointer that is not an array is an error, and the file is left as it is', () => {
+    const user = text({ hooks: { PreToolUse: { matcher: 'Bash' } } });
+    const fs = memoryFs({ [SETTINGS]: user });
+    const p = plan([settings()], fs);
+    expect(p.errors).toEqual([{ path: SETTINGS, message: 'expected an array at hooks/PreToolUse' }]);
+    expect(p.writes).toEqual([]);
+    expect(formatPlan(p, false)).toContain(`error ${SETTINGS}: expected an array at hooks/PreToolUse`);
+    const { result } = install([settings()], fs);
+    expect(result.errors).toHaveLength(1);
+    expect(fs.read(SETTINGS)).toBe(user);
+    expect(entriesOf(fs)).toEqual([]);
+  });
+
+  describe('marker items already in the file with no manifest entry', () => {
+    it('are adopted silently when they equal ours', () => {
+      const user = text({ hooks: { PreToolUse: [userItem, ours(PRE_V1)], SessionStart: [ours(START)] } });
+      const fs = memoryFs({ [SETTINGS]: user });
+      const p = plan([settings()], fs);
+      expect(p.writes).toEqual([]);
+      expect(p.notices).toEqual([]);
+      install([settings()], fs);
+      expect(fs.read(SETTINGS)).toBe(user);
+      expect(entriesOf(fs).map(e => e.key)).toEqual(['hooks/PreToolUse', 'hooks/SessionStart']);
+    });
+
+    it('that differ from ours are the user\'s: kept with a notice, not managed', () => {
+      const user = text({ hooks: { PreToolUse: [userItem, ours('sdlc hook pre-tool old')] } });
+      const fs = memoryFs({ [SETTINGS]: user });
+      const { plan: p } = install([settings()], fs);
+      expect(p.notices).toEqual([{ path: SETTINGS, message: 'hooks/PreToolUse already defined by you; kept' }]);
+      expect(docOf(fs).hooks.PreToolUse).toEqual([userItem, ours('sdlc hook pre-tool old')]);
+      expect(docOf(fs).hooks.SessionStart).toEqual([ours(START)]);
+      expect(entriesOf(fs).map(e => e.key)).toEqual(['hooks/SessionStart']);
+    });
+  });
+
+  it('shares a file with plain entries, even inside the same parent', () => {
+    const GEMINI = '.gemini/settings.json';
+    const gemini: Change = {
+      kind: 'json-keys',
+      path: GEMINI,
+      entries: [
+        { pointer: ['hooks', 'BeforeTool'], value: [ours('sdlc hook before-tool')], items: { marker: MARKER } },
+        { pointer: ['mcpServers', 'github'], value: GITHUB_SERVER },
+      ],
+    };
+    const user = text({ theme: 'dark', hooks: { BeforeTool: [userItem] } });
+    const fs = memoryFs({ [GEMINI]: user });
+    const { result } = install([gemini], fs);
+    expect(result.errors).toEqual([]);
+    expect(JSON.parse(fs.read(GEMINI)!)).toEqual({
+      theme: 'dark',
+      hooks: { BeforeTool: [userItem, ours('sdlc hook before-tool')] },
+      mcpServers: { github: GITHUB_SERVER },
+    });
+    expect(plan([gemini], fs).writes).toEqual([]);
+    uninstall(fs);
+    expect(fs.read(GEMINI)).toBe(user);
+  });
+
+  it('dropping an items entry with removeObsolete removes only our items under it', () => {
+    const fs = memoryFs({ [SETTINGS]: userText });
+    install([settings()], fs);
+    const onlyPre: Change = { ...settings(), entries: settings().entries.slice(0, 1) };
+    const { plan: p } = install([onlyPre], fs, { removeObsolete: true });
+    expect(p.obsolete.map(e => e.key)).toEqual(['hooks/SessionStart']);
+    expect(fs.read(SETTINGS)).toBe(
+      text({ permissions: userDoc.permissions, hooks: { PreToolUse: [userItem, ours(PRE_V1)] } }),
+    );
+    expect(entriesOf(fs).map(e => e.key)).toEqual(['hooks/PreToolUse']);
+  });
+
+  describe('entryDiskHash and the manifest', () => {
+    it('hashes the owned items on disk; no owned item means the region is not there', () => {
+      const fs = memoryFs({ [SETTINGS]: userText });
+      install([settings()], fs);
+      const pre = entriesOf(fs).find(e => e.key === 'hooks/PreToolUse')!;
+      expect(entryDiskHash(pre, fs.read(SETTINGS))).toBe(pre.hash);
+      expect(entryDiskHash(pre, userText)).toBeUndefined();
+      expect(entryDiskHash(pre, text({ hooks: { PreToolUse: { x: MARKER } } }))).not.toBe(pre.hash);
+      expect(entryDiskHash(pre, '{}')).toBeUndefined();
+    });
+
+    it('stores the marker and reads it back; an empty marker is rejected', () => {
+      const raw = (marker: string): string =>
+        `{"version":1,"kit":"0.1.0","entries":[{"path":"a.json","kind":"json-keys","key":"h/E","hash":"sha256:00","marker":${JSON.stringify(marker)}}]}`;
+      expect(parseManifest(raw(MARKER)).entries[0]).toEqual({
+        path: 'a.json',
+        kind: 'json-keys',
+        key: 'h/E',
+        hash: 'sha256:00',
+        marker: MARKER,
+      });
+      expect(() => parseManifest(raw(''))).toThrow(/manifest/);
+    });
   });
 });

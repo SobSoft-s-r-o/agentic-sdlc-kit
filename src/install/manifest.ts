@@ -7,6 +7,7 @@ import {
   blockBody,
   canonicalJson,
   jsonValueAt,
+  ownedItems,
   parseJsonObject,
   tomlTableText,
   type BlockKind,
@@ -27,6 +28,12 @@ export interface ManifestEntry {
   key?: string;
   /** `sha256:<hex>`, see `entryDiskHash` for what is hashed. */
   hash: string;
+  /**
+   * `json-keys` only: set when the entry owns some elements of the array at `key`, not the array: the
+   * ones that contain this marker. `hash` is then that of those elements, and uninstall needs the
+   * marker to find them again.
+   */
+  marker?: string;
   /**
    * `json-keys` only: the file did not exist when the kit first wrote these keys. Uninstall may then
    * prune the objects it leaves empty and delete the file once it holds nothing else; a file the user
@@ -73,6 +80,7 @@ export function serializeManifest(manifest: Manifest): string {
     kind: e.kind,
     ...(e.key === undefined ? {} : { key: e.key }),
     hash: e.hash,
+    ...(e.marker === undefined ? {} : { marker: e.marker }),
     ...(e.createdFile === true ? { createdFile: true } : {}),
     ...(e.createdParents === undefined || e.createdParents.length === 0 ? {} : { createdParents: e.createdParents }),
   }));
@@ -90,6 +98,7 @@ const ManifestSchema = z.object({
       kind: z.enum(ENTRY_KINDS),
       key: z.string().optional(),
       hash: z.string().regex(/^sha256:/),
+      marker: z.string().min(1).optional(),
       createdFile: z.literal(true).optional(),
       createdParents: z.array(z.string()).optional(),
     }),
@@ -120,6 +129,7 @@ export function parseManifest(text: string): Manifest {
       kind: e.kind,
       ...(e.key === undefined ? {} : { key: e.key }),
       hash: e.hash,
+      ...(e.marker === undefined ? {} : { marker: e.marker }),
       ...(e.createdFile === true ? { createdFile: true as const } : {}),
       ...(e.createdParents === undefined || e.createdParents.length === 0 ? {} : { createdParents: [...e.createdParents] }),
     })),
@@ -133,14 +143,29 @@ export function readManifest(fs: RepoFs): Manifest | undefined {
 }
 
 /**
+ * The hash of the JSON value a `json-keys` entry owns, given the value found at its key: the canonical
+ * JSON of the whole value, or, for an entry with a `marker`, of the elements of the array that contain
+ * it. `undefined` when the array has none of them. A value that is not an array hashes whole, so it
+ * never equals the hash of owned items.
+ */
+export function valueHash(value: unknown, marker?: string): string | undefined {
+  if (marker !== undefined && Array.isArray(value)) {
+    const owned = ownedItems(value, marker);
+    return owned.length === 0 ? undefined : hashText(canonicalJson(owned));
+  }
+  return hashText(canonicalJson(value));
+}
+
+/**
  * Hashes what is on disk for one manifest entry, the way the entry's own hash was made:
  * - `file`: the whole file;
  * - `md-block` / `line-block` / `toml-block` without a key: the block body between the markers;
  * - `toml-block` with a key: the text of that table inside the block;
- * - `json-keys`: the canonical JSON of the value at the key.
+ * - `json-keys`: the canonical JSON of the value at the key; with a `marker`, of the array elements
+ *   that contain it.
  *
- * `undefined` means the region is not there (no file, no markers, no such table or key). Throws
- * `MergeError` when the markers are damaged or the JSON is invalid.
+ * `undefined` means the region is not there (no file, no markers, no such table or key, no owned
+ * array element). Throws `MergeError` when the markers are damaged or the JSON is invalid.
  */
 export function entryDiskHash(entry: ManifestEntry, text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
@@ -160,7 +185,7 @@ export function entryDiskHash(entry: ManifestEntry, text: string | undefined): s
     }
     case 'json-keys': {
       const found = jsonValueAt(parseJsonObject(text, entry.path), (entry.key ?? '').split('/'));
-      return found.found ? hashText(canonicalJson(found.value)) : undefined;
+      return found.found ? valueHash(found.value, entry.marker) : undefined;
     }
   }
 }
