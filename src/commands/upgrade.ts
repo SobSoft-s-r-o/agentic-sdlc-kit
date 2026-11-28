@@ -28,13 +28,13 @@ export async function runUpgrade(ctx: InstallContext, options: UpgradeOptions): 
   const cfg = validateConfig(ctx, report);
   if (cfg === undefined) return report.finish();
 
-  installFiles(ctx, cfg, report, {
+  const files = installFiles(ctx, cfg, report, {
     dryRun,
     overwriteModified: options.overwriteModified === true,
     removeObsolete: true,
     showKit: true,
   });
-  await installHooksPath(ctx, report, dryRun);
+  await installHooksPath(ctx, report, dryRun, files.status);
   return report.finish();
 }
 

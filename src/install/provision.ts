@@ -1,7 +1,10 @@
 import { execFile, type ExecFileException } from 'node:child_process';
+import { accessSync, constants, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { typeRegistry, type Config } from '../config/schema.js';
 import { ConfigError } from '../core/taskTypes.js';
 import { GhError, ghJson, type GhRunner } from '../github/gh.js';
+import { GIT_HOOKS } from '../render/github.js';
 
 /**
  * What `sdlc init` sets up on GitHub and in git config: labels, default-branch protection, push
@@ -320,4 +323,72 @@ export async function setHooksPath(git: GitRunner, opts: HooksPathOptions): Prom
     throw new Error(`git config core.hooksPath ${HOOKS_PATH} failed: ${write.stderr.trim() || `exit code ${write.code}`}`);
   }
   return 'set';
+}
+
+// -- legacy hooks ---------------------------------------------------------------------------------
+
+/** What is at a path where git looks for a hook. */
+export type HookFileState = 'executable' | 'not-executable' | 'missing';
+
+/** Looks at one absolute path; injected so tests need no real files. */
+export type HookProbe = (path: string) => HookFileState;
+
+/** The real file system: a regular file, and whether it can be executed. */
+export const nodeHookProbe: HookProbe = path => {
+  try {
+    if (!statSync(path).isFile()) return 'missing';
+  } catch {
+    return 'missing';
+  }
+  try {
+    accessSync(path, constants.X_OK);
+    return 'executable';
+  } catch {
+    return 'not-executable';
+  }
+};
+
+/** Whether two paths are one directory, through symlinks (`.git/hooks` linked to `.sdlc/githooks`); paths that do not exist compare as text. */
+function sameDirectory(a: string, b: string): boolean {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return a === b;
+  }
+}
+
+/** The repository's own hooks that the kit's hook scripts run after the sdlc step. */
+export interface LegacyHooks {
+  /** The hooks directory, relative to the repository root when it is inside it (`.git/hooks`). */
+  dir: string;
+  /** Hook names the scripts run, in the kit's order. */
+  chained: string[];
+  /** Hook names present but not executable: the scripts skip them, as git itself would. */
+  notExecutable: string[];
+}
+
+/**
+ * The hooks in `$(git rev-parse --git-common-dir)/hooks` with the names of the kit's hooks: while
+ * `core.hooksPath` points at `.sdlc/githooks` git no longer runs them, so the kit's scripts do,
+ * after the sdlc step. Empty when that directory is the kit's own. Throws when git cannot say.
+ */
+export async function findLegacyHooks(git: GitRunner, root: string, probe: HookProbe = nodeHookProbe): Promise<LegacyHooks> {
+  const read = await git(['rev-parse', '--git-common-dir']);
+  const common = read.stdout.trim();
+  if (read.code !== 0 || common === '') {
+    throw new Error(`git rev-parse --git-common-dir failed: ${read.stderr.trim() || `exit code ${read.code}`}`);
+  }
+  const absolute = resolve(isAbsolute(common) ? common : resolve(root, common), 'hooks');
+  const rel = relative(resolve(root), absolute);
+  const inside = rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+  const dir = inside ? rel.split(sep).join('/') : absolute;
+  if (sameDirectory(absolute, resolve(root, HOOKS_PATH))) return { dir, chained: [], notExecutable: [] };
+  const chained: string[] = [];
+  const notExecutable: string[] = [];
+  for (const name of GIT_HOOKS) {
+    const state = probe(resolve(absolute, name));
+    if (state === 'executable') chained.push(name);
+    else if (state === 'not-executable') notExecutable.push(name);
+  }
+  return { dir, chained, notExecutable };
 }

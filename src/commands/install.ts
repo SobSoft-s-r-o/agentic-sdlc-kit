@@ -17,7 +17,7 @@ import {
   type PlanError,
 } from '../install/apply.js';
 import { MANIFEST_PATH, entryDiskHash, readManifest, type ManifestEntry } from '../install/manifest.js';
-import { HOOKS_PATH, setHooksPath, type GitRunner } from '../install/provision.js';
+import { HOOKS_PATH, findLegacyHooks, setHooksPath, type GitRunner, type HookProbe } from '../install/provision.js';
 import type { RepoFs } from '../install/repoFs.js';
 import { renderAll } from '../render/plan.js';
 import { packageVersion } from '../version.js';
@@ -29,6 +29,8 @@ export interface InstallContext {
   fs: RepoFs;
   git: GitRunner;
   gh: GhRunner;
+  /** Looks at the repository's own hook files (`.git/hooks/<name>`); defaults to the real file system. */
+  hookProbe?: HookProbe;
   /** Reads and validates the config; throws when it cannot. Called by `init` and `upgrade`, as their first step. */
   loadConfig: () => Config;
   /** Where the report goes (stdout). */
@@ -183,7 +185,7 @@ export function reportPlan(
 
 /**
  * Step 2 of `init` and `upgrade`: render everything for `cfg`, plan it against the manifest, print
- * the plan and apply it unless `dryRun`. Returns what the owner still has to do. A failure to render
+ * the plan and apply it unless `dryRun`. Returns what the owner still has to do and the step's status. A failure to render
  * or to read the manifest is a failed step, not an exception.
  */
 export function installFiles(
@@ -191,35 +193,73 @@ export function installFiles(
   cfg: Config,
   report: Reporter,
   options: { dryRun: boolean; overwriteModified: boolean; removeObsolete: boolean; showKit: boolean },
-): { userCommands: string[]; notes: string[] } {
+): { userCommands: string[]; notes: string[]; status: StepStatus } {
   try {
     const manifest = readManifest(ctx.fs);
     const { changes, userCommands, notes } = renderAll(cfg, ctx.fs);
     const plan = planApply(changes, ctx.fs, manifest, { overwriteModified: options.overwriteModified });
-    reportPlan(report, 'files', plan, ctx.fs, {
+    const status = reportPlan(report, 'files', plan, ctx.fs, {
       dryRun: options.dryRun,
       removeObsolete: options.removeObsolete,
       ...(options.showKit ? { leading: [`kit ${manifest?.kit ?? 'none'} → ${packageVersion()}`] } : {}),
     });
-    return { userCommands, notes };
+    return { userCommands, notes, status };
   } catch (error) {
     report.step('files', 'failed', lines(formatCliError(error)));
-    return { userCommands: [], notes: [] };
+    return { userCommands: [], notes: [], status: 'failed' };
   }
 }
 
-/** Step 3: point `core.hooksPath` at the kit's hooks, unless the owner has set it to something else. */
-export function installHooksPath(ctx: InstallContext, report: Reporter, dryRun: boolean): Promise<void> {
+/**
+ * The details that say which of the repository's own hooks (`.git/hooks/<name>`) the kit's scripts
+ * run after the sdlc step, and which they skip because they are not executable. A repository whose
+ * hooks directory cannot be found has none to report.
+ */
+async function legacyHookDetails(ctx: InstallContext, dryRun: boolean): Promise<string[]> {
+  let found: Awaited<ReturnType<typeof findLegacyHooks>>;
+  try {
+    found = await findLegacyHooks(ctx.git, ctx.fs.root, ctx.hookProbe);
+  } catch {
+    return [];
+  }
+  const details: string[] = [];
+  if (found.chained.length > 0) {
+    details.push(
+      `${dryRun ? 'dry run: the sdlc hooks would chain' : 'the sdlc hooks chain'} your existing hooks in ${found.dir}: ` +
+        `${found.chained.join(', ')} (each runs after the sdlc step, with the same arguments, and its exit code counts)`,
+    );
+  }
+  if (found.notExecutable.length > 0) {
+    details.push(
+      `not executable, so not run: ${found.notExecutable.map(name => `${found.dir}/${name}`).join(', ')} ` +
+        '(chmod +x to run it after the sdlc step)',
+    );
+  }
+  return details;
+}
+
+/**
+ * Step 3: point `core.hooksPath` at the kit's hooks, unless the owner has set it to something else,
+ * and say which existing hooks the kit's scripts chain. Not when the files step failed: the hook
+ * scripts may be missing, and git would then run no hook at all.
+ */
+export function installHooksPath(ctx: InstallContext, report: Reporter, dryRun: boolean, filesStatus: StepStatus): Promise<void> {
   return report.guarded('git hooks path', async details => {
+    if (filesStatus === 'failed') {
+      details.push(`core.hooksPath not changed: writing the files failed, so the hooks in ${HOOKS_PATH} may be missing; fix the errors above and run again`);
+      return 'skipped';
+    }
     const notices: string[] = [];
     const result = await setHooksPath(ctx.git, { dryRun, notice: message => notices.push(message) });
     details.push(...notices);
     switch (result) {
       case 'set':
         details.push(dryRun ? `dry run: would set core.hooksPath to ${HOOKS_PATH}` : `core.hooksPath set to ${HOOKS_PATH}`);
+        details.push(...(await legacyHookDetails(ctx, dryRun)));
         return dryRun ? 'skipped' : 'ok';
       case 'already':
         details.push(`core.hooksPath is already ${HOOKS_PATH}`);
+        details.push(...(await legacyHookDetails(ctx, false)));
         return 'ok';
       case 'conflict':
         return 'skipped';

@@ -11,7 +11,9 @@ import {
   ensureBranchProtection,
   ensureLabels,
   ensurePushProtection,
+  findLegacyHooks,
   HOOKS_PATH,
+  nodeHookProbe,
   setHooksPath,
   type GitRunner,
 } from '../../src/install/provision.js';
@@ -414,6 +416,63 @@ describe('the real git runner', () => {
       const outside = await createGitRunner(dir)(['rev-parse', '--git-dir']);
       expect(outside.code).not.toBe(0);
       expect(outside.stderr).not.toBe('');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('findLegacyHooks', () => {
+  const gitSaying = (stdout: string, code = 0): GitRunner => async () => ({ stdout, code, stderr: code === 0 ? '' : 'fatal: not a git repository' });
+
+  it('lists the kit-named hooks in the common dir: the executable ones are chained, the others reported', async () => {
+    const seen: string[] = [];
+    const found = await findLegacyHooks(gitSaying('.git\n'), '/repo', path => {
+      seen.push(path);
+      return path.endsWith('/pre-commit') ? 'executable' : path.endsWith('/post-checkout') ? 'not-executable' : 'missing';
+    });
+
+    expect(found).toEqual({ dir: '.git/hooks', chained: ['pre-commit'], notExecutable: ['post-checkout'] });
+    expect(seen).toEqual(['pre-commit', 'pre-push', 'post-merge', 'post-checkout'].map(name => `/repo/.git/hooks/${name}`));
+  });
+
+  it('uses an absolute common dir as it is (a linked worktree)', async () => {
+    const found = await findLegacyHooks(gitSaying('/main/.git\n'), '/repo/.worktrees/x', path =>
+      path === '/main/.git/hooks/pre-push' ? 'executable' : 'missing',
+    );
+    expect(found).toEqual({ dir: '/main/.git/hooks', chained: ['pre-push'], notExecutable: [] });
+  });
+
+  it('chains nothing when the hooks directory is the kit\'s own (a symlink to it)', async () => {
+    const { mkdir, symlink } = await import('node:fs/promises');
+    const root = await mkdtemp(join(tmpdir(), 'sdlc-legacy-'));
+    try {
+      await mkdir(join(root, '.sdlc', 'githooks'), { recursive: true });
+      await mkdir(join(root, '.git'));
+      await symlink(join(root, '.sdlc', 'githooks'), join(root, '.git', 'hooks'));
+      const found = await findLegacyHooks(gitSaying('.git\n'), root, () => 'executable');
+      expect(found).toEqual({ dir: '.git/hooks', chained: [], notExecutable: [] });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when git cannot say', async () => {
+    await expect(findLegacyHooks(gitSaying('', 128), '/repo', () => 'missing')).rejects.toThrow(/git rev-parse --git-common-dir failed: fatal/);
+  });
+
+  it('the real probe tells a missing, a plain and an executable file apart', async () => {
+    const { chmod, writeFile } = await import('node:fs/promises');
+    const dir = await mkdtemp(join(tmpdir(), 'sdlc-probe-'));
+    try {
+      await writeFile(join(dir, 'plain'), '#!/bin/sh\n');
+      await writeFile(join(dir, 'run'), '#!/bin/sh\n');
+      await chmod(join(dir, 'run'), 0o755);
+      await chmod(join(dir, 'plain'), 0o644);
+      expect(nodeHookProbe(join(dir, 'none'))).toBe('missing');
+      expect(nodeHookProbe(dir)).toBe('missing');
+      expect(nodeHookProbe(join(dir, 'run'))).toBe('executable');
+      if (process.platform !== 'win32') expect(nodeHookProbe(join(dir, 'plain'))).toBe('not-executable');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

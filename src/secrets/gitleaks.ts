@@ -57,10 +57,11 @@ export async function runGitleaks(exec: Exec, which: Which): Promise<GitleaksRes
 const MAX_BUFFER = 16 * 1024 * 1024;
 
 /** The real thing: runs programs in `cwd`, giving up after `timeoutMs`. The program's stdin is closed at once, so nothing waits for input. */
-export function execProgram(cwd: string, timeoutMs = 120_000): Exec {
+export function execProgram(cwd: string, timeoutMs = 120_000, env?: NodeJS.ProcessEnv): Exec {
   return (command, args) =>
     new Promise((resolve, reject) => {
-      const child = execFile(command, args, { cwd, maxBuffer: MAX_BUFFER, encoding: 'utf8', timeout: timeoutMs }, (error, stdout, stderr) => {
+      const options = { cwd, maxBuffer: MAX_BUFFER, encoding: 'utf8' as const, timeout: timeoutMs, ...(env === undefined ? {} : { env }) };
+      const child = execFile(command, args, options, (error, stdout, stderr) => {
         if (!error) {
           resolve({ code: 0, stdout, stderr });
           return;

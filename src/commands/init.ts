@@ -102,7 +102,7 @@ export async function runInit(ctx: InstallContext, options: InitOptions): Promis
     removeObsolete: false,
     showKit: false,
   });
-  await installHooksPath(ctx, report, dryRun);
+  await installHooksPath(ctx, report, dryRun, rendered.status);
   if (options.skipGithub === true) {
     for (const name of GITHUB_STEPS) report.step(name, 'skipped', ['--skip-github']);
   } else {

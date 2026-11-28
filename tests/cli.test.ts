@@ -412,6 +412,34 @@ describe('sdlc githook (built)', () => {
     expect(onTask.stderr).toBe('');
   }, 30_000);
 
+  it('the rendered scripts chain the legacy .git/hooks/pre-commit under real git: it runs after sdlc, and its failure blocks the commit', () => {
+    const root = repo('enforce');
+    const env = installRenderedHooks(root);
+    const { git, mustGit } = gitIn(root, env);
+    mustGit('checkout', '-q', '-b', 'task/1-first');
+    const legacy = join(root, '.git', 'hooks', 'pre-commit');
+    mkdirSync(dirname(legacy), { recursive: true });
+
+    writeFileSync(legacy, '#!/bin/sh\necho "legacy pre-commit refused" >&2\nexit 1\n', { mode: 0o755 });
+    const refused = git('commit', '--allow-empty', '-m', 'refused');
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain('legacy pre-commit refused');
+    expect(git('rev-parse', '--verify', '-q', 'HEAD').status).not.toBe(0);
+
+    writeFileSync(legacy, '#!/bin/sh\necho "legacy pre-commit ran" >&2\nexit 0\n', { mode: 0o755 });
+    const passed = git('commit', '--allow-empty', '-m', 'passed');
+    expect(passed.status).toBe(0);
+    expect(passed.stderr).toContain('legacy pre-commit ran');
+    expect(mustGit('rev-list', '--count', 'HEAD')).toBe('1');
+
+    // The sdlc step runs first and decides on its own: on main in enforce mode it blocks before the legacy hook runs.
+    mustGit('checkout', '-q', '-b', 'main');
+    const onMain = git('commit', '--allow-empty', '-m', 'on main');
+    expect(onMain.status).toBe(1);
+    expect(onMain.stderr).toContain('sdlc: error: committing directly to main');
+    expect(onMain.stderr).not.toContain('legacy pre-commit ran');
+  }, 30_000);
+
   it('the rendered scripts block a secret under real git, in observe mode: the commit, then the push of a history that holds it', () => {
     const root = repo('observe');
     const remote = join(dir, 'remote.git');

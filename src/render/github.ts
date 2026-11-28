@@ -43,7 +43,7 @@ export function renderGithub(cfg: Config, data: RenderData): Change[] {
 }
 
 /** The git hooks, in the order `git` is likely to run them. */
-const GIT_HOOKS = ['pre-commit', 'pre-push', 'post-merge', 'post-checkout'] as const;
+export const GIT_HOOKS = ['pre-commit', 'pre-push', 'post-merge', 'post-checkout'] as const;
 
 /** The hooks that carry the secret guard: when sdlc is missing, they say the guard is off. */
 const GUARDED_HOOKS: ReadonlySet<string> = new Set(['pre-commit', 'pre-push']);
@@ -51,14 +51,16 @@ const GUARDED_HOOKS: ReadonlySet<string> = new Set(['pre-commit', 'pre-push']);
 /**
  * The four git hook scripts at `.sdlc/githooks/<name>` (mode 0755; `core.hooksPath` points there).
  * Each one hands over to `sdlc githook <name>`, or skips with a notice when sdlc is not installed,
- * so a missing install never blocks a commit.
+ * so a missing install never blocks a commit. When that step passes, it runs the repository's own
+ * hook of the same name from `$(git rev-parse --git-common-dir)/hooks`, which `core.hooksPath`
+ * would otherwise switch off; `pre-push` keeps its stdin so both steps read it.
  */
 export function renderGitHooks(): Change[] {
   return GIT_HOOKS.map(
     (name): Change => ({
       kind: 'file',
       path: `${HOOKS_DIR}/${name}`,
-      content: renderTemplate(loadTemplate('githooks/hook.sh'), { name, guard: GUARDED_HOOKS.has(name) }, 'githooks/hook.sh'),
+      content: renderTemplate(loadTemplate('githooks/hook.sh'), { name, guard: GUARDED_HOOKS.has(name), stdin: name === 'pre-push' }, 'githooks/hook.sh'),
       mode: 0o755,
     }),
   );

@@ -1,11 +1,22 @@
+import { delimiter } from 'node:path';
 import { loadConfigFromString, type Config } from '../config/schema.js';
 import { ensureBoard } from '../github/board.js';
 import { GhError, ghJson, type GhRunner } from '../github/gh.js';
 import { WORKFLOW_PATH } from '../render/github.js';
+import { KIT_GIT_URL } from '../render/instructions.js';
 import { mcpEnvVars } from '../render/mcp.js';
 import { scanFileName } from '../secrets/scan.js';
 import { MANIFEST_PATH, entryDiskHash, readManifest, type Manifest, type ManifestEntry } from './manifest.js';
-import { HOOKS_PATH, ensureLabels, normalizeHooksPath, readHooksPath, readPushProtection, type GitRunner } from './provision.js';
+import {
+  HOOKS_PATH,
+  ensureLabels,
+  findLegacyHooks,
+  normalizeHooksPath,
+  readHooksPath,
+  readPushProtection,
+  type GitRunner,
+  type HookProbe,
+} from './provision.js';
 import type { RepoFs } from './repoFs.js';
 
 /**
@@ -29,16 +40,27 @@ export interface DoctorEnv {
   run: GhRunner;
   git: GitRunner;
   fs: RepoFs;
-  /** Whether `cmd` is an executable on the PATH. */
-  which(cmd: string): Promise<boolean>;
-  /** Runs a program with its stdin closed; a non-zero exit is returned, a program that cannot run rejects. */
-  exec(cmd: string, args: string[]): Promise<{ stdout: string; code: number; stderr: string }>;
+  /** Whether `cmd` is an executable on the PATH of `env` (the process's own by default). */
+  which(cmd: string, env?: NodeJS.ProcessEnv): Promise<boolean>;
+  /**
+   * Runs a program in the repository root with its stdin closed, with `options.env` instead of the
+   * process's environment and giving up after `options.timeoutMs`; a non-zero exit is returned, a
+   * program that cannot run (or times out) rejects.
+   */
+  exec(cmd: string, args: string[], options?: ExecOptions): Promise<{ stdout: string; code: number; stderr: string }>;
+  /** Looks at the repository's own hook files (`.git/hooks/<name>`); defaults to the real file system. */
+  hookProbe?: HookProbe;
   /** Only the names of variables are ever reported, never their values. */
   env: NodeJS.ProcessEnv;
   /** `process.version`, e.g. `v22.3.0`. */
   nodeVersion: string;
   /** The config file: its name for messages, and its text (`undefined` when there is no such file; throws when it cannot be read). */
   config: { path: string; read(): string | undefined };
+}
+
+export interface ExecOptions {
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
 }
 
 export interface PreflightOptions {
@@ -326,19 +348,108 @@ function checkHooksPath(hooks: Hooks): Check {
   );
 }
 
-/** How `sdlc` can be run the way the git hooks run it: from the PATH, else `npx --no-install`. */
+/** The PATH entries `npx`/`npm exec` put in front for the program it runs: its temporary package, and every `node_modules/.bin` up from the current directory. */
+const NPX_PACKAGE_DIR = /[\\/]_npx[\\/]/;
+const NPM_INJECTED_DIR = /[\\/]node_modules[\\/]\.bin[\\/]?$|[\\/]node-gyp-bin[\\/]?$/;
+
+/** Whether this process runs under `npx` or `npm exec` (npm says so in the environment of what it runs). */
+const underNpmExec = (env: NodeJS.ProcessEnv): boolean => env.npm_command === 'exec' || env.npm_lifecycle_event === 'npx';
+
+/**
+ * The environment a git hook sees, made from this process's: without the PATH entries of a
+ * temporary `npx` package (any directory with an `_npx` part) and, under `npx`/`npm exec`,
+ * without the `node_modules/.bin` directories npm added and npm's own `npm_*` variables. A
+ * doctor run through `npx -y github:...` would otherwise find its own temporary `sdlc` and
+ * report the hooks as able to run when they are not. `stripped` counts the PATH entries removed.
+ */
+export function hookEnvironment(env: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; stripped: number } {
+  const npm = underNpmExec(env);
+  const result: NodeJS.ProcessEnv = {};
+  let stripped = 0;
+  for (const [key, value] of Object.entries(env)) {
+    if (npm && /^npm_/i.test(key)) continue;
+    if (key.toUpperCase() !== 'PATH' || value === undefined) {
+      result[key] = value;
+      continue;
+    }
+    const entries = value.split(delimiter);
+    const kept = entries.filter(entry => !NPX_PACKAGE_DIR.test(entry) && !(npm && NPM_INJECTED_DIR.test(entry)));
+    stripped += entries.length - kept.length;
+    result[key] = kept.join(delimiter);
+  }
+  return { env: result, stripped };
+}
+
+/**
+ * How `sdlc` can be run the way the git hooks run it: from the PATH, else `npx --no-install sdlc`
+ * from the repository root, both with the environment a hook sees (`hookEnvironment`).
+ */
 async function checkSdlcOnPath(env: DoctorEnv): Promise<Check> {
   const id = 'sdlc.onPath';
-  if (await env.which('sdlc')) return ok(id, 'sdlc is on the PATH');
-  if (await env.which('npx')) {
+  const hook = hookEnvironment(env.env);
+  const note = hook.stripped > 0 ? ' (the PATH entries npx added for this run were left out, as a git hook does not see them)' : '';
+  if (await env.which('sdlc', hook.env)) return ok(id, `sdlc is on the PATH${note}`);
+  if (await env.which('npx', hook.env)) {
     try {
-      const probe = await env.exec('npx', ['--no-install', 'sdlc', '--version']);
-      if (probe.code === 0) return ok(id, 'sdlc resolves through npx');
+      const probe = await env.exec('npx', ['--no-install', 'sdlc', '--version'], { env: hook.env });
+      if (probe.code === 0) return ok(id, `sdlc resolves through npx${note}`);
     } catch {
       // npx cannot run here: the same as not finding sdlc.
     }
   }
-  return warn(id, 'sdlc is neither on the PATH nor installed for npx, so the git hooks skip', 'install sdlc globally or as a dev dependency (see INSTALL.md)');
+  return warn(
+    id,
+    `sdlc is neither on the PATH nor installed for npx, so the git hooks skip${note}`,
+    'install sdlc globally or as a dev dependency (see INSTALL.md)',
+  );
+}
+
+/** The repository's own hooks that the kit's scripts run after the sdlc step; one that is not executable is skipped, which is a warning. */
+async function checkLegacyHooks(env: DoctorEnv): Promise<Check> {
+  const id = 'git.legacyHooks';
+  let found: Awaited<ReturnType<typeof findLegacyHooks>>;
+  try {
+    found = await findLegacyHooks(env.git, env.fs.root, env.hookProbe);
+  } catch (error) {
+    return warn(id, `cannot check for hooks of your own: ${describeError(error)}`);
+  }
+  const dir = printable(found.dir);
+  if (found.notExecutable.length > 0) {
+    return warn(
+      id,
+      `not executable, so the sdlc hooks do not run them: ${found.notExecutable.join(', ')} in ${dir}` +
+        (found.chained.length > 0 ? `; chained: ${found.chained.join(', ')}` : ''),
+      found.notExecutable.map(name => `chmod +x ${dir}/${name}`).join('; '),
+    );
+  }
+  if (found.chained.length > 0) {
+    return ok(id, `the sdlc hooks run your hooks in ${dir} after the sdlc step: ${found.chained.join(', ')}`);
+  }
+  return ok(id, `no hooks of your own in ${dir} to chain`);
+}
+
+const KIT_REF_TIMEOUT_MS = 15_000;
+const COMMIT_SHA = /^[0-9a-f]{7,40}$/;
+
+/** `kit_ref` must exist in the kit's repository: every generated `npx -y github:...#<kit_ref>` command fails otherwise. Network trouble is "cannot verify". */
+async function checkKitRef(env: DoctorEnv, cfg: Config): Promise<Check> {
+  const id = 'kit.ref';
+  const ref = cfg.kitRef;
+  const fix = `set kit_ref in sdlc.config.yaml to a tag or branch of the kit that exists (main until a release tag exists, or the ref you installed from)`;
+  if (COMMIT_SHA.test(ref)) return ok(id, `kit_ref ${ref} looks like a commit; not checked`);
+  let result: Awaited<ReturnType<DoctorEnv['exec']>>;
+  try {
+    result = await env.exec('git', ['ls-remote', '--exit-code', KIT_GIT_URL, ref], {
+      env: { ...env.env, GIT_TERMINAL_PROMPT: '0' },
+      timeoutMs: KIT_REF_TIMEOUT_MS,
+    });
+  } catch (error) {
+    return warn(id, `cannot verify kit_ref ${printable(ref)}: ${describeError(error)}`);
+  }
+  // `--exit-code`: 2 means the repository answered and has no such ref.
+  if (result.code === 2) return warn(id, `kit_ref ${printable(ref)} does not exist in ${KIT_GIT_URL}, so the generated npx commands fail`, fix);
+  if (result.code !== 0) return warn(id, `cannot verify kit_ref ${printable(ref)}: git ls-remote ${failure(result.code, result.stderr)}`);
+  return ok(id, `kit_ref ${printable(ref)} exists in the kit's repository`);
 }
 
 async function checkBoard(env: DoctorEnv, cfg: Config): Promise<Check> {
@@ -408,7 +519,8 @@ function checkMcpToken(env: DoctorEnv, cfg: Config): Check {
   return warn(
     id,
     `${unset.join(', ')} ${unset.length > 1 ? 'are' : 'is'} not set in the environment, so the MCP servers cannot authenticate`,
-    `${unset.map(name => `export ${name}=<token>`).join('; ')} before starting your agent`,
+    `export ${unset.length > 1 ? 'them' : 'it'} from the OS keystore in your shell profile before starting your agent, never as a literal value, e.g. ` +
+      `${unset.map(name => `export ${name}="$(security find-generic-password -s <service> -w)"`).join('; ')} (the command for each keystore is in INSTALL.md, Secrets)`,
   );
 }
 
@@ -520,7 +632,7 @@ function checkApprovalTrust(cfg: Config): Check {
 
 /**
  * The preflight and every check of an installed repository, in this order: config, manifest and
- * managed files, git hooks, `sdlc` on the PATH, board, labels, the Actions workflow and secret (only
+ * managed files, git hooks and the legacy hooks they chain, `sdlc` on the PATH, `kit_ref`, board, labels, the Actions workflow and secret (only
  * with `stack.actions`), MCP, the secret guard, push protection, tracked secret files and approval
  * trust. Only reads: the board is planned as a dry run and nothing is written to GitHub or to disk.
  * The checks that call `gh` say `not checked` when `gh` is not installed or not logged in.
@@ -552,7 +664,9 @@ export async function runDoctor(env: DoctorEnv, cfg: Config): Promise<Check[]> {
 
   const hooks = await readHooks(env.git);
   await add(isolated('git.hooksPath', () => checkHooksPath(hooks)));
+  await add(isolated('git.legacyHooks', () => checkLegacyHooks(env)));
   const onPath = await add(isolated('sdlc.onPath', () => checkSdlcOnPath(env)));
+  await add(isolated('kit.ref', () => checkKitRef(env, cfg)));
 
   await add(viaGh('board.fields', () => checkBoard(env, cfg)));
   await add(viaGh('labels', () => checkLabels(env, cfg)));

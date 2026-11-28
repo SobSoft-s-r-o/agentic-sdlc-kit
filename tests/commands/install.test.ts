@@ -4,7 +4,7 @@ import type { InstallContext } from '../../src/commands/install.js';
 import { FIELD_NAMES, desiredFields } from '../../src/github/board.js';
 import { loadConfigFromString, type Config } from '../../src/config/schema.js';
 import { readManifest } from '../../src/install/manifest.js';
-import type { GitRunner } from '../../src/install/provision.js';
+import type { GitRunner, HookFileState } from '../../src/install/provision.js';
 import type { RepoFs } from '../../src/install/repoFs.js';
 import type { Change } from '../../src/render/changes.js';
 import { mergeChanges, renderAll } from '../../src/render/plan.js';
@@ -86,6 +86,7 @@ function fakeGit(initial?: string): FakeGit {
       hooksPath = undefined;
       return ok;
     }
+    if (command === 'rev-parse' && a === '--git-common-dir') return { stdout: '.git\n', code: 0, stderr: '' };
     throw new Error(`unexpected git call: ${args.join(' ')}`);
   };
   return { run, calls, hooksPath: () => hooksPath };
@@ -177,7 +178,15 @@ interface Harness {
 }
 
 function setup(
-  options: { files?: Record<string, string>; config?: string; hooksPath?: string; gh?: FakeGhStep[]; wrapFs?: (fs: MemoryFs) => RepoFs } = {},
+  options: {
+    files?: Record<string, string>;
+    config?: string;
+    hooksPath?: string;
+    gh?: FakeGhStep[];
+    wrapFs?: (fs: MemoryFs) => RepoFs;
+    /** The repository's own hooks in `.git/hooks`, by name. */
+    legacyHooks?: Record<string, HookFileState>;
+  } = {},
 ): Harness {
   const fs = memoryFs(options.files ?? {});
   const git = fakeGit(options.hooksPath);
@@ -188,6 +197,10 @@ function setup(
     fs: options.wrapFs ? options.wrapFs(fs) : fs,
     git: git.run,
     gh: fakeGh(options.gh ?? []),
+    hookProbe: path => {
+      const prefix = '/memory/.git/hooks/';
+      return path.startsWith(prefix) ? (options.legacyHooks?.[path.slice(prefix.length)] ?? 'missing') : 'missing';
+    },
     loadConfig: () => loadConfigFromString(configText),
     out: text => out.push(text),
     err: text => err.push(text),
@@ -423,7 +436,7 @@ describe('sdlc init', () => {
     expect(report.steps.every(s => s.status === 'ok')).toBe(true);
     expect(mutations(gh)).toEqual([]);
     // the hooks path is already set, so nothing is written to the git config
-    expect(h.git.calls.slice(gitCallsAfterFirst)).toEqual([['config', '--get', 'core.hooksPath']]);
+    expect(h.git.calls.slice(gitCallsAfterFirst)).toEqual([['config', '--get', 'core.hooksPath'], ['rev-parse', '--git-common-dir']]);
     expect(process.exitCode).toBeUndefined();
   });
 
@@ -475,6 +488,31 @@ describe('sdlc init', () => {
     });
   });
 
+  it('lists the existing .git/hooks it chains, in a dry run and a real run, and the ones it cannot run', async () => {
+    for (const dryRun of [true, false]) {
+      const h = setup({ legacyHooks: { 'pre-commit': 'executable', 'pre-push': 'executable', 'post-merge': 'not-executable' } });
+      h.useGh(emptyGithub(cfgOf(CONFIG), dryRun));
+
+      await h.go(['init', ...(dryRun ? ['--dry-run'] : []), '--json']);
+
+      const details = h.report().steps.find(s => s.name === 'git hooks path')?.details ?? [];
+      expect(details).toContain(
+        `${dryRun ? 'dry run: the sdlc hooks would chain' : 'the sdlc hooks chain'} your existing hooks in .git/hooks: pre-commit, pre-push ` +
+          '(each runs after the sdlc step, with the same arguments, and its exit code counts)',
+      );
+      expect(details).toContain('not executable, so not run: .git/hooks/post-merge (chmod +x to run it after the sdlc step)');
+    }
+  });
+
+  it('says nothing about legacy hooks when there are none', async () => {
+    const h = setup();
+    h.useGh(emptyGithub(cfgOf(CONFIG), false));
+
+    await h.go(['init', '--json']);
+
+    expect(h.report().steps.find(s => s.name === 'git hooks path')?.details).toEqual(['core.hooksPath set to .sdlc/githooks']);
+  });
+
   it('--dry-run writes nothing, changes nothing in git and makes only read calls to GitHub', async () => {
     const h = setup();
     const gh = h.useGh(emptyGithub(cfgOf(CONFIG), true));
@@ -485,7 +523,7 @@ describe('sdlc init', () => {
     expect(h.fs.snapshot()).toEqual({});
     expect(gh.calls).toHaveLength(4);
     expect(mutations(gh)).toEqual([]);
-    expect(h.git.calls).toEqual([['config', '--get', 'core.hooksPath']]);
+    expect(h.git.calls).toEqual([['config', '--get', 'core.hooksPath'], ['rev-parse', '--git-common-dir']]);
     expect(h.git.hooksPath()).toBeUndefined();
     const report = h.report();
     // everything a real run would write is still listed, and the steps that would change something did not run
@@ -646,7 +684,7 @@ describe('sdlc init', () => {
     expect(report.steps.map(s => [s.name, s.status])).toEqual([
       ['config', 'ok'],
       ['files', 'failed'],
-      ['git hooks path', 'ok'],
+      ['git hooks path', 'skipped'],
       ['board', 'ok'],
       ['labels', 'ok'],
       ['branch protection', 'ok'],
@@ -655,6 +693,9 @@ describe('sdlc init', () => {
     ]);
     expect(report.plan.errors).toEqual([{ path: '.mcp.json', message: 'EACCES: permission denied' }]);
     expect(report.steps[1]?.details.join('\n')).toContain('error .mcp.json: EACCES: permission denied');
+    // the hook scripts may be missing, so git is not pointed at them
+    expect(report.steps[2]?.details.join('\n')).toContain('core.hooksPath not changed: writing the files failed');
+    expect(h.git.hooksPath()).toBeUndefined();
     expect(h.fs.files.has('CLAUDE.md')).toBe(true);
     expect(h.fs.files.has('.mcp.json')).toBe(false);
     // the manifest does not claim the file that was not written
@@ -794,7 +835,7 @@ describe('sdlc upgrade', () => {
 
     expect(h.fs.snapshot()).toEqual(before);
     expect(h.fs.log).toHaveLength(logLength);
-    expect(h.git.calls.slice(gitCalls).every(args => args.includes('--get'))).toBe(true);
+    expect(h.git.calls.slice(gitCalls).every(args => args.includes('--get') || args.includes('rev-parse'))).toBe(true);
     const text = h.text();
     expect(text).toContain('update .mcp.json');
     expect(text).toContain('remove .codex/agents/sdlc-developer.toml (no longer generated)');
@@ -876,7 +917,7 @@ describe('sdlc upgrade', () => {
     expect(h.stepStatuses()).toEqual([
       ['config', 'ok'],
       ['files', 'failed'],
-      ['git hooks path', 'ok'],
+      ['git hooks path', 'skipped'],
     ]);
     expect(h.report().plan.errors).toEqual([{ path: '.mcp.json', message: 'EACCES: permission denied' }]);
     expect(h.fs.files.has('CLAUDE.md')).toBe(true);

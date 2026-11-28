@@ -4,7 +4,7 @@ import type { DoctorContext } from '../../src/commands/doctor.js';
 import { loadConfigFromString, type Config } from '../../src/config/schema.js';
 import { desiredFields } from '../../src/github/board.js';
 import { applyPlan, planApply } from '../../src/install/apply.js';
-import { describeError, parseTokenScopes, runDoctor, runPreflight, type Check, type DoctorEnv } from '../../src/install/doctor.js';
+import { describeError, hookEnvironment, parseTokenScopes, runDoctor, runPreflight, type Check, type DoctorEnv } from '../../src/install/doctor.js';
 import { MANIFEST_PATH } from '../../src/install/manifest.js';
 import type { GitRunner } from '../../src/install/provision.js';
 import { renderAll } from '../../src/render/plan.js';
@@ -39,7 +39,9 @@ const INSTALL_IDS = [
   'manifest.present',
   'files.managed',
   'git.hooksPath',
+  'git.legacyHooks',
   'sdlc.onPath',
+  'kit.ref',
   'board.fields',
   'labels',
   'actions.workflow',
@@ -129,6 +131,7 @@ function fakeGit(state: GitState = {}): FakeGit {
     if (line === 'config --get core.hooksPath') {
       return state.hooksPath === undefined ? { stdout: '', code: 1, stderr: '' } : { stdout: `${state.hooksPath}\n`, code: 0, stderr: '' };
     }
+    if (line === 'rev-parse --git-common-dir') return { stdout: '.git\n', code: 0, stderr: '' };
     if (line === 'ls-files -z') {
       const tracked = state.tracked ?? ['README.md', 'src/index.ts'];
       return { stdout: tracked.map(path => `${path}\0`).join(''), code: 0, stderr: '' };
@@ -154,8 +157,10 @@ interface EnvOptions {
   git?: GitState;
   /** The commands `which` finds. */
   installed?: string[];
-  /** What `exec` answers per command; a thrown value rejects. */
-  exec?: { npx?: ExecResult | Error; claude?: ExecResult | Error };
+  /** What `exec` answers per command; a thrown value rejects. `git` is `git ls-remote` of kit.ref (found by default). */
+  exec?: { npx?: ExecResult | Error; claude?: ExecResult | Error; git?: ExecResult | Error };
+  /** The repository's own hooks in `.git/hooks`, by name. */
+  legacyHooks?: Record<string, 'executable' | 'not-executable'>;
   env?: NodeJS.ProcessEnv;
   nodeVersion?: string;
   /** The config file's text; `null` is no file. */
@@ -169,6 +174,9 @@ interface Harness {
   fs: MemoryFs;
   cfg: Config;
   execCalls: Array<[string, string[]]>;
+  /** The environment of each exec and which call, in order. */
+  execEnvs: Array<NodeJS.ProcessEnv | undefined>;
+  whichEnvs: Array<NodeJS.ProcessEnv | undefined>;
 }
 
 const TOKEN_VAR = 'GITHUB_PERSONAL_ACCESS_TOKEN';
@@ -189,16 +197,33 @@ function harness(options: EnvOptions = {}): Harness {
   const git = fakeGit({ hooksPath: '.sdlc/githooks', ...options.git });
   const installed = new Set(options.installed ?? ['git', 'gh', 'sdlc', 'npx', 'claude']);
   const execCalls: Array<[string, string[]]> = [];
+  const execEnvs: Array<NodeJS.ProcessEnv | undefined> = [];
+  const whichEnvs: Array<NodeJS.ProcessEnv | undefined> = [];
   const configText = options.configText === undefined ? CONFIG : options.configText;
   const answers = options.exec ?? {};
   const env: DoctorEnv = {
     run: gh,
     git,
     fs,
-    which: async cmd => installed.has(cmd),
-    exec: async (cmd, args) => {
+    which: async (cmd, whichEnv) => {
+      whichEnvs.push(whichEnv);
+      return installed.has(cmd);
+    },
+    hookProbe: path => {
+      const prefix = '/memory/.git/hooks/';
+      return path.startsWith(prefix) ? (options.legacyHooks?.[path.slice(prefix.length)] ?? 'missing') : 'missing';
+    },
+    exec: async (cmd, args, execOptions) => {
       execCalls.push([cmd, args]);
-      const answer = cmd === 'claude' ? (answers.claude ?? { stdout: CLAUDE_LIST, code: 0, stderr: '' }) : cmd === 'npx' ? (answers.npx ?? { stdout: '', code: 1, stderr: 'npx: not found' }) : undefined;
+      execEnvs.push(execOptions?.env);
+      const answer =
+        cmd === 'claude'
+          ? (answers.claude ?? { stdout: CLAUDE_LIST, code: 0, stderr: '' })
+          : cmd === 'npx'
+            ? (answers.npx ?? { stdout: '', code: 1, stderr: 'npx: not found' })
+            : cmd === 'git'
+              ? (answers.git ?? { stdout: 'abc123\trefs/tags/v0.1.0\n', code: 0, stderr: '' })
+              : undefined;
       if (answer === undefined) throw new Error(`unexpected exec: ${cmd}`);
       if (answer instanceof Error) throw answer;
       return answer;
@@ -207,7 +232,7 @@ function harness(options: EnvOptions = {}): Harness {
     nodeVersion: options.nodeVersion ?? 'v22.3.0',
     config: { path: 'sdlc.config.yaml', read: () => (configText === null ? undefined : configText) },
   };
-  return { env, gh, git, fs, cfg, execCalls };
+  return { env, gh, git, fs, cfg, execCalls, execEnvs, whichEnvs };
 }
 
 const byId = (checks: Check[], id: string): Check => {
@@ -659,6 +684,73 @@ describe('runDoctor', () => {
     });
   });
 
+  describe('git.legacyHooks', () => {
+    it('is ok and says so when there are no hooks of the repository\'s own', async () => {
+      const check = byId(await runDoctor(harness().env, cfgOf(CONFIG)), 'git.legacyHooks');
+      expect(check).toEqual({ id: 'git.legacyHooks', status: 'ok', message: 'no hooks of your own in .git/hooks to chain' });
+    });
+
+    it('is ok and lists the hooks the sdlc hooks chain', async () => {
+      const h = harness({ legacyHooks: { 'pre-commit': 'executable', 'pre-push': 'executable' } });
+      const check = byId(await runDoctor(h.env, h.cfg), 'git.legacyHooks');
+      expect(check.status).toBe('ok');
+      expect(check.message).toBe('the sdlc hooks run your hooks in .git/hooks after the sdlc step: pre-commit, pre-push');
+    });
+
+    it('warns when one is not executable, with the chmod that fixes it', async () => {
+      const h = harness({ legacyHooks: { 'pre-commit': 'executable', 'post-merge': 'not-executable' } });
+      const check = byId(await runDoctor(h.env, h.cfg), 'git.legacyHooks');
+      expect(check.status).toBe('warn');
+      expect(check.message).toBe('not executable, so the sdlc hooks do not run them: post-merge in .git/hooks; chained: pre-commit');
+      expect(check.fix).toBe('chmod +x .git/hooks/post-merge');
+    });
+
+    it('warns, and does not fail, when git cannot name its directory', async () => {
+      const h = harness();
+      const base = h.env.git;
+      h.env.git = async args => (args[0] === 'rev-parse' && args[1] === '--git-common-dir' ? { stdout: '', code: 128, stderr: 'fatal: nope' } : base(args));
+      const check = byId(await runDoctor(h.env, h.cfg), 'git.legacyHooks');
+      expect(check.status).toBe('warn');
+      expect(check.message).toContain('cannot check for hooks of your own');
+    });
+  });
+
+  describe('kit.ref', () => {
+    it('is ok when git ls-remote finds the ref in the kit repository, asked without a prompt and with a timeout', async () => {
+      const h = harness({ cfg: cfgOf(`${CONFIG}kit_ref: main\n`) });
+      const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
+      expect(check).toEqual({ id: 'kit.ref', status: 'ok', message: "kit_ref main exists in the kit's repository" });
+      const index = h.execCalls.findIndex(([command]) => command === 'git');
+      expect(h.execCalls[index]).toEqual(['git', ['ls-remote', '--exit-code', 'https://github.com/SobSoft-s-r-o/agentic-sdlc-kit.git', 'main']]);
+      expect(h.execEnvs[index]?.GIT_TERMINAL_PROMPT).toBe('0');
+    });
+
+    it('warns when the ref does not exist, and says how to fix it', async () => {
+      const h = harness({ exec: { git: { stdout: '', code: 2, stderr: '' } } });
+      const check = byId(await runDoctor(h.env, h.cfg), 'kit.ref');
+      expect(check.status).toBe('warn');
+      expect(check.message).toMatch(/^kit_ref v\d+\.\d+\.\d+\S* does not exist in https:\/\/github\.com\/SobSoft-s-r-o\/agentic-sdlc-kit\.git/);
+      expect(check.fix).toContain('main until a release tag exists');
+    });
+
+    it('warns "cannot verify" on a network failure or a timeout, never fails', async () => {
+      for (const git of [
+        { stdout: '', code: 128, stderr: 'fatal: unable to access: Could not resolve host: github.com\n' },
+        new Error('git timed out after 15s'),
+      ]) {
+        const check = byId(await runDoctor(harness({ exec: { git } }).env, cfgOf(CONFIG)), 'kit.ref');
+        expect(check.status).toBe('warn');
+        expect(check.message).toMatch(/^cannot verify kit_ref /);
+      }
+    });
+
+    it('does not look up a commit sha', async () => {
+      const h = harness({ cfg: cfgOf(`${CONFIG}kit_ref: 0123abcd\n`) });
+      expect(byId(await runDoctor(h.env, h.cfg), 'kit.ref').status).toBe('ok');
+      expect(h.execCalls.some(([command]) => command === 'git')).toBe(false);
+    });
+  });
+
   describe('sdlc.onPath', () => {
     it('is ok when sdlc is on the PATH, without running anything', async () => {
       const h = harness();
@@ -667,12 +759,33 @@ describe('runDoctor', () => {
       expect(h.execCalls.filter(([command]) => command === 'npx')).toEqual([]);
     });
 
+    it('under npx, looks for sdlc without the PATH entries npx added: a temporary package does not make the hooks work', async () => {
+      const path = ['/home/u/.npm/_npx/1a2b/node_modules/.bin', '/repo/node_modules/.bin', '/usr/lib/node_modules/npm/node_modules/@npmcli/run-script/lib/node-gyp-bin', '/usr/bin'].join(':');
+      const h = harness({
+        installed: ['git', 'gh', 'npx'],
+        env: { PATH: path, npm_command: 'exec', npm_lifecycle_event: 'npx', npm_config_yes: 'true' },
+        exec: { npx: { stdout: '', code: 1, stderr: 'npm error npx canceled due to missing packages' } },
+      });
+      const check = byId(await runDoctor(h.env, h.cfg), 'sdlc.onPath');
+      expect(check.status).toBe('warn');
+      expect(check.message).toContain('the PATH entries npx added for this run were left out');
+      // other checks look up their tools with the process environment (undefined); the sdlc probe passes the hook's
+      const hookEnvs = [...h.whichEnvs.filter(seen => seen !== undefined), h.execEnvs[h.execCalls.findIndex(([command]) => command === 'npx')]];
+      expect(hookEnvs.length).toBeGreaterThanOrEqual(3);
+      for (const seen of hookEnvs) {
+        expect(seen?.PATH).toBe('/usr/bin');
+        expect(seen?.npm_command).toBeUndefined();
+        expect(seen?.npm_config_yes).toBeUndefined();
+      }
+      expect(byId(await runDoctor(h.env, h.cfg), 'secrets.guard').status).toBe('fail');
+    });
+
     it('falls back to npx --no-install, the probe the git hooks use', async () => {
       const h = harness({ installed: ['git', 'gh', 'npx'], exec: { npx: { stdout: '0.1.0\n', code: 0, stderr: '' } } });
       const check = byId(await runDoctor(h.env, h.cfg), 'sdlc.onPath');
       expect(check.status).toBe('ok');
       expect(check.message).toContain('npx');
-      expect(h.execCalls).toEqual([['npx', ['--no-install', 'sdlc', '--version']]]);
+      expect(h.execCalls.filter(([command]) => command !== 'git')).toEqual([['npx', ['--no-install', 'sdlc', '--version']]]);
     });
 
     it('warns when neither finds sdlc: the git hooks skip', async () => {
@@ -692,7 +805,7 @@ describe('runDoctor', () => {
     it('does not run npx when it is not installed', async () => {
       const h = harness({ installed: ['git', 'gh'] });
       await runDoctor(h.env, h.cfg);
-      expect(h.execCalls).toEqual([]);
+      expect(h.execCalls.filter(([command]) => command !== 'git')).toEqual([]);
     });
   });
 
@@ -886,7 +999,9 @@ describe('runDoctor', () => {
         const check = byId(await runDoctor(harness({ env }).env, cfgOf(CONFIG)), 'mcp.token');
         expect(check.status).toBe('warn');
         expect(check.message).toContain(TOKEN_VAR);
-        expect(check.fix).toContain(`export ${TOKEN_VAR}`);
+        expect(check.fix).toContain(`export ${TOKEN_VAR}="$(security find-generic-password -s <service> -w)"`);
+        expect(check.fix).toContain('from the OS keystore');
+        expect(check.fix).not.toMatch(/=<token>|=\S*<token/);
       }
     });
 
@@ -910,14 +1025,14 @@ describe('runDoctor', () => {
       const check = byId(await runDoctor(h.env, cfg), 'mcp.claude');
       expect(check.status).toBe('ok');
       expect(check.message).toMatch(/skipped/);
-      expect(h.execCalls).toEqual([]);
+      expect(h.execCalls.filter(([command]) => command !== 'git')).toEqual([]);
     });
 
     it('is ok, and skipped, when the claude CLI is not on the PATH', async () => {
       const h = harness({ installed: ['git', 'gh', 'sdlc'] });
       const check = byId(await runDoctor(h.env, h.cfg), 'mcp.claude');
       expect(check).toMatchObject({ status: 'ok', message: 'claude CLI not found; skipped' });
-      expect(h.execCalls).toEqual([]);
+      expect(h.execCalls.filter(([command]) => command !== 'git')).toEqual([]);
     });
 
     it('is ok when claude mcp list names every configured server', async () => {
@@ -925,7 +1040,7 @@ describe('runDoctor', () => {
       const check = byId(await runDoctor(h.env, h.cfg), 'mcp.claude');
       expect(check.status).toBe('ok');
       expect(check.message).toContain('github');
-      expect(h.execCalls).toEqual([['claude', ['mcp', 'list']]]);
+      expect(h.execCalls.filter(([command]) => command !== 'git')).toEqual([['claude', ['mcp', 'list']]]);
     });
 
     it('warns for a configured server claude does not list, naming it', async () => {
@@ -980,7 +1095,7 @@ describe('runDoctor', () => {
       const cfg = cfgOf(configWith('mcp: { servers: [] }\n'));
       const h = harness({ cfg, fs: installedFs(cfg) });
       expect(byId(await runDoctor(h.env, cfg), 'mcp.claude').status).toBe('ok');
-      expect(h.execCalls).toEqual([]);
+      expect(h.execCalls.filter(([command]) => command !== 'git')).toEqual([]);
     });
   });
 
@@ -1353,5 +1468,27 @@ describe('sdlc doctor', () => {
     const all = run.out.join('\n') + run.err.join('\n');
     expect(all).not.toContain(githubToken());
     expect(byId(json(run).checks, 'secrets.trackedFiles').message).toContain('.env');
+  });
+});
+
+describe('hookEnvironment', () => {
+  it('always drops _npx package directories, and keeps everything else outside npx', () => {
+    const { env, stripped } = hookEnvironment({ PATH: '/a/_npx/x/node_modules/.bin:/repo/node_modules/.bin:/usr/bin', npm_config_x: '1', HOME: '/h' });
+    expect(env).toEqual({ PATH: '/repo/node_modules/.bin:/usr/bin', npm_config_x: '1', HOME: '/h' });
+    expect(stripped).toBe(1);
+  });
+
+  it('under npm exec also drops the node_modules/.bin and node-gyp-bin directories and the npm_ variables', () => {
+    const { env, stripped } = hookEnvironment({
+      PATH: '/repo/node_modules/.bin:/node-gyp-bin:/usr/local/bin',
+      npm_command: 'exec',
+      HOME: '/h',
+    });
+    expect(env).toEqual({ PATH: '/usr/local/bin', HOME: '/h' });
+    expect(stripped).toBe(2);
+  });
+
+  it('reads Windows paths too', () => {
+    expect(/[\\/]_npx[\\/]/.test('C:\\Users\\u\\AppData\\Local\\npm-cache\\_npx\\1a\\node_modules\\.bin')).toBe(true);
   });
 });

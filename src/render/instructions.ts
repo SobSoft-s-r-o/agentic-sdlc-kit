@@ -58,6 +58,8 @@ export type RenderData = {
 };
 
 const KIT_REPOSITORY = 'github:SobSoft-s-r-o/agentic-sdlc-kit';
+/** The kit's git repository, where `kit_ref` must exist (`doctor` checks it with `git ls-remote`). */
+export const KIT_GIT_URL = 'https://github.com/SobSoft-s-r-o/agentic-sdlc-kit.git';
 
 /** How each end condition reads after "Ends when". */
 function endsOnText(endsOn: EndsOn, defaultBranch: string): string {
