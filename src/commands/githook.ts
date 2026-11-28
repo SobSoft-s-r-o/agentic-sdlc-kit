@@ -220,7 +220,7 @@ export function lookupTrackedTask(tracker: Pick<Tracker, 'getTask'>): TaskLookup
 // -- post-checkout -------------------------------------------------------------------------------------
 
 /** Text for one terminal line: control characters and runs of white space become one space. */
-const oneLine = (text: string): string => text.replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ').trim();
+export const oneLine = (text: string): string => text.replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ').trim();
 
 /** `task #12: In progress · Planning · next: Write the plan`. */
 export function describeCheckout(state: TaskState): string {
@@ -277,13 +277,21 @@ export interface Deadline {
   stop(): void;
 }
 
+/** What a call abandoned on the deadline rejects with (so a caller can tell a timeout from another failure). */
+export class DeadlineError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeadlineError';
+  }
+}
+
 export function deadlineOf(totalMs: number): Deadline {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let expiry: Promise<never> | undefined;
   let passed = false;
   let abandoned = false;
   let pending = 0;
-  const timedOut = (): Error => new Error(`timed out after ${totalMs / 1000}s`);
+  const timedOut = (): Error => new DeadlineError(`timed out after ${totalMs / 1000}s`);
   return {
     get abandoned() {
       return abandoned;

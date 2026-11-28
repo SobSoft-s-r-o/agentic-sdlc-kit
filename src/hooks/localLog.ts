@@ -13,10 +13,26 @@ export const GAPS_FILE = 'gaps.jsonl';
 export const PROMPTS_FILE = 'prompts.jsonl';
 /** The task states the edit rule has read lately, keyed by issue. */
 export const TASK_CACHE_FILE = 'hook-tasks.json';
+/** One queued command line (`{argv}`) per line; `sdlc sync` re-runs them when GitHub is reachable again. */
+export const OUTBOX_FILE = 'outbox.jsonl';
+/** Where the background `sdlc sync` started by the session-start hook writes its output. */
+export const SYNC_LOG_FILE = 'sync.log';
 
 /** A gap as the hook logs it: the issue is the task the violation was found for, when there is one. */
 export interface LoggedGap extends Gap {
   issue?: number;
+}
+
+/** A prompt as the hook records it: when, where from, and a hash. The text of a prompt is never kept. */
+export interface LoggedPrompt {
+  at: string;
+  harness: string;
+  sessionId?: string;
+  promptId?: string;
+  /** The task of the checked-out branch, when there is one. */
+  issue?: number;
+  /** The full hex SHA-256 of the prompt text. */
+  sha256: string;
 }
 
 const pathOf = (root: string, file: string): string => join(root, ...CACHE_DIR.split('/'), file);

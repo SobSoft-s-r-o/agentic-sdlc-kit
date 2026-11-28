@@ -32,6 +32,7 @@ import { errorAsJson, formatCliError } from './commands/errors.js';
 import { loadConfig, type Config } from './config/schema.js';
 import { defaultGhRunner } from './github/gh.js';
 import { GitHubTracker } from './github/githubTracker.js';
+import { CACHE_DIR, SYNC_LOG_FILE } from './hooks/localLog.js';
 import { nodeRepoFs } from './install/repoFs.js';
 import { createGitRunner } from './install/provision.js';
 import { execProgram, findOnPath } from './secrets/gitleaks.js';
@@ -237,6 +238,18 @@ export function buildProgram(deps: CliDeps = {}): Command {
         makeTracker: (cfg, root) => new GitHubTracker(defaultGhRunner, cfg, { repoRoot: root }),
         gitFor: dir => createGitRunner(dir, { timeoutMs: GIT_TIMEOUT_MS }),
         now: () => new Date().toISOString(),
+        spawnSync: root => {
+          // The same program that runs this hook, as for the post-checkout reconcile above.
+          const entry = process.argv[1];
+          if (entry === undefined) throw new Error('cannot tell which program is running');
+          const config = configOption === undefined ? [] : ['--config', resolve(cwd, configOption)];
+          spawnDetachedLogged({
+            command: process.execPath,
+            args: [entry, ...config, 'sync'],
+            cwd: root,
+            logPath: join(root, ...CACHE_DIR.split('/'), SYNC_LOG_FILE),
+          });
+        },
         out,
         err,
         exit: code => exitAfterFlush(code),

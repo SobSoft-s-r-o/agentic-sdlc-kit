@@ -4,8 +4,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { approve, registerApproveCommand } from '../../src/commands/approve.js';
+import { applyApproval, approve, registerApproveCommand } from '../../src/commands/approve.js';
 import {
+  loadTask,
   parseChoice,
   parseIssueNumber,
   parseTargetList,
@@ -26,7 +27,7 @@ import { STATE_MARKER } from '../../src/core/stateComment.js';
 import { reconcile } from '../../src/engine/reconcile.js';
 import { applyEvent, newTask as newTaskState } from '../../src/core/stateMachine.js';
 import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
-import type { TaskState } from '../../src/core/types.js';
+import type { Approval, TaskState } from '../../src/core/types.js';
 import { FakeTracker } from '../support/fakeTracker.js';
 
 const cfg = loadConfig(join(dirname(fileURLToPath(import.meta.url)), '../fixtures/config/valid.yaml'));
@@ -1337,6 +1338,111 @@ describe('approve actions', () => {
       );
       expect((await stateOf(h.tracker, issue)).status).toBe('in_progress');
     });
+  });
+});
+
+describe('applyApproval', () => {
+  const PROMPT_APPROVAL: Approval = {
+    source: 'prompt',
+    ref: 'prompt:claude:s1:0123456789abcdef',
+    by: OWNER,
+    at: '2026-06-01T00:00:00.000Z',
+  };
+
+  it('records the approval it is given, as it is, without asking where it came from', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    const listComments = vi.spyOn(h.tracker, 'listComments');
+    const login = vi.spyOn(h.tracker, 'authenticatedLogin');
+
+    const state = await applyApproval(h.ctx, issue, { action: 'approve' }, PROMPT_APPROVAL);
+
+    expect(state.stages.brainstorming?.approval).toEqual(PROMPT_APPROVAL);
+    expect(state).toMatchObject({ status: 'in_progress', waitingOn: 'agent' });
+    expect((await stateOf(h.tracker, issue)).stages.brainstorming?.approval).toEqual(PROMPT_APPROVAL);
+    expect(listComments).not.toHaveBeenCalled();
+    expect(login).not.toHaveBeenCalled();
+  });
+
+  it('reads the task itself unless the caller hands it over', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    const getTask = vi.spyOn(h.tracker, 'getTask');
+
+    await applyApproval(h.ctx, issue, { action: 'approve' }, PROMPT_APPROVAL);
+    expect(getTask).toHaveBeenCalledTimes(1);
+
+    const second = await pausedFeature(h);
+    const loaded = await loadTask(h.ctx, second);
+    getTask.mockClear();
+    await applyApproval(h.ctx, second, { action: 'approve' }, PROMPT_APPROVAL, loaded);
+    expect(getTask).not.toHaveBeenCalled();
+  });
+
+  it('refuses a task handed over that has changed since it was read, and records nothing', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    const loaded = await loadTask(h.ctx, issue);
+    h.tracker.concurrentWriteBeforeNextWriteState(issue);
+
+    await expect(applyApproval(h.ctx, issue, { action: 'approve' }, PROMPT_APPROVAL, loaded)).rejects.toThrow(
+      /writeState failed for #\d+/,
+    );
+
+    expect((await stateOf(h.tracker, issue)).stages.brainstorming?.approval).toBeUndefined();
+  });
+
+  it('approves the phase it is told to, not only the current one', async () => {
+    const h = setup();
+    const issue = await pausedFeature(h);
+    await stageStart(h.ctx, issue, 'planning');
+
+    await expect(applyApproval(h.ctx, issue, { action: 'approve' }, PROMPT_APPROVAL)).rejects.toThrow(
+      'stage "planning" has not been published, nothing to approve',
+    );
+    const state = await applyApproval(h.ctx, issue, { action: 'approve', phase: 'brainstorming' }, PROMPT_APPROVAL);
+
+    expect(state.stages.brainstorming?.approval).toEqual(PROMPT_APPROVAL);
+  });
+
+  it('cancels with a reason: the report first, then the state, then the issue', async () => {
+    const h = setup();
+    const issue = await newTask(h);
+
+    const state = await applyApproval(h.ctx, issue, { action: 'cancel', reason: ' no longer needed ' }, PROMPT_APPROVAL);
+
+    expect(state).toMatchObject({ status: 'done', outcome: 'cancelled', cancelReason: 'no longer needed' });
+    expect(state.outcomeApproval).toEqual(PROMPT_APPROVAL);
+    expect(visibleComments(h.tracker, issue)).toHaveLength(1);
+    expect(visibleComments(h.tracker, issue)[0]?.body).toContain('**Reason:** no longer needed');
+    expect(issueOf(h.tracker, issue)).toMatchObject({ open: false, closeReason: 'not_planned' });
+  });
+
+  it('refuses a cancel without a reason before posting or writing anything', async () => {
+    const h = setup();
+    const issue = await newTask(h);
+    const writes = h.tracker.writes;
+
+    for (const reason of [undefined, '', '   ']) {
+      await expect(applyApproval(h.ctx, issue, { action: 'cancel', reason }, PROMPT_APPROVAL)).rejects.toThrow(
+        'cancel needs a reason (--reason <text>)',
+      );
+    }
+
+    expect(visibleComments(h.tracker, issue)).toHaveLength(0);
+    expect(h.tracker.writes).toBe(writes);
+  });
+
+  it('refuses an approval that does not fit the task, writing nothing', async () => {
+    const h = setup();
+    const issue = await newTask(h);
+    const writes = h.tracker.writes;
+
+    await expect(applyApproval(h.ctx, issue, { action: 'accept' }, PROMPT_APPROVAL)).rejects.toThrow(
+      /does not end on owner acceptance/,
+    );
+
+    expect(h.tracker.writes).toBe(writes);
   });
 });
 

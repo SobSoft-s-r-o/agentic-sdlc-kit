@@ -1,17 +1,24 @@
 import { dirname, relative, sep } from 'node:path';
 import type { Command } from 'commander';
 import { typeRegistry, type Config } from '../config/schema.js';
+import { APPROVAL_ACTIONS, normalizeCommentUrl, recordedRefs, type ApprovalAction } from '../core/approvals.js';
 import { editsAllowed } from '../core/edits.js';
+import { parseOwnerCommand } from '../core/ownerCommand.js';
 import type { TaskState, TaskTypeDef } from '../core/types.js';
+import { reconcile } from '../engine/reconcile.js';
 import { emptyOutput, renderOutput } from '../hooks/output.js';
 import { HookPayloadError, normalizePayload } from '../hooks/payload.js';
 import {
   appendJsonLine,
   GAPS_FILE,
+  OUTBOX_FILE,
+  PROMPTS_FILE,
   readJsonFile,
+  readJsonLines,
   TASK_CACHE_FILE,
   writeJsonFile,
   type LoggedGap,
+  type LoggedPrompt,
 } from '../hooks/localLog.js';
 import {
   decide,
@@ -22,6 +29,14 @@ import {
   type Violation,
 } from '../hooks/policy.js';
 import { checkoutOf, mainRootOf, realPathOf, type Checkout } from '../hooks/resolve.js';
+import {
+  isBareCancel,
+  pendingActions,
+  promptApprover,
+  promptRef,
+  promptSha256,
+  sessionContext,
+} from '../hooks/session.js';
 import { shellViolations } from '../hooks/shell.js';
 import {
   HOOK_EVENTS,
@@ -33,8 +48,10 @@ import {
   type ToolCall,
 } from '../hooks/types.js';
 import type { GitRunner } from '../install/provision.js';
-import type { Tracker } from '../tracker/types.js';
-import { deadlineOf, isMissingTaskError, type Deadline } from './githook.js';
+import type { TrackedTask, Tracker } from '../tracker/types.js';
+import { applyApproval } from './approve.js';
+import { CommandError, loadTask, trackerStep, type CommandContext, type LoadedTask } from './context.js';
+import { DeadlineError, deadlineOf, isMissingTaskError, oneLine, type Deadline } from './githook.js';
 
 /**
  * `sdlc hook <harness> <event>`: the entrypoint a harness runs for its hooks (through the launcher
@@ -47,6 +64,12 @@ import { deadlineOf, isMissingTaskError, type Deadline } from './githook.js';
  * stderr line `sdlc: hook skipped: <reason>` and allows. Reading the task of an edit is the one
  * thing that may fail while the hook goes on: that is handled degradation (a warning, the edit is
  * allowed), not a skipped hook, and so is a log file that cannot be written.
+ *
+ * `session-start` tells the agent which task its branch has, and starts `sdlc sync` when something
+ * waits in the local queue. `prompt` records the prompt by its hash (never its text) and reads it for
+ * an owner command: the owner's `/approve`, `/accept`, `/ran` or `/cancel <reason>` typed in a prompt
+ * is recorded as an approval of source `prompt`. Only the prompt event does that, and never one from
+ * a subagent. Every tracker call of these two events runs under the one shared deadline.
  */
 
 /** Everything the hook touches outside its own process; the real one is built in `cli.ts`. */
@@ -57,7 +80,7 @@ export interface HookContext {
   readStdin(): Promise<string>;
   /** The config of the repository whose root is `root`: `undefined` when there is none, a throw when it is invalid. */
   loadConfig(root: string): Config | undefined;
-  /** Called only when an edit needs a task that is not cached. */
+  /** Called only when an event needs a task (an edit that is not cached, a session start or an approval prompt). */
   makeTracker(cfg: Config, root: string): Tracker;
   /** Git, run in `cwd`. */
   gitFor(cwd: string): GitRunner;
@@ -203,7 +226,7 @@ interface Judgement {
   warnings: string[];
 }
 
-interface PreToolEnv {
+interface HookEnv {
   ctx: HookContext;
   event: HookEvent;
   /** The checkout of the event's `cwd`: its root holds the config and the local files. */
@@ -224,7 +247,7 @@ const isInside = (path: string, dir: string): boolean => path === dir || path.st
  * of ours. A file in the git directory of the repository is a `.git/...` path, which the edit rule
  * protects. The task is read only for a file that needs one.
  */
-async function judgeEdit(env: PreToolEnv, tool: Extract<ToolCall, { category: 'edit' }>): Promise<Judgement> {
+async function judgeEdit(env: HookEnv, tool: Extract<ToolCall, { category: 'edit' }>): Promise<Judgement> {
   const { ctx, checkout: root, cfg } = env;
   const reader = new TaskReader(ctx, root, cfg, env.deadline);
 
@@ -288,7 +311,7 @@ async function judgeEdit(env: PreToolEnv, tool: Extract<ToolCall, { category: 'e
 }
 
 /** The violations of a shell command or a subagent dispatch carry the issue of the `cwd` checkout. */
-function judgeOther(env: PreToolEnv, tool: Exclude<ToolCall, { category: 'edit' }>): Judgement {
+function judgeOther(env: HookEnv, tool: Exclude<ToolCall, { category: 'edit' }>): Judgement {
   const found =
     tool.category === 'shell'
       ? shellViolations(tool.command)
@@ -302,7 +325,7 @@ function judgeOther(env: PreToolEnv, tool: Exclude<ToolCall, { category: 'edit' 
   };
 }
 
-async function preTool(env: PreToolEnv): Promise<{ outcome: HookOutcome; gaps: LoggedGap[] }> {
+async function preTool(env: HookEnv): Promise<{ outcome: HookOutcome; gaps: LoggedGap[] }> {
   const { tool } = env.event;
   if (tool === undefined) throw new HookPayloadError('pre-tool payload has no tool');
   const judgement = tool.category === 'edit' ? await judgeEdit(env, tool) : judgeOther(env, tool);
@@ -319,6 +342,190 @@ async function preTool(env: PreToolEnv): Promise<{ outcome: HookOutcome; gaps: L
     }),
   );
   return { outcome, gaps };
+}
+
+// -- session-start and prompt -------------------------------------------------------------------------
+
+const asContext = (...context: string[]): HookOutcome => ({ context, warnings: [] });
+
+/** `tracker` with every call run under the hook's shared deadline, so nothing asked of GitHub outlasts it. */
+function boundedTracker(tracker: Tracker, deadline: Deadline): Tracker {
+  return new Proxy(tracker, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property, target);
+      if (typeof value !== 'function') return value;
+      const method = value as (...args: unknown[]) => Promise<unknown>;
+      return (...args: unknown[]) => deadline.run(() => method.apply(target, args));
+    },
+  });
+}
+
+/** What the commands the hook borrows (`reconcile`, `applyApproval`) run on: the bounded tracker, and no output. */
+function commandContextOf(env: HookEnv): CommandContext {
+  return {
+    tracker: boundedTracker(env.ctx.makeTracker(env.cfg, env.checkout.root), env.deadline),
+    cfg: env.cfg,
+    now: env.ctx.now,
+    out: () => undefined,
+    err: () => undefined,
+  };
+}
+
+/** Whether `error`, or something it was caused by, is a call abandoned on the deadline. */
+function timedOut(error: unknown): boolean {
+  for (let current = error, depth = 0; current instanceof Error && depth < 5; depth += 1) {
+    if (current instanceof DeadlineError) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+/** How many lines wait in the local queues for `sdlc sync`; a file that cannot be read counts as empty. */
+async function queuedWork(root: string): Promise<{ outbox: number; gaps: number }> {
+  const count = async (file: string): Promise<number> => {
+    try {
+      return (await readJsonLines(root, file)).length;
+    } catch {
+      return 0;
+    }
+  };
+  return { outbox: await count(OUTBOX_FILE), gaps: await count(GAPS_FILE) };
+}
+
+/**
+ * The task of the branch and what a reconcile would do for it, as context for the agent. Starts
+ * `sdlc sync` when something is queued. A task that cannot be read is said so; a reconcile that
+ * cannot be asked is left out.
+ */
+async function sessionStart(env: HookEnv): Promise<HookOutcome> {
+  const { ctx, checkout, cfg } = env;
+  const mainRoot = mainRootOf(checkout);
+  let queued = await queuedWork(mainRoot);
+  if (queued.outbox + queued.gaps > 0 && ctx.spawnSync !== undefined) {
+    try {
+      ctx.spawnSync(mainRoot);
+    } catch (error) {
+      ctx.err(`sdlc: warning: could not start sdlc sync in the background (${oneLine(reasonOf(error))})`);
+      // Not running, so the agent is not told it is.
+      queued = { outbox: 0, gaps: 0 };
+    }
+  }
+
+  const { issue, branch } = checkout;
+  if (issue === undefined) return asContext(...sessionContext({ cfg, branch, pending: 0, queued }));
+
+  const commandCtx = commandContextOf(env);
+  let task: TrackedTask | undefined;
+  let unreadable: number | undefined;
+  try {
+    task = await commandCtx.tracker.getTask(issue);
+  } catch (error) {
+    if (!isMissingTaskError(error)) unreadable = issue;
+  }
+
+  let pending = 0;
+  if (task !== undefined) {
+    try {
+      pending = pendingActions(await reconcile(commandCtx, { dryRun: true, issue })) ?? 0;
+    } catch {
+      // The count is a courtesy: without it the line is left out.
+    }
+  }
+  return asContext(
+    ...sessionContext({
+      cfg,
+      ...(branch === undefined ? {} : { branch }),
+      ...(task === undefined ? {} : { task }),
+      ...(unreadable === undefined ? {} : { unreadable }),
+      pending,
+      queued,
+    }),
+  );
+}
+
+/** Appends the prompt's hash, never its text, to the prompt record; a record that cannot be written is skipped. */
+async function recordPrompt(env: HookEnv, prompt: string): Promise<void> {
+  const { event, checkout } = env;
+  const record: LoggedPrompt = {
+    at: env.ctx.now(),
+    harness: event.harness,
+    ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
+    ...(event.promptId === undefined ? {} : { promptId: event.promptId }),
+    ...(checkout.issue === undefined ? {} : { issue: checkout.issue }),
+    sha256: promptSha256(prompt),
+  };
+  try {
+    await appendJsonLine(mainRootOf(checkout), PROMPTS_FILE, record);
+  } catch {
+    // The record is a trail, not a rule: a read-only checkout must not stop the prompt.
+  }
+}
+
+const isApprovalAction = (action: string): action is ApprovalAction =>
+  (APPROVAL_ACTIONS as readonly string[]).includes(action);
+
+const NO_TASK_FOR_APPROVAL = 'sdlc: no task on this branch; the approval was not recorded.';
+const BARE_CANCEL = 'sdlc: approval not recorded: /cancel needs a reason on the same line, as in "/cancel no longer needed".';
+const GITHUB_UNREACHABLE = 'sdlc: could not reach GitHub; approval not recorded, ask again or approve by comment';
+
+/**
+ * The owner's command in the prompt of the human, recorded as the owner's decision. `undefined`
+ * when the prompt is no approval command; otherwise the line to tell the agent. Only a prompt is
+ * ever read for this: what an agent writes in a tool call is never an approval.
+ */
+async function promptApproval(env: HookEnv, prompt: string): Promise<string | undefined> {
+  const command = parseOwnerCommand(prompt);
+  if (command === null) return isBareCancel(prompt) ? BARE_CANCEL : undefined;
+  // `/merge` is no approval, and `/approve type <id>` approves a type change, which only a comment can record.
+  if (!isApprovalAction(command.action) || command.typeId !== undefined) return undefined;
+  const { action } = command;
+  const { issue } = env.checkout;
+  if (issue === undefined) return NO_TASK_FOR_APPROVAL;
+
+  try {
+    const ctx = commandContextOf(env);
+    let loaded: LoadedTask;
+    try {
+      loaded = await loadTask(ctx, issue);
+    } catch (error) {
+      if (error instanceof CommandError && isMissingTaskError(error.cause)) return NO_TASK_FOR_APPROVAL;
+      throw error;
+    }
+    const { state } = loaded.task;
+
+    // The same prompt of the same session is one decision, however often it is delivered.
+    const ref = promptRef(env.event.harness, env.event.sessionId, prompt);
+    if (recordedRefs(state).has(normalizeCommentUrl(ref))) return `sdlc: this approval was already recorded for #${issue}.`;
+
+    // The prompt comes from the human at the keyboard: with one owner it is that owner, whatever login gh runs as.
+    const login =
+      env.cfg.owners.length === 1
+        ? undefined
+        : await trackerStep('authenticatedLogin', undefined, () => ctx.tracker.authenticatedLogin());
+    const approver = promptApprover(env.cfg, login);
+    if ('refused' in approver) return `sdlc: ${approver.refused}`;
+
+    await applyApproval(
+      ctx,
+      issue,
+      { action, ...(command.reason === undefined ? {} : { reason: command.reason }) },
+      { source: 'prompt', ref, by: approver.by, at: env.ctx.now() },
+      loaded,
+    );
+    return `sdlc: recorded the owner's ${action} for #${issue} (${state.phase}) from this prompt.`;
+  } catch (error) {
+    if (timedOut(error)) return GITHUB_UNREACHABLE;
+    return `sdlc: approval not recorded: ${oneLine(reasonOf(error))}`;
+  }
+}
+
+/** Records the prompt, then reads it for an owner command. A prompt from a subagent is neither. */
+async function promptEvent(env: HookEnv): Promise<HookOutcome> {
+  const { event } = env;
+  if (event.inSubagent || event.prompt === undefined) return NO_OUTCOME;
+  await recordPrompt(env, event.prompt);
+  const line = await promptApproval(env, event.prompt);
+  return line === undefined ? NO_OUTCOME : asContext(line);
 }
 
 function parsePayload(text: string): unknown {
@@ -342,10 +549,12 @@ async function answer(
   const cfg = ctx.loadConfig(checkout.root);
   if (cfg === undefined) throw new Error(`no sdlc.config.yaml in ${checkout.root}`);
 
-  // Session start and prompt have nothing to say until their rules exist.
+  const env: HookEnv = { ctx, event, checkout, cfg, deadline };
   let outcome = NO_OUTCOME;
   let gaps: LoggedGap[] = [];
-  if (event.event === 'pre-tool') ({ outcome, gaps } = await preTool({ ctx, event, checkout, cfg, deadline }));
+  if (event.event === 'pre-tool') ({ outcome, gaps } = await preTool(env));
+  else if (event.event === 'session-start') outcome = await sessionStart(env);
+  else outcome = await promptEvent(env);
 
   try {
     // In order, so a reader sees the lines as the rules found them.

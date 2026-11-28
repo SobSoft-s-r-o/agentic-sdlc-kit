@@ -701,6 +701,72 @@ describe('sdlc hook (built)', () => {
 
     expect(result).toEqual({ status: 0, stdout: '', stderr: `sdlc: hook skipped: ${reason}\n` });
   });
+
+  it('session-start on a branch without a task says so, without reaching GitHub', () => {
+    const root = hookRepo();
+
+    const result = sdlc(['hook', 'claude', 'session-start'], {
+      cwd: root,
+      env: { ...hookEnv(), PATH: gitOnlyPath() },
+      input: JSON.stringify({ session_id: 's1', cwd: root, source: 'startup' }),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'SessionStart',
+        additionalContext:
+          'sdlc: mode enforce. No task on branch main. New work starts with `sdlc task new`; status questions use `sdlc status`.',
+      },
+    });
+  });
+
+  it('session-start with queued gaps starts a detached sdlc sync that logs to .sdlc/cache/sync.log', async () => {
+    const root = hookRepo();
+    mkdirSync(join(root, '.sdlc', 'cache'), { recursive: true });
+    writeFileSync(join(root, '.sdlc', 'cache', 'gaps.jsonl'), '{"rule":"no-task"}\n');
+
+    const result = sdlc(['hook', 'claude', 'session-start'], {
+      cwd: root,
+      env: { ...hookEnv(), PATH: gitOnlyPath() },
+      input: JSON.stringify({ session_id: 's1', cwd: root, source: 'startup' }),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    const log = join(root, '.sdlc', 'cache', 'sync.log');
+    let text = '';
+    for (let attempt = 0; attempt < 200 && text === ''; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      text = existsSync(log) ? readFileSync(log, 'utf8') : '';
+    }
+    // The child is the real program started with `sync`; the command arrives with a later task, so for now it is unknown.
+    expect(text).toContain("unknown command 'sync'");
+  });
+
+  it('a prompt is recorded by its hash, and /approve without a task is told so', () => {
+    const root = hookRepo();
+
+    const result = sdlc(['hook', 'claude', 'prompt'], {
+      cwd: root,
+      env: { ...hookEnv(), PATH: gitOnlyPath() },
+      input: JSON.stringify({ session_id: 's1', prompt_id: 'p1', cwd: root, prompt: '/approve\nlooks good' }),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'UserPromptSubmit',
+        additionalContext: 'sdlc: no task on this branch; the approval was not recorded.',
+      },
+    });
+    const lines = readFileSync(join(root, '.sdlc', 'cache', 'prompts.jsonl'), 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0] as string)).toMatchObject({ harness: 'claude', sessionId: 's1', promptId: 'p1' });
+    expect(lines[0]).not.toContain('looks good');
+  });
 });
 
 describe('runCli', () => {
