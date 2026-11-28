@@ -1,0 +1,9 @@
+{
+  "session_id": "abc123",
+  "prompt_id": "prompt-7",
+  "transcript_path": "/work/transcripts/abc123.jsonl",
+  "cwd": "/work/proj",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Add a retry to the fetch helper."
+}

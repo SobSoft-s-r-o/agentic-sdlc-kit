@@ -1,0 +1,10 @@
+{
+  "session_id": "thr_123",
+  "transcript_path": null,
+  "cwd": "/work/proj",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-5",
+  "permission_mode": "default",
+  "turn_id": "turn_2",
+  "prompt": "Explain the retry logic."
+}

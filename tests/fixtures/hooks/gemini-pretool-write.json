@@ -1,0 +1,9 @@
+{
+  "session_id": "7f3e0001",
+  "transcript_path": "/work/transcripts/session.json",
+  "cwd": "/work/proj",
+  "hook_event_name": "BeforeTool",
+  "timestamp": "2026-11-28T10:00:00.000Z",
+  "tool_name": "write_file",
+  "tool_input": { "file_path": "src/a.ts", "content": "export const a = 1;\n" }
+}

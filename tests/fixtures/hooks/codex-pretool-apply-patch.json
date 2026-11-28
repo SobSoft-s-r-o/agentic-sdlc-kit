@@ -1,0 +1,11 @@
+{
+  "session_id": "thr_123",
+  "cwd": "/work/proj",
+  "hook_event_name": "PreToolUse",
+  "turn_id": "turn_1",
+  "tool_name": "apply_patch",
+  "tool_use_id": "call_2",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Add File: hello.txt\n+hi\n*** Update File: src/app.ts\n*** Move to: src/main.ts\n@@\n-old\n+new\n*** End Patch"
+  }
+}

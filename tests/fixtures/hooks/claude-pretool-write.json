@@ -1,0 +1,11 @@
+{
+  "session_id": "abc123",
+  "prompt_id": "prompt-7",
+  "transcript_path": "/work/transcripts/abc123.jsonl",
+  "cwd": "/work/proj",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": { "file_path": "/work/proj/src/a.ts", "content": "export const a = 1;\n" },
+  "tool_use_id": "toolu_01WRITE"
+}

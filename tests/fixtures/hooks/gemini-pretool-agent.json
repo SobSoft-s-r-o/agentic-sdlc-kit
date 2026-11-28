@@ -1,0 +1,9 @@
+{
+  "session_id": "7f3e0001",
+  "transcript_path": "",
+  "cwd": "/work/proj",
+  "hook_event_name": "BeforeTool",
+  "timestamp": "2026-11-28T10:00:02.000Z",
+  "tool_name": "invoke_agent",
+  "tool_input": { "agent_name": "codebase_investigator", "prompt": "Map the auth flow." }
+}

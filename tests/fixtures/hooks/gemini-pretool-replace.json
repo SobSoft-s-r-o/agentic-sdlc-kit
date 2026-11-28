@@ -1,0 +1,15 @@
+{
+  "session_id": "7f3e0001",
+  "transcript_path": "",
+  "cwd": "/work/proj",
+  "hook_event_name": "BeforeTool",
+  "timestamp": "2026-11-28T10:00:03.000Z",
+  "tool_name": "replace",
+  "tool_input": {
+    "file_path": "/work/proj/src/c.ts",
+    "old_string": "a",
+    "new_string": "b",
+    "instruction": "Rename a to b",
+    "allow_multiple": false
+  }
+}
