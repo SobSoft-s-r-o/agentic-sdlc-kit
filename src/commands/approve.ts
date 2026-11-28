@@ -117,10 +117,12 @@ const msOf = (iso: string | undefined): number | undefined => {
 /**
  * When an approval recorded without proof (`--unverified`) counts as made. The state machine needs
  * it strictly after what it acts on (a stage's `publishedAt`, the `resultPublishedAt`, the
- * `reopenedAt`), and those are GitHub's stamps, so a local clock behind GitHub's would refuse a
- * legitimate approval. This is `now` when `now` is past every such stamp, and otherwise one
- * millisecond after the newest, so GitHub's stamps decide the order and a skewed local clock never
- * does. A stamp that is not a date is ignored.
+ * `reopenedAt`). The first two are GitHub's stamps, so a local clock behind GitHub's would refuse a
+ * legitimate approval; `reopenedAt` is stamped by the local clock of whoever reopened the task
+ * (`commitLoaded` passes `ctx.now()`), so it can be skewed either way. This is `now` when `now` is
+ * past every such stamp, and otherwise one millisecond after the newest. Because the newest of all
+ * the stamps is taken, the approval is never placed before anything it approves, whatever the skew
+ * of any clock. A stamp that is not a date is ignored.
  */
 export function unverifiedAt(state: TaskState, now: string): string {
   const stamps = [
