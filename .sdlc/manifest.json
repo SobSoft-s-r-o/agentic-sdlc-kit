@@ -99,7 +99,7 @@
     {
       "path": ".github/pull_request_template.md",
       "kind": "file",
-      "hash": "sha256:d74f5fbd4c95e861220c8bf50fa8d65867ceac7ab4a79a85fdb1729e7aa80707"
+      "hash": "sha256:7929bfc8778ff80f8e8d5403fdf085a4351ab6f853230161001c32275ef2ca19"
     },
     {
       "path": ".gitignore",

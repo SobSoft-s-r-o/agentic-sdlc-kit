@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -19,10 +19,17 @@ interface Manifest {
 }
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as Manifest;
 
+/** Every file under `dir` (a directory of the repository), as a path relative to the repository root. */
+function filesUnder(dir: string): string[] {
+  return readdirSync(join(root, dir), { recursive: true, encoding: 'utf8' })
+    .map(entry => join(dir, entry))
+    .filter(path => statSync(join(root, path)).isFile());
+}
+
 let packed: string[];
 beforeAll(async () => {
-  // `npm pack` takes `dist/` whole, so pack a fresh build instead of trusting a stale one.
-  await run('npm', ['run', 'build'], { cwd: root, maxBuffer: 16 * 1024 * 1024 });
+  // `npm pack` takes `dist/` whole. `tests/support/globalBuild.ts` built it once before this file started, so
+  // this runs no build of its own (two builds into `dist/` raced), and `--ignore-scripts` skips `prepare`.
   const { stdout } = await run('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
     cwd: root,
     maxBuffer: 16 * 1024 * 1024,
@@ -53,6 +60,20 @@ describe('npm tarball', () => {
     ]) {
       expect(packed, `${wanted} must be packed`).toContain(wanted);
     }
+  });
+
+  it('packs the whole build and every template, so the file count means something', () => {
+    // The compiled output of every source file, and nothing from `dist/` that no source file makes.
+    const compiled = filesUnder('src')
+      .filter(file => file.endsWith('.ts'))
+      .map(file => file.replace(/^src\//, 'dist/').replace(/\.ts$/, '.js'))
+      .sort();
+    expect(compiled.length).toBeGreaterThan(50);
+    expect(packed.filter(path => path.startsWith('dist/')).sort()).toEqual(compiled);
+    expect(packed.filter(path => path.startsWith('templates/')).sort()).toEqual(filesUnder('templates').sort());
+    // `files` whitelist (dist, templates, INSTALL.md, CHANGELOG.md) plus what npm always adds.
+    const others = packed.filter(path => !path.startsWith('dist/') && !path.startsWith('templates/')).sort();
+    expect(others).toEqual(['CHANGELOG.md', 'INSTALL.md', 'LICENSE', 'README.md', 'package.json']);
   });
 
   it('manifest names the repository', () => {

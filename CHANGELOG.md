@@ -14,10 +14,10 @@ Open-source packaging: the kit is published on npm, has CI and a release workflo
 
 - The package is published on npm as `agentic-sdlc-kit` (from 0.3.0), with provenance. `v0.1.0` and `v0.2.0` were GitHub releases only and never reached npm.
 - CI on every push to `main` and every pull request: typecheck, tests, build and a pack smoke test (`scripts/pack-smoke.mjs`: pack, install the tarball into an empty project, run the installed `sdlc`), on Ubuntu with Node 20, 22 and 24 and on macOS with Node 22.
-- A release workflow that publishes to npm from a version tag through trusted publishing (OIDC), without an npm token. It checks that the tag matches `package.json` and skips a version that is already published.
+- A release workflow that publishes to npm from a version tag through trusted publishing (OIDC), without an npm token. It checks that the tag matches `package.json`, runs typecheck, tests, build and the pack smoke test first, publishes a version containing `-` (a prerelease such as `0.4.0-rc.1`) under the `next` dist-tag instead of `latest`, and skips a version that is already published. The first publish is manual (`npm publish --provenance=false`, then `npm trust`); `CONTRIBUTING.md` has the steps.
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) and `SECURITY.md` (reports through GitHub private reporting).
 - An opt-in end-to-end suite, `npm run test:e2e`, that walks a task through `task new`, `stage publish`, an owner approval, `reconcile`, `task checkpoint` and a cancel against a real sandbox repository. It is skipped unless `SDLC_E2E_REPO` is set and is never part of `npm test`.
-- A shell rule `api-merge` (enforce only) for merging through `gh api .../merge`; owner-only commands are recognised when run as `node .../dist/cli.js` or `node_modules/.bin/sdlc`.
+- A shell rule `api-merge` (enforce only) for merging through `gh api .../merge` or a GraphQL `mergePullRequest` or `enablePullRequestAutoMerge` mutation (`gh pr merge --auto` without `--admin` stays allowed: branch protection governs it, see the threat model); owner-only commands are recognised when run as `node .../dist/cli.js` or `node_modules/.bin/sdlc`.
 - `reconcile` mirrors a PR body's `Scope: partial` to the `sdlc:partial` label on that PR, and removes it otherwise.
 - `gh` calls time out after 60 s (SIGTERM, then SIGKILL); a timed-out call counts as GitHub unreachable, so queueable commands go to the outbox.
 
@@ -30,7 +30,8 @@ Open-source packaging: the kit is published on npm, has CI and a release workflo
 - Hooks read `mode` from the main checkout's `sdlc.config.yaml`, so a worktree follows a mode change without a commit. Task-state lookups share a checkout cache and have tighter deadlines.
 - An owner approval is refused when the PR body was edited after the approving comment, and `--unverified` approvals are stamped no earlier than GitHub's own timestamps.
 - `reconcile` prints ignored owner commands, untracked issues and skipped tasks as one summary line; `--json` still lists each of them.
-- Labels are listed with pagination, so repositories with more than 100 labels are checked correctly.
+- `sdlc upgrade` and `sdlc uninstall` own only the exact hook commands the kit rendered, so a user hook that merely resembles the kit's is no longer replaced or removed.
+- Labels are listed with pagination, so repositories with more than 500 labels are checked correctly (the old code listed at most 500).
 - `sdlc doctor` reads Codex hook switches written as inline tables (`features = { hooks = false }`) and is split into per-area modules.
 - `sdlc sync` takes over a stale lock atomically, so concurrent syncs never run together, and releases a lock it cannot read back.
 - JSON items appended to a one-line array stay on one line; `worktree finish` names an ignored `.env/` directory correctly; a reused `stage publish` comment is reported.

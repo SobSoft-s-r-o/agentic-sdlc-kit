@@ -86,4 +86,20 @@ The kit is installed in its own repository, in `observe` mode, so its hooks and 
 
 ## Releases
 
-Releases are cut by the maintainers. Bump the version in `package.json`, move the `## [Unreleased]` entries of `CHANGELOG.md` under the new version, and push a tag `v<version>`. The `release` workflow checks that the tag matches `package.json`, runs the tests and publishes to npm through trusted publishing. It skips a version that is already on npm.
+Releases are cut by the maintainers. The package is published to npm by the `release` workflow, through trusted publishing: npm trusts the workflow file, so no npm token is stored in the repository.
+
+### Later releases
+
+Bump the version in `package.json`, move the `## [Unreleased]` entries of `CHANGELOG.md` under the new version, and push a `v*` tag, `v<version>`, that matches `package.json`. The `release` workflow checks that the tag matches, runs the tests, the typecheck, the build and the pack smoke test, and publishes. A version with a hyphen in it (a prerelease such as `0.4.0-rc.1`) is published under the `next` dist-tag instead of the default one. The workflow skips a version that is already on npm, so running a tag again is harmless.
+
+### First publish (bootstrap)
+
+npm needs the package to exist before it can trust a workflow, so the owner publishes the first version by hand. `publishConfig.provenance: true` in `package.json` makes a local `npm publish` fail, because provenance needs the OIDC token of a CI run, so the first publish turns it off:
+
+1. Make a clean checkout of the version's tag: a fresh clone, then `git checkout v<version>`, with no local edits or stray files.
+2. `npm ci` (it also builds `dist/`).
+3. `npm publish --provenance=false` (npm asks for a one-time password).
+4. `npm trust github agentic-sdlc-kit --file release.yml --repo SobSoft-s-r-o/agentic-sdlc-kit --allow-publish`. This needs npm 11.15.0 or newer.
+5. In the package settings on npmjs.com, enable "Require two-factor authentication and disallow tokens".
+
+From then on, every release is a pushed tag, as above.

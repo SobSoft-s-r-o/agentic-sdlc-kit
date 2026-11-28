@@ -1,8 +1,20 @@
 # Publishes the package to npm when a version tag (v*) is pushed.
 # Trusted publishing (OIDC): npm trusts this workflow file, so no npm token is stored in the repository.
-# Owner setup, once: publish the first version by hand, then
-#   npm trust github agentic-sdlc-kit --file release.yml --repo SobSoft-s-r-o/agentic-sdlc-kit --allow-publish
-# Two jobs: `test` runs the repository's code (dependencies, tests) with a read-only token and no OIDC;
+#
+# Later releases: bump the version in package.json, then push the tag v<version>. The tag must match package.json.
+# A version with a hyphen in it (0.4.0-rc.1) is published under the dist-tag `next`; any other version under the default tag.
+#
+# Bootstrap, once, by the owner: npm needs the package to exist before it can trust a workflow, so the first version
+# is published by hand. `publishConfig.provenance: true` in package.json makes a local `npm publish` fail (provenance
+# needs the OIDC token of a CI run), so the first publish turns it off:
+#   1. Make a clean checkout of the tag: a fresh clone, then `git checkout v<version>`, with no local edits or stray files.
+#   2. npm ci
+#   3. npm publish --provenance=false
+#   4. npm trust github agentic-sdlc-kit --file release.yml --repo SobSoft-s-r-o/agentic-sdlc-kit --allow-publish
+#      (needs npm 11.15.0 or newer)
+#   5. In the package settings on npmjs.com, enable "Require two-factor authentication and disallow tokens".
+#
+# Two jobs: `test` runs the repository's code (dependencies, tests, build, pack smoke) with a read-only token and no OIDC;
 # `publish` is the only job that can ask for an OIDC token, and it installs without running dependency scripts.
 # A version that is already on npm is skipped, so a re-run of a tag is harmless.
 # Actions are pinned to a full commit SHA (the tag in the comment), so a moved tag cannot change what runs.
@@ -40,6 +52,11 @@ jobs:
           fi
       - run: npm ci
       - run: npm test
+      # The same checks as CI, so a tag cannot publish what CI would have refused.
+      - run: npm run typecheck
+      - run: npm run build
+      # Packs the fresh build, installs the tarball into an empty project and runs the installed `sdlc`.
+      - run: node scripts/pack-smoke.mjs
 
   publish:
     needs: test
@@ -86,6 +103,12 @@ jobs:
             exit 1
           fi
       # publishConfig in package.json sets access public and provenance.
+      # A version with a hyphen is a prerelease: npm 11 refuses to publish it without a tag, and it must not become `latest`.
       - name: Publish to npm
         if: steps.published.outputs.skip != 'true'
-        run: npm publish
+        run: |
+          V="$(node -p "require('./package.json').version")"
+          case "$V" in
+            *-*) npm publish --tag next ;;
+            *) npm publish ;;
+          esac

@@ -15,4 +15,4 @@ Targets: {{targetsText}}
 
 <!-- Anything a reviewer or the owner should know: risks, follow-ups, decisions. -->
 
-Owner commands (/approve, /accept, /ran, /cancel) go in a plain comment, not in a review.
+<!-- Owner commands (/approve, /accept, /ran, /cancel <reason>) go in a plain comment, not in a review. -->

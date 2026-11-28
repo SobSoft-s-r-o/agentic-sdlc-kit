@@ -107,7 +107,7 @@ describe('renderGithub PR template', () => {
   it('tells the owner under Notes that commands go in a plain comment, not in a review', () => {
     const text = fileAt(render(cfgOf(MINIMAL)), PR_TEMPLATE_PATH)!.content;
     const notes = text.slice(text.indexOf('## Notes'));
-    expect(notes).toContain('Owner commands (/approve, /accept, /ran, /cancel) go in a plain comment, not in a review.');
+    expect(notes).toContain('<!-- Owner commands (/approve, /accept, /ran, /cancel <reason>) go in a plain comment, not in a review. -->');
     // A line of its own, not a Scope or Related line: the parser must not read anything in it.
     expect(parsePrBody(notes)).toEqual({ issues: [], scope: 'final', scopeRecognized: true, targets: [] });
   });

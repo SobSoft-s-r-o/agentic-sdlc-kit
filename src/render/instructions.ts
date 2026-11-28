@@ -75,10 +75,10 @@ export function releaseVersion(ref: string): string | undefined {
  * How the kit is run and installed for `kit_ref`. A release tag uses the registry (`agentic-sdlc-kit@1.2.3`), so the
  * install needs no build from git; a branch or a commit uses the repository (`github:...#<ref>`).
  */
-export function kitCommand(ref: string): { npx: string; devDependency: string; source: 'npm' | 'github' } {
+export function kitCommand(ref: string): { npx: string; source: 'npm' | 'github' } {
   const version = releaseVersion(ref);
-  const devDependency = version === undefined ? `${KIT_REPOSITORY}#${ref}` : `${KIT_PACKAGE}@${version}`;
-  return { npx: `npx -y ${devDependency}`, devDependency, source: version === undefined ? 'github' : 'npm' };
+  const spec = version === undefined ? `${KIT_REPOSITORY}#${ref}` : `${KIT_PACKAGE}@${version}`;
+  return { npx: `npx -y ${spec}`, source: version === undefined ? 'github' : 'npm' };
 }
 
 /** How each end condition reads after "Ends when". */

@@ -359,6 +359,8 @@ const GH_API_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 /** A REST endpoint that merges a pull request: `repos/<o>/<r>/pulls/<n>/merge`, with or without host, slash or query. */
 const MERGE_ENDPOINT = /(?:^|\/)pulls\/[^/]+\/merge\/?(?:[?#].*)?$/;
 const GRAPHQL_ENDPOINT = /(?:^|\/)graphql\/?$/;
+/** The GraphQL mutations that merge a pull request now or queue it to merge; case-sensitive, as the API names them. */
+const MERGE_MUTATIONS: readonly string[] = ['mergePullRequest', 'enablePullRequestAutoMerge'];
 
 /** The value `arg` gives the method option of `gh api`: `-X M`, `-XM`, `-X=M`, `--method M`, `--method=M`; the last one wins. */
 function methodOf(arg: string, next: string | undefined): string | undefined {
@@ -370,11 +372,12 @@ function methodOf(arg: string, next: string | undefined): string | undefined {
 
 /**
  * Whether the arguments of `gh api` (after `api`) merge a pull request: the REST endpoint
- * `.../pulls/<n>/merge`, or a GraphQL call that mentions `mergePullRequest` in any word, the
- * `query=` field included. A method that is explicitly GET or HEAD only reads, so it is let through
- * (`gh api` otherwise picks POST when it has fields, and the merge endpoint is a PUT). The words are
- * read as written, not through `withoutTextValues`, which would drop the value of `-F query=...`. A
- * query read from a file or from stdin (`-f query=@file`, `--input`) is not seen.
+ * `.../pulls/<n>/merge`, or a GraphQL call that mentions `mergePullRequest` or
+ * `enablePullRequestAutoMerge` in any word, the `query=` field included. A method that is
+ * explicitly GET or HEAD only reads, so it is let through (`gh api` otherwise picks POST when it has
+ * fields, and the merge endpoint is a PUT). The words are read as written, not through
+ * `withoutTextValues`, which would drop the value of `-F query=...`. A query read from a file or
+ * from stdin (`-f query=@file`, `--input`) is not seen.
  */
 function mergesThroughApi(args: readonly string[]): boolean {
   let endpoint: string | undefined;
@@ -393,7 +396,7 @@ function mergesThroughApi(args: readonly string[]): boolean {
   if (endpoint === undefined) return false;
   if (method !== undefined && ['GET', 'HEAD'].includes(method.toUpperCase())) return false;
   if (MERGE_ENDPOINT.test(endpoint)) return true;
-  return GRAPHQL_ENDPOINT.test(endpoint) && args.some(arg => arg.includes('mergePullRequest'));
+  return GRAPHQL_ENDPOINT.test(endpoint) && args.some(arg => MERGE_MUTATIONS.some(mutation => arg.includes(mutation)));
 }
 
 /** `sdlc`'s arguments after its global options (`--config <path>`, `--json`, ...). */

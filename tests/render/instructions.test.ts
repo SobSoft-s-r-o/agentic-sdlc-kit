@@ -119,7 +119,7 @@ describe('kitCommand', () => {
     { ref: 'v0.3.0.1', source: 'github', spec: `${GITHUB_KIT}#v0.3.0.1` },
     { ref: 'v0.3.0/evil', source: 'github', spec: `${GITHUB_KIT}#v0.3.0/evil` },
   ] as const)('kitCommand picks the source: $ref is $source', ({ ref, source, spec }) => {
-    expect(kitCommand(ref)).toEqual({ npx: `npx -y ${spec}`, devDependency: spec, source });
+    expect(kitCommand(ref)).toEqual({ npx: `npx -y ${spec}`, source });
   });
 });
 

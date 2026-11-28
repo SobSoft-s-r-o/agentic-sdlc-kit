@@ -11,6 +11,14 @@ const read = (name: string): string => (existsSync(join(root, name)) ? readFileS
 const CHECKOUT = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1';
 const SETUP_NODE = 'actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1';
 const PRIVATE_REPORT = 'https://github.com/SobSoft-s-r-o/agentic-sdlc-kit/security/advisories/new';
+/** The owner's bootstrap of the first publish, which `release.yml` and CONTRIBUTING.md must both spell out. */
+const BOOTSTRAP_STEPS = [
+  'npm ci',
+  'npm publish --provenance=false',
+  'npm trust github agentic-sdlc-kit --file release.yml --repo SobSoft-s-r-o/agentic-sdlc-kit --allow-publish',
+  '11.15.0',
+  'Require two-factor authentication and disallow tokens',
+];
 
 interface Step {
   name?: string;
@@ -54,7 +62,7 @@ describe('open-source files', () => {
     const template = read('.github/pull_request_template.md');
     expect(template).toMatch(/^Related to #$/m);
     expect(template).toMatch(/^Scope: final$/m);
-    expect(template).toContain('Owner commands (/approve, /accept, /ran, /cancel) go in a plain comment, not in a review.');
+    expect(template).toContain('<!-- Owner commands (/approve, /accept, /ran, /cancel <reason>) go in a plain comment, not in a review. -->');
     const manifest = JSON.parse(read('.sdlc/manifest.json')) as { entries: Array<{ path: string; kind: string }> };
     expect(manifest.entries).toContainEqual(expect.objectContaining({ path: '.github/pull_request_template.md', kind: 'file' }));
   });
@@ -104,6 +112,20 @@ describe('open-source files', () => {
     ]) {
       expect(contributing, term).toContain(term);
     }
+  });
+
+  it('CONTRIBUTING.md "Releases" gives the bootstrap publish and the later releases', () => {
+    const contributing = read('CONTRIBUTING.md');
+    const releases = contributing.slice(contributing.search(/^## Releases/m));
+    expect(releases).not.toBe('');
+    for (const term of BOOTSTRAP_STEPS) expect(releases, term).toContain(term);
+    // `publishConfig.provenance: true` makes a local publish fail, which is why the first one turns it off.
+    expect(releases).toContain('provenance');
+    expect(releases).toContain('clean checkout');
+    expect(releases).toMatch(/tag `v<version>`|`v\*` tag/);
+    // The steps run in this order.
+    const positions = BOOTSTRAP_STEPS.map(term => releases.indexOf(term));
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
   });
 
   it('CHANGELOG.md keeps the Keep a Changelog layout, newest first', () => {
@@ -221,20 +243,47 @@ describe('workflows', () => {
       expect(order(test).findIndex(entry => entry.includes('GITHUB_REF_NAME'))).toBeLessThan(order(test).indexOf('npm test'));
     });
 
+    it('runs what CI runs before it publishes: tests, typecheck, build and the pack smoke, read-only', () => {
+      const commands = commandsOf(test).filter(command => !command.includes('GITHUB_REF_NAME'));
+      expect(commands).toEqual(['npm ci', 'npm test', 'npm run typecheck', 'npm run build', 'node scripts/pack-smoke.mjs']);
+      expect(test.permissions).toEqual({ contents: 'read' });
+    });
+
+    it('explains the bootstrap publish in its header, before the first workflow key', () => {
+      const header = text.slice(0, text.indexOf('\nname: release'));
+      for (const term of BOOTSTRAP_STEPS) expect(header, term).toContain(term);
+      expect(header).toContain('provenance');
+      expect(header).toContain('clean checkout');
+    });
+
+    it('publishes a version with a hyphen under the next tag and any other under the default tag', () => {
+      const step = publish.steps.find(entry => entry.name === 'Publish to npm');
+      expect(step?.if).toBe("steps.published.outputs.skip != 'true'");
+      const script = step?.run ?? '';
+      // One decision, on the version in package.json: a hyphen means a prerelease.
+      expect(script).toContain(`require('./package.json').version`);
+      expect(script).toMatch(/case "\$V" in\s+\*-\*\)\s+npm publish --tag next\s*;;\s+\*\)\s+npm publish\s*;;\s+esac/);
+      expect(script).not.toContain('--tag latest');
+      expect(script.match(/npm publish/g)).toHaveLength(2);
+    });
+
     it('installs without dependency scripts, builds, and publishes unless the version is already on npm', () => {
       const steps = order(publish);
       expect(steps).toContain('npm ci --ignore-scripts');
       expect(commandsOf(publish)).not.toContain('npm ci');
       expect(commandsOf(publish)).not.toContain('npm test');
       expect(steps.indexOf('npm ci --ignore-scripts')).toBeLessThan(steps.indexOf('npm run build'));
-      expect(steps.indexOf('npm run build')).toBeLessThan(steps.indexOf('npm publish'));
+      const publishAt = publish.steps.findIndex(step => step.name === 'Publish to npm');
+      expect(publishAt).toBeGreaterThan(-1);
+      expect(steps.indexOf('npm run build')).toBeLessThan(publishAt);
       const probe = publish.steps.find(step => step.id === 'published');
       expect(probe?.run).toContain('npm view');
       expect(probe?.run).toContain('agentic-sdlc-kit@');
       expect(probe?.run).toContain('skip=true');
-      expect(steps.findIndex(entry => entry.includes('npm view'))).toBeLessThan(steps.indexOf('npm publish'));
-      const published = publish.steps.filter(step => step.run?.trim() === 'npm publish');
+      expect(steps.findIndex(entry => entry.includes('npm view'))).toBeLessThan(publishAt);
+      const published = publish.steps.filter(step => step.run?.includes('npm publish'));
       expect(published).toHaveLength(1);
+      expect(published[0]?.name).toBe('Publish to npm');
       expect(published[0]?.if).toBe("steps.published.outputs.skip != 'true'");
     });
 
