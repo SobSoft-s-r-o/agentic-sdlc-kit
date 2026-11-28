@@ -30,13 +30,25 @@ git diff tests/golden
 
 ## End-to-end tests
 
-An opt-in suite runs the task flow against a real GitHub repository with the real `gh`. It is never part of `npm test`. Use a throwaway repository you own, never a repository you care about:
+An opt-in suite runs the task flow against a real GitHub repository with the real `gh`. It is never part of `npm test`: `vitest.config.ts` only includes `tests/**/*.test.ts`, and the e2e files are `tests/e2e/*.e2e.ts`, run with `vitest.e2e.config.ts`. Use a throwaway repository you own, never a repository you care about:
 
 ```sh
 SDLC_E2E_REPO=<owner>/<name> npm run test:e2e
 ```
 
-Without `SDLC_E2E_REPO` every e2e test is skipped.
+Without `SDLC_E2E_REPO` every e2e test is skipped and the command exits 0.
+
+| Variable | Meaning |
+| --- | --- |
+| `SDLC_E2E_REPO` | Required. The sandbox repository, `owner/name`. |
+| `SDLC_E2E_PROJECT_OWNER` | The login that owns the project. Defaults to the owner of the repository. |
+| `SDLC_E2E_PROJECT` | The number of an existing Projects v2 board to use. Optional: without it the suite creates a project named `sdlc-e2e-<random>` with `gh project create` and prints its number. |
+
+You need `gh` logged in with the `repo` and `project` scopes (`gh auth refresh -s project` adds the second). The logged-in user becomes the only owner in the suite's config, which runs in `observe` mode with the task types `tooling` and `spike`. The commands run in-process, as `src/cli.ts` calls them, with `gh` calls refused for any repository other than the sandbox.
+
+The one test, `issue lifecycle`, walks a spike task through `task new`, `stage publish`, an owner `/approve` comment followed by `reconcile` (recorded as `unverified`, since the comment is by the tool's own login in `observe` mode), `task checkpoint` and a cancel with the reason `e2e`. It checks the issue, its labels, the state comment and the board item at each step. A test has 180 seconds, because every step is a real network round trip.
+
+The suite writes to the sandbox repository (it creates the labels `sdlc:task`, `sdlc:partial`, `type:tooling`, `type:spike` and `e2e`) and to one board: the one you name or the one it creates. Every issue it opens carries the label `e2e` and a title starting with `sdlc-e2e-`, and `afterAll` closes any of them still open. It never deletes the repository, the issues or the project; delete a throwaway project and repository yourself when you are done. It never touches a project it did not create or that you did not name.
 
 ## Commit style
 

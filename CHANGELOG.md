@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - CI on every push to `main` and every pull request: typecheck, tests, build and a pack smoke test (`scripts/pack-smoke.mjs`: pack, install the tarball into an empty project, run the installed `sdlc`), on Ubuntu with Node 20, 22 and 24 and on macOS with Node 22.
 - A release workflow that publishes to npm from a version tag through trusted publishing (OIDC), without an npm token. It checks that the tag matches `package.json` and skips a version that is already published.
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) and `SECURITY.md` (reports through GitHub private reporting).
+- An opt-in end-to-end suite, `npm run test:e2e`, that walks a task through `task new`, `stage publish`, an owner approval, `reconcile`, `task checkpoint` and a cancel against a real sandbox repository. It is skipped unless `SDLC_E2E_REPO` is set and is never part of `npm test`.
 
 ### Changed
 
