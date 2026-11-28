@@ -67,6 +67,44 @@ describe('shellWords', () => {
     expect(shellWords("echo it's; rm -rf x")).toEqual([['echo', "it's"], ['rm', '-rf', 'x']]);
   });
 
+  it('skips heredoc bodies, whatever the delimiter quoting', () => {
+    expect(shellWords('cat <<EOF > x.md\nrm -rf is bad\nEOF\nls')).toEqual([['cat', '<<EOF', '>', 'x.md'], ['ls']]);
+    expect(shellWords("cat <<'EOF'\nit's $(claude -p x)\nEOF\nls")).toEqual([['cat', '<<EOF'], ['ls']]);
+    expect(shellWords('cat <<"EOF"\na\nEOF\nls')).toEqual([['cat', '<<EOF'], ['ls']]);
+    expect(shellWords('cat << EOF\na\nEOF\nls')).toEqual([['cat', '<<EOF'], ['ls']]);
+    expect(shellWords('cat <<-EOF\n\ta\n\tEOF\nls')).toEqual([['cat', '<<-EOF'], ['ls']]);
+    expect(shellWords('cat <<A <<B\na\nA\nb\nB\nls')).toEqual([['cat', '<<A', '<<B'], ['ls']]);
+  });
+
+  it('skips a heredoc body inside $( ) and continues after the closing parenthesis', () => {
+    expect(shellWords(`echo "$(cat <<'EOF'\nDon't merge yet\nEOF\n)" && ls`)).toEqual([
+      ['echo', ''],
+      ['cat', '<<EOF'],
+      ['ls'],
+    ]);
+  });
+
+  it('keeps a line that only looks like the delimiter inside the body', () => {
+    expect(shellWords('cat <<EOF\nEOF2\n EOF\nEOF\nls')).toEqual([['cat', '<<EOF'], ['ls']]);
+  });
+
+  it('reads a heredoc that never ends, and a here-string, as ordinary commands', () => {
+    expect(shellWords('cat <<EOF\nrm -rf x')).toEqual([['cat', '<<EOF'], ['rm', '-rf', 'x']]);
+    expect(shellWords('cat <<< "a b"\nls')).toEqual([['cat', '<<<', 'a b'], ['ls']]);
+    expect(shellWords('(( x = 1<<2 ))\ngit push --force')).toEqual([
+      ['x', '=', '1<<2'],
+      ['git', 'push', '--force'],
+    ]);
+  });
+
+  it('reads a double quote that is never closed as a literal character', () => {
+    expect(shellWords('echo 5" screen; git push --force')).toEqual([
+      ['echo', '5"', 'screen'],
+      ['git', 'push', '--force'],
+    ]);
+    expect(shellWords('echo "a $(claude -p x) b')).toEqual([['echo', '"a', '', 'b'], ['claude', '-p', 'x']]);
+  });
+
   it('returns nothing for an empty command', () => {
     expect(shellWords('')).toEqual([]);
     expect(shellWords('  \n ; ')).toEqual([]);
@@ -155,6 +193,55 @@ const TABLE: ReadonlyArray<readonly [string, string[]]> = [
   ['git commit -m "$(cat <<\'EOF\'\nfix: it\'s done\nEOF\n)" && gh pr merge 1 --admin', ['admin-merge']],
   ['git commit -m "note `claude -p x` here"', ['ai-cli']],
   ['git commit -m \'note `claude -p x` here\'', []],
+  // heredocs: the body is data, and what follows it is still read
+  ['git commit -m "$(cat <<\'EOF\'\nDon\'t merge yet\nEOF\n)" && git push --force origin x && echo \'done\'', ['force-push']],
+  ['gh pr create --title \'x\' --body "$(cat <<\'EOF\'\nIt\'s ready\nEOF\n)" && gh pr merge 3 --admin && echo \'ok\'', ['admin-merge']],
+  ['cat <<EOF > x.md\nrm -rf is bad\nEOF', []],
+  ['git commit -F - <<EOF\ngit push --force is now blocked\nEOF', []],
+  ['git commit -m "$(cat <<\'EOF\'\ngit push --force is now blocked\nEOF\n)"', []],
+  ['cat <<EOF > n.txt\nA 5" screen\nEOF\ngit push --force', ['force-push']],
+  ['echo 5" screen; git push --force', ['force-push']],
+  ['cat <<EOF\nEOF\nrm -rf x', ['rm-rf']],
+  ['(( x = 1<<2 ))\ngit push --force', ['force-push']],
+  // shells and eval run their argument
+  ['bash -c "gh pr merge 1 --admin"', ['admin-merge']],
+  ["bash -lc 'claude -p hi'", ['ai-cli']],
+  ["sh -c 'git push --force'", ['force-push']],
+  ['sudo -u bob zsh -ec "rm -rf x"', ['rm-rf']],
+  ['bash --norc -c "git push -f"', ['force-push']],
+  ['eval "git push --force"', ['force-push']],
+  ['eval git push --force', ['force-push']],
+  ['bash -c "echo hi"', []],
+  ['bash -c "echo claude"', []],
+  ['bash script.sh "git push --force"', []],
+  ['bash -x script.sh', []],
+  ['bash -c', []],
+  ["bash -c 'bash -c \"git push --force\"'", ['force-push']],
+  // more wrappers
+  ['timeout 300 claude -p hi', ['ai-cli']],
+  ['timeout -s KILL 5 gh pr merge 1 --admin', ['admin-merge']],
+  ['timeout --foreground 5 git push -f', ['force-push']],
+  ['nice -n 10 claude -p x', ['ai-cli']],
+  ['nice -10 rm -rf x', ['rm-rf']],
+  ['stdbuf -oL claude -p x', ['ai-cli']],
+  ['stdbuf -i0 -o L git push --force', ['force-push']],
+  ['xargs rm -rf < list', ['rm-rf']],
+  ['git ls-files | xargs -n 1 -I {} rm -rf {}', ['rm-rf']],
+  ['xargs grep claude', []],
+  ['timeout 5', []],
+  // the value of a message option is text, not a flag
+  ['git commit -m "fix" -m "-n flag docs"', []],
+  ['git commit -m --no-verify', []],
+  ['git commit --message "--no-verify"', []],
+  ['git commit -am "x"', []],
+  ['git commit -am "--no-verify"', []],
+  ['git commit -nm "x"', ['no-verify']],
+  ['git commit -m "x" --no-verify', ['no-verify']],
+  ['gh pr create --body "--admin explained"', []],
+  ['gh pr merge 3 --body "--admin"', []],
+  ['gh pr merge 3 -b "--admin" --squash', []],
+  ['gh pr merge 3 --body x --admin', ['admin-merge']],
+  ['git -c user.name=x commit -m "--no-verify"', []],
   ['', []],
   ['   ', []],
 ];
@@ -187,6 +274,13 @@ describe('shellViolations', () => {
   it('names the CLI that was launched, whichever way it was reached', () => {
     expect(shellViolations('pnpm dlx @google/gemini-cli')[0]?.text).toContain('(gemini)');
     expect(shellViolations('/usr/local/bin/aider --yes')[0]?.text).toContain('(aider)');
+  });
+
+  it('follows shells inside shells a few levels deep and no further', () => {
+    const wrap = (command: string): string => `bash -c '${command.replace(/'/g, `'\\''`)}'`;
+    const rules = (command: string): string[] => shellViolations(command).map(v => v.rule);
+    expect(rules(wrap(wrap(wrap('git push --force'))))).toEqual(['force-push']);
+    expect(rules(wrap(wrap(wrap(wrap('git push --force')))))).toEqual([]);
   });
 
   it('reports one violation per distinct text, in the order the rules were found', () => {
