@@ -5,10 +5,11 @@ import { join } from 'node:path';
 import { stringify } from 'yaml';
 import type { CommandContext } from '../../src/commands/context.js';
 import { loadConfig, type Config } from '../../src/config/schema.js';
-import { defaultGhRunner, GhError, ghJson, ghText, type GhRunner } from '../../src/github/gh.js';
+import { GhError, ghJson, ghText, type GhRunner } from '../../src/github/gh.js';
 import { ensureBoard } from '../../src/github/board.js';
 import { GitHubTracker, type GitHubTrackerOptions } from '../../src/github/githubTracker.js';
 import { ensureLabels } from '../../src/install/provision.js';
+import { sandboxRunner } from './guard.js';
 
 /** The label on every issue the suite opens; `afterAll` closes the open ones that carry it. */
 export const E2E_LABEL = 'e2e';
@@ -39,34 +40,6 @@ export function readE2eEnv(env: NodeJS.ProcessEnv = process.env): E2eEnv | undef
     repo,
     projectOwner: env.SDLC_E2E_PROJECT_OWNER?.trim() || (repo.split('/')[0] as string),
     ...(projectText ? { project: Number(projectText) } : {}),
-  };
-}
-
-/** The repositories a `gh` argument list names, lowercase: `--repo X`, `-R X`, `--repo=X` and `repos/X/...`. */
-export function namedRepos(args: readonly string[]): string[] {
-  const names: string[] = [];
-  args.forEach((arg, i) => {
-    const flag = arg === '--repo' || arg === '-R' ? args[i + 1] : arg.startsWith('--repo=') ? arg.slice('--repo='.length) : undefined;
-    if (flag) names.push(flag.toLowerCase());
-    const endpoint = /^repos\/([^/?]+\/[^/?]+)/.exec(arg);
-    if (endpoint) names.push((endpoint[1] as string).toLowerCase());
-  });
-  return names;
-}
-
-/**
- * A runner that refuses any call naming a repository other than the sandbox, so a code path that
- * strayed (a missing `--repo`, a hard-coded repository) fails the suite instead of writing elsewhere.
- * Calls that name none (GraphQL, `gh api user`, `gh project ...`) pass through.
- */
-export function sandboxRunner(repo: string, inner: GhRunner = defaultGhRunner): GhRunner {
-  const sandbox = repo.toLowerCase();
-  return (args, input) => {
-    const stray = namedRepos(args).find(name => name !== sandbox);
-    if (stray !== undefined) {
-      return Promise.reject(new Error(`e2e guard: refusing a gh call on ${stray}; the sandbox is ${repo}`));
-    }
-    return inner(args, input);
   };
 }
 
@@ -123,7 +96,12 @@ export interface Sandbox {
   commentOn(issue: number, body: string): Promise<string>;
   /** Waits, for the clock of GitHub, which stamps comments to the second. */
   pause(ms?: number): Promise<void>;
-  /** Closes the open issues the suite opened and removes the scratch directory; never deletes the repository or the project. */
+  /**
+   * Closes the open issues the suite opened (each on its own, so one failure leaves the others
+   * closed), then, best-effort, any other open `e2e` issue of this run, and removes the scratch
+   * directory. It never deletes the repository or the project. It rejects, after trying everything,
+   * when an issue of this run could not be closed.
+   */
   cleanup(): Promise<void>;
 }
 
@@ -145,13 +123,70 @@ async function createProject(run: GhRunner, owner: string, runId: string): Promi
 }
 
 /**
+ * Closes the open issues of one run, as "not planned", and returns what could not be closed.
+ * First the issues in `opened` (their creation was seen), each on its own, so a failure leaves the
+ * others closed. Then, best-effort, any other open `e2e` issue whose title starts with
+ * `titlePrefix` (its creation finished on GitHub but not here); a scan that fails is a warning, not
+ * an error, but a stray it finds and cannot close is an error. Never deletes anything.
+ */
+export async function closeRunIssues(
+  run: GhRunner,
+  repo: string,
+  opened: readonly number[],
+  titlePrefix: string,
+  warnings: string[],
+): Promise<string[]> {
+  const errors: string[] = [];
+  const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+  const closeIfOpen = async (issue: number): Promise<void> => {
+    let open = true;
+    try {
+      const row = await ghJson<{ state: string }>(run, ['issue', 'view', String(issue), '--repo', repo, '--json', 'state']);
+      open = row.state.toUpperCase() === 'OPEN';
+    } catch {
+      // Unreadable: try to close it anyway.
+    }
+    if (open) await ghText(run, ['issue', 'close', String(issue), '--repo', repo, '--reason', 'not planned']);
+  };
+
+  const attempted = new Set<number>();
+  for (const issue of opened) {
+    attempted.add(issue);
+    try {
+      await closeIfOpen(issue);
+    } catch (error) {
+      errors.push(`#${issue} was not closed: ${reason(error)}`);
+    }
+  }
+  try {
+    const strays =
+      (await ghJson<{ number: number; title: string }[] | undefined>(run, [
+        'issue', 'list', '--repo', repo, '--label', E2E_LABEL, '--state', 'open', '--json', 'number,title', '--limit', '100',
+      ])) ?? [];
+    for (const { number, title } of strays) {
+      if (attempted.has(number) || !title.startsWith(titlePrefix)) continue;
+      try {
+        await closeIfOpen(number);
+      } catch (error) {
+        errors.push(`#${number} was not closed: ${reason(error)}`);
+      }
+    }
+  } catch (error) {
+    warnings.push(`the scan for other open e2e issues of this run failed: ${reason(error)}`);
+  }
+  return errors;
+}
+
+/**
  * Sets the sandbox up: reads who is logged in, creates the project when none is given, writes the
  * config (observe mode, the login as the only owner, task types `tooling` and `spike`) and makes
  * sure the labels and the board fields exist. Everything is written to the sandbox repository and
  * to the one project, and nowhere else.
  */
 export async function createSandbox(env: E2eEnv): Promise<Sandbox> {
-  const run = sandboxRunner(env.repo);
+  // The projects the suite owns: the one it was given, and the one it creates. The guard refuses the rest.
+  const projects = new Set<number>(env.project === undefined ? [] : [env.project]);
+  const run = sandboxRunner({ repo: env.repo, projectOwner: env.projectOwner, projects });
   const runId = randomBytes(4).toString('hex');
   const dir = mkdtempSync(join(tmpdir(), 'sdlc-e2e-'));
   const opened: number[] = [];
@@ -161,6 +196,7 @@ export async function createSandbox(env: E2eEnv): Promise<Sandbox> {
     if (!login) throw new Error('gh is not logged in: run "gh auth login"');
     const ownerKind = (await ghText(run, ['api', `users/${env.projectOwner}`, '-q', '.type'])).trim();
     const projectNumber = env.project ?? (await createProject(run, env.projectOwner, runId));
+    projects.add(projectNumber);
 
     const configPath = join(dir, 'sdlc.config.yaml');
     writeFileSync(
@@ -232,20 +268,13 @@ export async function createSandbox(env: E2eEnv): Promise<Sandbox> {
       },
       pause: (ms = 2000) => sleepFor(ms),
       async cleanup() {
+        let errors: string[];
         try {
-          // The issues whose creation this run saw, plus any open `e2e` issue of this run whose creation
-          // finished on GitHub but not here (the call failed after the issue existed).
-          const strays = await ghJson<{ number: number; title: string }[] | undefined>(run, [
-            'issue', 'list', '--repo', env.repo, '--label', E2E_LABEL, '--state', 'open', '--json', 'number,title', '--limit', '100',
-          ]);
-          const numbers = new Set([...opened, ...(strays ?? []).filter(row => row.title.startsWith(titlePrefix)).map(row => row.number)]);
-          for (const issue of numbers) {
-            if ((await view(issue)).state.toUpperCase() !== 'OPEN') continue;
-            await ghText(run, ['issue', 'close', String(issue), '--repo', env.repo, '--reason', 'not planned']);
-          }
+          errors = await closeRunIssues(run, env.repo, opened, titlePrefix, warnings);
         } finally {
           rmSync(dir, { recursive: true, force: true });
         }
+        if (errors.length > 0) throw new Error(`e2e cleanup left issues open in ${env.repo}:\n${errors.join('\n')}`);
       },
     };
   } catch (error) {

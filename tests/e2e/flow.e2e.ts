@@ -16,6 +16,10 @@ import { createSandbox, readE2eEnv, type Sandbox } from './support.js';
 // GitHubTracker and the real `gh`), against one sandbox repository and one Projects v2 board.
 const env = readE2eEnv();
 
+/** A board status as compared here: GitHub prints an option as it was named, which need not match the case the tool wrote. */
+const sameStatus = (actual: string | undefined, expected: string | undefined): void =>
+  expect((actual ?? '').trim().toLowerCase()).toBe((expected ?? '').trim().toLowerCase());
+
 describe.skipIf(env === undefined)('e2e: task flow against a sandbox repository', () => {
   let sandbox: Sandbox;
 
@@ -24,9 +28,13 @@ describe.skipIf(env === undefined)('e2e: task flow against a sandbox repository'
   });
 
   afterAll(async () => {
-    // Closes what is still open; the repository and the project are never deleted.
-    await sandbox?.cleanup();
-    for (const warning of sandbox?.warnings ?? []) console.warn(`e2e: ${warning}`);
+    // Closes what is still open; the repository and the project are never deleted. The warnings
+    // are printed even when the cleanup rejects.
+    try {
+      await sandbox?.cleanup();
+    } finally {
+      for (const warning of sandbox?.warnings ?? []) console.warn(`e2e: ${warning}`);
+    }
   });
 
   it('issue lifecycle', async () => {
@@ -47,7 +55,7 @@ describe.skipIf(env === undefined)('e2e: task flow against a sandbox repository'
     expect(stateComment?.author.toLowerCase()).toBe(login.toLowerCase());
     const first = await ctx.tracker.getTask(issue);
     expect(first.state).toMatchObject({ issue, type: 'spike', phase: 'intake', status: 'in_progress', summary: 'e2e issue lifecycle' });
-    expect((await sandbox.boardItem(title))?.status).toBe(projectTask(first.state, spike).fields.status);
+    sameStatus((await sandbox.boardItem(title))?.status, projectTask(first.state, spike).fields.status);
 
     // 2. stage publish: the summary is an issue comment, and the task waits on the owner.
     const summaryFile = join(sandbox.dir, 'intake.md');
@@ -90,7 +98,7 @@ describe.skipIf(env === undefined)('e2e: task flow against a sandbox repository'
     expect(done).toMatchObject({ issueOpen: false, closeReason: 'not_planned' });
     expect(done.state).toMatchObject({ status: 'done', outcome: 'cancelled', cancelReason: 'e2e' });
     expect((await ctx.tracker.listComments(issue)).some(comment => comment.body.startsWith('### Cancelled'))).toBe(true);
-    expect((await sandbox.boardItem(title))?.status).toBe(projectTask(done.state, spike).fields.status);
+    sameStatus((await sandbox.boardItem(title))?.status, projectTask(done.state, spike).fields.status);
 
     // Nothing is left for reconcile to repair.
     const settled = await reconcile(ctx, { issue });
