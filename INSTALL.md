@@ -7,7 +7,7 @@ Rules for the whole install:
 - Ask the install questions one topic at a time, each with the default you detected, and wait for the answer. Do not batch them.
 - The installer never commits, pushes or writes outside the repository. You commit; the owner runs the steps in Step 7.
 - No secret goes into a file, a commit, a chat message or a log. Never ask the owner to paste a token to you.
-- `<ref>` is the kit version to install: a release tag such as `v0.1.0`, or `main`.
+- `<ref>` is the kit version to install: a release tag such as `v0.2.0`, or `main`.
 - How to run `sdlc`: until it is installed (Step 4), as `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> <command>`. After the project dependency of Step 4, as `npx --no-install sdlc <command>`: a dev dependency lives in `node_modules/.bin`, which is not on the PATH, so plain `sdlc` works only after a global install. Elsewhere in this document `sdlc <command>` in running text means whichever form applies.
 
 ## Step 1: Preflight
@@ -128,7 +128,7 @@ Set `kit_ref` to the `<ref>` you installed from: the generated instructions and 
 version: 1
 harnesses: [claude, codex]
 mode: observe                 # observe | enforce
-kit_ref: v0.1.0               # the ref you installed from
+kit_ref: v0.2.0               # the ref you installed from
 github:
   repo: owner/name
   default_branch: main

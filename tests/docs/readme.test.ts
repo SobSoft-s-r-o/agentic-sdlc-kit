@@ -183,7 +183,7 @@ describe('README', () => {
 
   it('walks through the install in the order that works', () => {
     const walkthrough = readme.slice(readme.search(/^## Two-minute walkthrough/m), readme.search(/^## CLI/m));
-    expect(walkthrough).toContain('`<ref>` is the kit version: a release tag such as `v0.1.0`, or `main`');
+    expect(walkthrough).toContain('`<ref>` is the kit version: a release tag such as `v0.2.0`, or `main`');
     const steps = ['doctor --preflight', 'config suggest --write', 'set kit_ref to <ref>', 'init --dry-run', 'init  ', 'set github.project.number to N', 'npm install --save-dev', 'npx --no-install sdlc doctor'];
     const positions = steps.map(step => walkthrough.indexOf(step));
     expect(positions.map((position, index) => (position < 0 ? steps[index] : ''))).toEqual(steps.map(() => ''));

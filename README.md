@@ -18,7 +18,7 @@ The agent runs the preflight, detects your setup, asks you the install questions
 
 ## Two-minute walkthrough
 
-Run these yourself instead, from the root of a git repository with `gh` logged in. `<ref>` is the kit version: a release tag such as `v0.1.0`, or `main`.
+Run these yourself instead, from the root of a git repository with `gh` logged in. `<ref>` is the kit version: a release tag such as `v0.2.0`, or `main`.
 
 ```sh
 npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> doctor --preflight       # git, Node, gh, repository
