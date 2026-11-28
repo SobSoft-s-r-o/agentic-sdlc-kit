@@ -94,7 +94,7 @@ describe('ensureLabels', () => {
     const result = await ensureLabels(run, cfgOf(), { dryRun: false });
     expect(result).toEqual({ created: ['sdlc:partial', 'type:analysis'], existing: ['sdlc:task', 'type:tooling'] });
     expect(run.calls.map(args => args.slice(0, 3))).toEqual([
-      ['api', 'repos/acme/shop/labels', '--paginate'],
+      ['api', 'repos/acme/shop/labels?per_page=100', '--paginate'],
       ['label', 'create', 'sdlc:partial'],
       ['label', 'create', 'type:analysis'],
     ]);
@@ -125,7 +125,7 @@ describe('ensureLabels', () => {
   it('reads every label of the repository through the paginated API, not a first page of 500', async () => {
     const run = fakeGh([labelListStep([])]);
     await ensureLabels(run, cfgOf(), { dryRun: true });
-    expect(run.calls).toEqual([['api', 'repos/acme/shop/labels', '--paginate', '--jq', '.[].name']]);
+    expect(run.calls).toEqual([['api', 'repos/acme/shop/labels?per_page=100', '--paginate', '--jq', '.[].name']]);
   });
 
   it('labels beyond 500 are seen', async () => {
@@ -142,7 +142,7 @@ describe('ensureLabels', () => {
 
   it('ignores blank lines and Windows line ends in the listing', async () => {
     const run = fakeGh([
-      { match: ['api', 'repos/acme/shop/labels'], stdout: '\nsdlc:task\r\n\r\nsdlc:partial\r\ntype:tooling\n type:analysis \n' },
+      { match: ['api', 'repos/acme/shop/labels?per_page=100'], stdout: '\nsdlc:task\r\n\r\nsdlc:partial\r\ntype:tooling\n type:analysis \n' },
     ]);
     const result = await ensureLabels(run, cfgOf(), { dryRun: true });
     expect(result.created).toEqual([]);

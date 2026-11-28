@@ -78,7 +78,7 @@ export async function ensureLabels(
   const repo = cfg.github.repo;
   const specs = labelSpecs(cfg);
   // `--jq` runs per page, so the output is every label name, one per line, however many pages there are.
-  const listed = await ghText(run, ['api', `repos/${repo}/labels`, '--paginate', '--jq', '.[].name']);
+  const listed = await ghText(run, ['api', `repos/${repo}/labels?per_page=100`, '--paginate', '--jq', '.[].name']);
   const have = new Set(
     listed
       .split('\n')

@@ -440,7 +440,7 @@ const PARTIAL_LABEL = 'sdlc:partial';
  * `error` for that PR alone; the next run tries again.
  */
 async function applyPartialLabels(t: TaskRun, prs: readonly PrInfo[]): Promise<void> {
-  const { ctx, task } = t;
+  const { ctx } = t;
   for (const pr of prs) {
     if (t.labelled.has(pr.number)) continue;
     const present = pr.labels.find(label => label.toLowerCase() === PARTIAL_LABEL);
@@ -449,7 +449,7 @@ async function applyPartialLabels(t: TaskRun, prs: readonly PrInfo[]): Promise<v
     t.labelled.add(pr.number);
     try {
       if (!t.dryRun) {
-        await trackerStep('setLabels', task.issue, () =>
+        await trackerStep('setLabels', pr.number, () =>
           ctx.tracker.setLabels(pr.number, wanted ? [PARTIAL_LABEL] : [], wanted ? [] : [present ?? PARTIAL_LABEL]),
         );
       }

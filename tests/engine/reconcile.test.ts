@@ -1380,7 +1380,7 @@ describe('the sdlc:partial label on PRs', () => {
     const result = await reconcile(h.ctx, {});
 
     expect(result.errors).toBe(1);
-    expect(result.actions).toEqual([{ issue: 1, kind: 'error', detail: expect.stringMatching(/PR #51.*setLabels failed for #1/) }]);
+    expect(result.actions).toEqual([{ issue: 1, kind: 'error', detail: expect.stringMatching(/^PR #51: setLabels failed for #51:/) }]);
     expect(labelsOf(h, 51)).toBeUndefined();
 
     const again = await reconcile(h.ctx, {});
