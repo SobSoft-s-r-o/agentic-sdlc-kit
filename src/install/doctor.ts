@@ -3,15 +3,15 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { deadlineOf, isNoTaskError, taskIssueOf } from '../commands/githook.js';
 import { runHook, type HookContext } from '../commands/hook.js';
-import { loadConfigFromString, type Config, type Harness } from '../config/schema.js';
+import { loadConfigFromString, type Config } from '../config/schema.js';
 import type { Status } from '../core/types.js';
 import { listWorktrees, orphanWorktrees, type OrphanWorktree, type Worktree } from '../git/worktrees.js';
 import { ensureBoard } from '../github/board.js';
-import { GhError, ghJson, type GhRunner } from '../github/gh.js';
+import { GhError, ghJson } from '../github/gh.js';
 import { GitHubTracker } from '../github/githubTracker.js';
 import { readJsonLines } from '../hooks/localLog.js';
 import { EVENT_NAMES } from '../hooks/output.js';
-import { HOOK_EVENTS, HOOK_HARNESSES, type HookEventName, type HookHarness } from '../hooks/types.js';
+import { HOOK_EVENTS, HOOK_HARNESSES, type HookHarness } from '../hooks/types.js';
 import { OUTBOX_FAILED_FILE, queuedCounts } from '../outbox/outbox.js';
 import { WORKFLOW_PATH } from '../render/github.js';
 import { HOOK_LAUNCHER, isKitHookItem, NATIVE_EVENT, SETTINGS_FILE } from '../render/hooks.js';
@@ -21,18 +21,26 @@ import { envKey, pathDelimiter } from '../secrets/gitleaks.js';
 import { scanFileName } from '../secrets/scan.js';
 import type { Tracker } from '../tracker/types.js';
 import { MANIFEST_PATH, entryDiskHash, readManifest, type Manifest, type ManifestEntry } from './manifest.js';
-import {
-  HOOKS_PATH,
-  ensureLabels,
-  findLegacyHooks,
-  normalizeHooksPath,
-  readHooksPath,
-  readPushProtection,
-  type GitRunner,
-  type HookProbe,
-} from './provision.js';
+import { HOOKS_PATH, ensureLabels, findLegacyHooks, normalizeHooksPath, readHooksPath, readPushProtection, type GitRunner } from './provision.js';
 import type { RepoFs } from './repoFs.js';
 import { mcpListArgs, mcpNames, superpowersInstall, superpowersInstalled, superpowersListArgs, graphifyInstall } from './stack.js';
+import {
+  describeError,
+  printable,
+  ok,
+  warn,
+  fail,
+  notChecked,
+  isolated,
+  ghReason,
+  failure,
+  list,
+  isRecord,
+  cliHarnesses,
+  type Check,
+  type DoctorEnv,
+  type PreflightOptions,
+} from './doctor/types.js';
 
 /**
  * `sdlc doctor`: read-only checks of the machine (the preflight, which needs no config) and of an
@@ -41,110 +49,8 @@ import { mcpListArgs, mcpNames, superpowersInstall, superpowersInstalled, superp
  * names variables only, `secrets.trackedFiles` prints file paths only.
  */
 
-export type CheckStatus = 'ok' | 'warn' | 'fail';
-
-export interface Check {
-  id: string;
-  status: CheckStatus;
-  message: string;
-  fix?: string;
-}
-
-/** All the IO of the checks, injected. */
-export interface DoctorEnv {
-  run: GhRunner;
-  git: GitRunner;
-  fs: RepoFs;
-  /** Whether `cmd` is an executable on the PATH of `env` (the process's own by default). */
-  which(cmd: string, env?: NodeJS.ProcessEnv): Promise<boolean>;
-  /**
-   * Runs a program in the repository root with its stdin closed, with `options.env` instead of the
-   * process's environment and giving up after `options.timeoutMs`; a non-zero exit is returned, a
-   * program that cannot run (or times out) rejects.
-   */
-  exec(cmd: string, args: string[], options?: ExecOptions): Promise<{ stdout: string; code: number; stderr: string }>;
-  /** Looks at the repository's own hook files (`.git/hooks/<name>`); defaults to the real file system. */
-  hookProbe?: HookProbe;
-  /** Only the names of variables are ever reported, never their values. */
-  env: NodeJS.ProcessEnv;
-  /** `process.version`, e.g. `v22.3.0`. */
-  nodeVersion: string;
-  /** The config file: its name for messages, and its text (`undefined` when there is no such file; throws when it cannot be read). */
-  config: { path: string; read(): string | undefined };
-  /**
-   * Runs one hook event in process, for `hooks.roundtrip`; defaults to the real `runHook`. A seam for
-   * tests, which swap in a runner whose answer is wrong.
-   */
-  hookRunner?: (harness: HookHarness, event: HookEventName, ctx: HookContext) => Promise<unknown>;
-  /** The tracker `worktrees.orphans` asks for tasks, read only; defaults to GitHub through `run`. */
-  makeTracker?: (cfg: Config) => Tracker;
-  /** `process.platform` (the hooks of Gemini CLI cannot run under PowerShell, which it uses on Windows). */
-  platform?: NodeJS.Platform;
-  /**
-   * The text of a file of the user's home directory, by path relative to it (`undefined` when it
-   * cannot be read); only read, for `hooks.switches`. Defaults to the real home directory.
-   */
-  userFile?: (path: string) => string | undefined;
-}
-
-export interface ExecOptions {
-  env?: NodeJS.ProcessEnv;
-  timeoutMs?: number;
-}
-
-export interface PreflightOptions {
-  /** Whether the GitHub Actions workflow will be used (`stack.actions`); decides if a missing `workflow` scope matters. Defaults to true. */
-  actions?: boolean;
-}
-
-// --- helpers --------------------------------------------------------------------------------------
-
-const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]/g;
-const CONTROL = /[\u0000-\u001f\u007f-\u009f]+/g;
-const MESSAGE_LIMIT = 300;
-
-/** The text of an error as one printable line: no escape sequences or line breaks, at most 300 characters. */
-export function describeError(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  const text = raw.replace(ANSI, '').replace(CONTROL, ' ').replace(/\s+/g, ' ').trim();
-  if (text === '') return 'unknown error';
-  return text.length > MESSAGE_LIMIT ? `${text.slice(0, MESSAGE_LIMIT - 1)}…` : text;
-}
-
-/** A name or path for a message: every control character shown as `?`. */
-const printable = (text: string): string => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, '?');
-
-const ok = (id: string, message: string): Check => ({ id, status: 'ok', message });
-const warn = (id: string, message: string, fix?: string): Check => ({ id, status: 'warn', message, ...(fix === undefined ? {} : { fix }) });
-const fail = (id: string, message: string, fix?: string): Check => ({ id, status: 'fail', message, ...(fix === undefined ? {} : { fix }) });
-const notChecked = (id: string, why: string): Check => warn(id, `not checked: ${why}`);
-
-/** Runs one check; whatever it throws is that check failing, in one line. */
-async function isolated(id: string, run: () => Check | Promise<Check>): Promise<Check> {
-  try {
-    return await run();
-  } catch (error) {
-    return fail(id, describeError(error));
-  }
-}
-
-/** The reason a failed `gh` call gives: the first line of its stderr without the `gh: ` prefix, else the error's own text. */
-function ghReason(error: unknown): string {
-  if (error instanceof GhError) {
-    const first = error.stderr.trim().split('\n')[0]?.replace(/^gh:\s*/, '') ?? '';
-    if (first.trim() !== '') return describeError(first);
-  }
-  return describeError(error);
-}
-
-/** `failed (exit N)` and, when the program said something on stderr, its first line as one printable line. Never stdout: it can hold other people's credentials. */
-function failure(code: number, stderr: string): string {
-  const first = stderr.split('\n').map(line => line.trim()).find(line => line !== '');
-  return first === undefined ? `failed (exit ${code})` : `failed (exit ${code}): ${describeError(first)}`;
-}
-
-const list = (items: readonly string[], max = 8): string =>
-  items.length > max ? `${items.slice(0, max).join(', ')} and ${items.length - max} more` : items.join(', ');
+export type { CheckStatus, Check, DoctorEnv, ExecOptions, PreflightOptions } from './doctor/types.js';
+export { describeError } from './doctor/types.js';
 
 // --- gh auth status -------------------------------------------------------------------------------
 
@@ -318,8 +224,6 @@ export async function runPreflight(env: DoctorEnv, options: PreflightOptions = {
   checks.push(await isolated('config.present', () => checkConfigPresent(env)));
   return checks;
 }
-
-// --- install checks -------------------------------------------------------------------------------
 
 type Hooks = { value: string | undefined } | { error: unknown };
 
@@ -606,12 +510,6 @@ function runCli(env: DoctorEnv, cmd: string, args: string[], timeoutMs = CLI_TIM
   return env.exec(cmd, args, { env: hookEnvironment(env.env).env, timeoutMs });
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
-/** The harnesses of `cfg` that have hooks, plugins and an `mcp list` of their own (all but `agents-md`), in configured order. */
-const cliHarnesses = (cfg: Config): HookHarness[] => cfg.harnesses.filter((harness: Harness): harness is HookHarness => harness !== 'agents-md');
-
 const MCP_FIX: Record<HookHarness, string> = {
   claude: 'approve the server in Claude Code or run the printed claude mcp add command',
   codex: 'trust the project in Codex (it loads .codex/config.toml only for trusted projects) or run the printed codex mcp add command',
@@ -786,8 +684,6 @@ function checkApprovalTrust(cfg: Config): Check {
   }
   return ok(id, 'the approval trust settings are consistent');
 }
-
-// --- the harness hooks ------------------------------------------------------------------------
 
 const CODEX_TRUST = ' (Codex runs it only after you trust the project and approve it in /hooks)';
 
@@ -1116,8 +1012,6 @@ async function checkRoundTrip(env: DoctorEnv, cfg: Config): Promise<Check> {
   }
   return ok(id, `${harnesses.join(', ')}: pre-tool on \`${ROUNDTRIP_COMMAND}\` ${cfg.mode === 'enforce' ? 'denies it (enforce)' : 'warns about it (observe)'}`);
 }
-
-// --- the local queues and the task worktrees ---------------------------------------------------
 
 type WorktreeList = { worktrees: Worktree[]; mainRoot: string } | { error: unknown };
 
