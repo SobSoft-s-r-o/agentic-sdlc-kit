@@ -4,6 +4,7 @@ import type { RepoFs } from '../install/repoFs.js';
 import { loadRoles, renderAgents } from './agents.js';
 import type { Change, JsonKeysChange, TomlBlockChange } from './changes.js';
 import { renderGitHooks, renderGithub } from './github.js';
+import { hookNotes, renderHookLauncher, renderHooks } from './hooks.js';
 import { renderData, renderInstructions } from './instructions.js';
 import { mcpNotes, renderMcp } from './mcp.js';
 
@@ -11,11 +12,11 @@ const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
  * Everything `sdlc init` and `sdlc upgrade` apply: the instructions, skills and agents of every
- * harness, the MCP wiring, the GitHub files and the git hooks, as one list of changes with each
- * path at most once, sorted by path. `userCommands` are the steps the owner runs themselves (MCP
- * servers in user scope); `notes` say what is left to do or what was decided for them (custom
- * roles that replace built-in ones, variables to export). Pure: it reads only through `fs`, for the
- * custom roles.
+ * harness, the MCP wiring, the harness hooks and their launcher, the GitHub files and the git hooks,
+ * as one list of changes with each path at most once, sorted by path. `userCommands` are the steps
+ * the owner runs themselves (MCP servers in user scope); `notes` say what is left to do or what was
+ * decided for them (custom roles that replace built-in ones, variables to export, harness trust).
+ * Pure: it reads only through `fs`, for the custom roles.
  */
 export function renderAll(cfg: Config, fs: RepoFs): { changes: Change[]; userCommands: string[]; notes: string[] } {
   const { roles, notices } = loadRoles(fs);
@@ -25,11 +26,11 @@ export function renderAll(cfg: Config, fs: RepoFs): { changes: Change[]; userCom
   for (const harness of cfg.harnesses) {
     changes.push(...renderInstructions(cfg, harness, data), ...renderAgents(cfg, harness, roles));
     const mcp = renderMcp(cfg, harness);
-    changes.push(...mcp.changes);
+    changes.push(...mcp.changes, ...renderHooks(cfg, harness));
     userCommands.push(...mcp.userCommands);
   }
-  changes.push(...renderGithub(cfg, data), ...renderGitHooks());
-  return { changes: mergeChanges(changes), userCommands, notes: [...notices, ...mcpNotes(cfg)] };
+  changes.push(...renderHookLauncher(cfg), ...renderGithub(cfg, data), ...renderGitHooks());
+  return { changes: mergeChanges(changes), userCommands, notes: [...notices, ...mcpNotes(cfg), ...hookNotes(cfg)] };
 }
 
 /**

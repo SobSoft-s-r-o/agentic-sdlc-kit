@@ -47,13 +47,16 @@ const INIT_PATHS = [
   '.agents/skills/sdlc-task-tracking/SKILL.md',
   ...ROLES.map(role => `.claude/agents/sdlc-${role}.md`),
   ...SKILLS.map(skill => `.claude/skills/${skill}/SKILL.md`),
+  '.claude/settings.json',
   ...ROLES.map(role => `.codex/agents/sdlc-${role}.toml`),
   '.codex/config.toml',
+  '.codex/hooks.json',
   '.github/pull_request_template.md',
   '.github/workflows/sdlc-reconcile.yml',
   '.gitignore',
   '.mcp.json',
   ...GITHOOKS,
+  '.sdlc/hooks/run.sh',
   '.sdlc/manifest.json',
   'AGENTS.md',
   'CLAUDE.md',
@@ -273,6 +276,43 @@ describe('renderAll', () => {
     expect(paths).toContain('.gitignore');
   });
 
+  it('renders the hook files of each hook harness and the launcher once; agents-md alone gets none', () => {
+    const { changes } = all(configWith('', '[claude, codex, gemini, agents-md]'));
+    const paths = changes.map(c => c.path);
+    expect(paths).toContain('.claude/settings.json');
+    expect(paths).toContain('.codex/hooks.json');
+    expect(paths.filter(p => p === '.sdlc/hooks/run.sh')).toHaveLength(1);
+    expect(changes.find(c => c.path === '.sdlc/hooks/run.sh')).toMatchObject({ kind: 'file', mode: 0o755 });
+
+    const agentsOnly = all(configWith('', '[agents-md]')).changes.map(c => c.path);
+    expect(agentsOnly).not.toContain('.sdlc/hooks/run.sh');
+    expect(agentsOnly.filter(p => p.endsWith('settings.json') || p.endsWith('hooks.json'))).toEqual([]);
+  });
+
+  it('fuses the Gemini hooks with its MCP servers in one .gemini/settings.json change', () => {
+    const { changes } = all(configWith('', '[gemini]'));
+    const settings = changes.filter(c => c.path === '.gemini/settings.json');
+    expect(settings).toHaveLength(1);
+    const [change] = settings as JsonKeysChange[];
+    expect(change?.entries.map(e => e.pointer.join('/'))).toEqual([
+      'mcpServers/github',
+      'hooks/SessionStart',
+      'hooks/BeforeAgent',
+      'hooks/BeforeTool',
+    ]);
+  });
+
+  it('names how to trust the Codex and Gemini hooks in the notes', () => {
+    const { notes } = all(configWith('', '[claude, codex, gemini]'));
+    expect(notes).toContain(
+      'Codex runs project hooks only in a trusted project after you review them: open codex in this repository, trust it, then run /hooks and approve the sdlc hooks.',
+    );
+    expect(notes).toContain(
+      'Gemini CLI loads project hooks only in a trusted folder: run gemini in this repository and trust the folder.',
+    );
+    expect(all(configWith('', '[claude]')).notes.filter(note => note.includes('hooks'))).toEqual([]);
+  });
+
   it('returns the user-scope commands and the notes, with the notices of custom roles first', () => {
     const custom = '---\nrole: developer\ndescription: Ours.\ntier: standard\ncan_edit: true\nreturns: a report\nescalate_when: unsure\n---\nYou build.\n';
     const fs = memoryFs({ '.sdlc/agents/custom/developer.md': custom });
@@ -374,6 +414,7 @@ describe('sdlc init', () => {
 
     // hooks are executable, the manifest lists what was written, and git points at the hooks
     expect(h.fs.modes.get('.sdlc/githooks/pre-commit')).toBe(0o755);
+    expect(h.fs.modes.get('.sdlc/hooks/run.sh')).toBe(0o755);
     expect(readManifest(h.fs)?.kit).toBe(packageVersion());
     expect(h.git.hooksPath()).toBe('.sdlc/githooks');
     // GitHub was provisioned: labels, branch protection and push protection
@@ -385,6 +426,42 @@ describe('sdlc init', () => {
       'api -X',
       'api -X',
     ]);
+  });
+
+  it('init merges hooks into customized settings', async () => {
+    const original =
+      '{\n' +
+      '  "permissions": {\n    "allow": ["Bash(npm test)"]\n  },\n' +
+      '  "hooks": {\n' +
+      '    "PreToolUse": [\n' +
+      '      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "./scripts/our-check.sh" }] }\n' +
+      '    ]\n' +
+      '  }\n' +
+      '}\n';
+    const mine = { matcher: 'Bash', hooks: [{ type: 'command', command: './scripts/our-check.sh' }] };
+    const h = await installed({ '.claude/settings.json': original });
+
+    const settings = JSON.parse(h.fs.files.get('.claude/settings.json') as string) as {
+      permissions: unknown;
+      hooks: Record<string, unknown[]>;
+    };
+    // the user's permissions and their own PreToolUse hook are kept; ours are appended after theirs
+    expect(settings.permissions).toEqual({ allow: ['Bash(npm test)'] });
+    expect(Object.keys(settings.hooks)).toEqual(['PreToolUse', 'SessionStart', 'UserPromptSubmit']);
+    expect(settings.hooks.PreToolUse).toHaveLength(2);
+    expect(settings.hooks.PreToolUse?.[0]).toEqual(mine);
+    expect(JSON.stringify(settings.hooks.PreToolUse?.[1])).toContain('.sdlc/hooks/run.sh');
+    expect(settings.hooks.SessionStart).toHaveLength(1);
+    expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
+
+    // a second init changes nothing
+    await h.go(['init']);
+    expect(JSON.parse(h.fs.files.get('.claude/settings.json') as string)).toEqual(settings);
+
+    await h.go(['uninstall']);
+
+    expect(h.fs.files.get('.claude/settings.json')).toBe(original);
+    expect(h.fs.files.has('.sdlc/hooks/run.sh')).toBe(false);
   });
 
   it('prints the plan, the steps, the user commands, the notes and the next steps for a person', async () => {
@@ -887,7 +964,9 @@ describe('sdlc upgrade', () => {
       expect(details).toContain('remove .codex/agents/sdlc-analyst.toml (no longer generated)');
       expect(details.split('\n').at(-1)).toBe(count(details));
       // 10 codex agents (not the modified one) + .codex/config.toml + the AGENTS.md block + 3 .agents skills
-      expect(count(details)).toBe('15 changes');
+      // + the 3 hook events of .codex/hooks.json, which goes away with them
+      expect(count(details)).toBe('18 changes');
+      expect(h.fs.files.has('.codex/hooks.json')).toBe(false);
       expect(h.fs.files.has('.codex/agents/sdlc-analyst.toml')).toBe(false);
       expect(process.exitCode).toBeUndefined();
     });

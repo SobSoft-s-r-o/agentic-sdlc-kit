@@ -1,0 +1,63 @@
+[
+  {
+    "pointer": [
+      "hooks",
+      "SessionStart"
+    ],
+    "value": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" codex session-start",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "items": {
+      "marker": ".sdlc/hooks/run.sh"
+    }
+  },
+  {
+    "pointer": [
+      "hooks",
+      "UserPromptSubmit"
+    ],
+    "value": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" codex prompt",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "items": {
+      "marker": ".sdlc/hooks/run.sh"
+    }
+  },
+  {
+    "pointer": [
+      "hooks",
+      "PreToolUse"
+    ],
+    "value": [
+      {
+        "matcher": "^(apply_patch|Edit|Write|Bash|spawn_agent|Agent)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" codex pre-tool",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "items": {
+      "marker": ".sdlc/hooks/run.sh"
+    }
+  }
+]

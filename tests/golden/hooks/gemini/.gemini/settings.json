@@ -1,0 +1,66 @@
+[
+  {
+    "pointer": [
+      "hooks",
+      "SessionStart"
+    ],
+    "value": [
+      {
+        "hooks": [
+          {
+            "name": "sdlc-session-start",
+            "type": "command",
+            "command": "\"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" gemini session-start",
+            "timeout": 30000
+          }
+        ]
+      }
+    ],
+    "items": {
+      "marker": ".sdlc/hooks/run.sh"
+    }
+  },
+  {
+    "pointer": [
+      "hooks",
+      "BeforeAgent"
+    ],
+    "value": [
+      {
+        "hooks": [
+          {
+            "name": "sdlc-prompt",
+            "type": "command",
+            "command": "\"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" gemini prompt",
+            "timeout": 30000
+          }
+        ]
+      }
+    ],
+    "items": {
+      "marker": ".sdlc/hooks/run.sh"
+    }
+  },
+  {
+    "pointer": [
+      "hooks",
+      "BeforeTool"
+    ],
+    "value": [
+      {
+        "matcher": "^(write_file|replace|run_shell_command|invoke_agent)$",
+        "hooks": [
+          {
+            "name": "sdlc-pre-tool",
+            "type": "command",
+            "command": "\"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh\" gemini pre-tool",
+            "timeout": 15000
+          }
+        ]
+      }
+    ],
+    "items": {
+      "marker": ".sdlc/hooks/run.sh"
+    }
+  }
+]

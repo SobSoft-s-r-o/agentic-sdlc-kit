@@ -1,0 +1,4 @@
+file .sdlc/hooks/run.sh mode=755
+json-keys .claude/settings.json
+json-keys .codex/hooks.json
+json-keys .gemini/settings.json
