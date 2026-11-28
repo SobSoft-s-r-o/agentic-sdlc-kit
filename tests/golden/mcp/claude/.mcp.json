@@ -1,0 +1,40 @@
+[
+  {
+    "pointer": [
+      "mcpServers",
+      "github"
+    ],
+    "value": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"
+      }
+    }
+  },
+  {
+    "pointer": [
+      "mcpServers",
+      "context7"
+    ],
+    "value": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ]
+    }
+  },
+  {
+    "pointer": [
+      "mcpServers",
+      "playwright"
+    ],
+    "value": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ]
+    }
+  }
+]

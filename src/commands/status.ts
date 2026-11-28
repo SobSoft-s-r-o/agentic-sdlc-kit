@@ -58,7 +58,7 @@ export function describeStatus(report: StatusReport, staleDays: number): string 
   return blocks.join('\n\n');
 }
 
-/** Registers `sdlc status [--stale-days 7] [--json]`. */
+/** Registers `sdlc status [--stale-days 7] [--all] [--json]`. */
 export function registerStatusCommand(program: Command, makeContext: ContextFactory): void {
   program
     .command('status')
@@ -68,8 +68,9 @@ export function registerStatusCommand(program: Command, makeContext: ContextFact
       'flag tasks awaiting deployment or paused on the agent for longer than this many days',
       DEFAULT_STALE_DAYS,
     )
+    .option('--all', 'also read tasks closed longer ago than reconcile.closed_lookback_days')
     .option('--json', 'print machine-readable JSON')
-    .action(async (options: { staleDays: string; json?: boolean }) => {
+    .action(async (options: { staleDays: string; all?: boolean; json?: boolean }) => {
       let staleDays = 0;
       await runCommand(
         // A bad --stale-days is reported before the config is read or anything is asked of GitHub.
@@ -78,7 +79,7 @@ export function registerStatusCommand(program: Command, makeContext: ContextFact
           return makeContext();
         },
         options,
-        ctx => statusReport(ctx, { staleDays }),
+        ctx => statusReport(ctx, { staleDays, all: options.all === true }),
         report => describeStatus(report, staleDays),
       );
     });

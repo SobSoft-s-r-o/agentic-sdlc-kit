@@ -1,0 +1,4 @@
+file .agents/skills/sdlc-delivery/SKILL.md
+file .agents/skills/sdlc-orientation/SKILL.md
+file .agents/skills/sdlc-task-tracking/SKILL.md
+md-block GEMINI.md

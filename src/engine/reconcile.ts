@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import type { CommandContext } from '../commands/context.js';
 import { expectedOf, fetchTask, trackerStep } from '../commands/context.js';
-import { targetByName, typeRegistry } from '../config/schema.js';
+import { targetByName, typeRegistry, type Config } from '../config/schema.js';
 import {
   approvalEvent,
   ApprovalRefusedError,
@@ -24,7 +24,7 @@ import {
 } from '../core/summary.js';
 import { trustedLogins } from '../core/trust.js';
 import type { Approval, TaskEvent, TaskState, TaskTypeDef } from '../core/types.js';
-import type { IssueComment, PrInfo, TaskScan, TrackedTask, Tracker } from '../tracker/types.js';
+import type { IssueComment, PrInfo, ScanOptions, TaskScan, TrackedTask, Tracker } from '../tracker/types.js';
 import { DEPLOYMENT_LOOKBACK, firstContaining, mergeShasOf, satisfiedTargets } from './deployments.js';
 
 export interface ReconcileAction {
@@ -54,6 +54,11 @@ export interface ReconcileOptions {
   only?: 'deployments' | 'all';
   /** Only this task; an error when it is not tracked. */
   issue?: number;
+  /**
+   * Scan every `sdlc:task` issue, however long ago it was closed, instead of the open ones and
+   * those closed within `reconcile.closedLookbackDays`. Does not apply to a given `scan`.
+   */
+  all?: boolean;
   /** A scan of the task issues already made by the caller, used instead of scanning again. */
   scan?: TaskScan;
 }
@@ -65,6 +70,18 @@ export interface ReconcileResult {
 }
 
 const reasonOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The scan of a reconcile or status run that is not `--all`: the open `sdlc:task` issues and those
+ * closed within `cfg.reconcile.closedLookbackDays` of `now`, i.e. updated on or after that date
+ * (UTC; 30 days before 2026-11-27 is 2026-10-28). `--all` scans with `{}`: everything.
+ */
+export function lookbackScan(cfg: Config, now: string): ScanOptions {
+  const since = new Date(Date.parse(now) - cfg.reconcile.closedLookbackDays * DAY_MS);
+  return { closedSince: since.toISOString().slice(0, 10) };
+}
+
 /** Milliseconds of `iso`; a missing or unparseable time sorts last. */
 const timeOf = (iso: string | undefined): number => {
   const ms = Date.parse(iso ?? '');
@@ -105,9 +122,9 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
     listReleases: limit => once(`releases:${limit}`, () => inner.listReleases(limit)),
     isAncestor: (ancestor, descendant) =>
       once(`ancestor:${ancestor}>${descendant}`, () => inner.isAncestor(ancestor, descendant)),
-    scanTasks: () => once('scan', () => inner.scanTasks()),
-    listTrackedTasks: () => once('scan', () => inner.scanTasks()).then(scan => scan.tracked),
-    listUntracked: () => once('scan', () => inner.scanTasks()).then(scan => scan.untracked),
+    scanTasks: opts => once(`scan:${opts?.closedSince ?? 'all'}`, () => inner.scanTasks(opts)),
+    listTrackedTasks: () => once('scan:all', () => inner.scanTasks()).then(scan => scan.tracked),
+    listUntracked: () => once('scan:all', () => inner.scanTasks()).then(scan => scan.untracked),
     getTask: issue => inner.getTask(issue),
     getIssue: issue => inner.getIssue(issue),
     listComments: (issue, sinceIso) => inner.listComments(issue, sinceIso),
@@ -194,7 +211,11 @@ async function loadTasks(
 
   let scan: TaskScan;
   try {
-    scan = opts.scan ?? (await trackerStep('scanTasks', undefined, () => ctx.tracker.scanTasks()));
+    scan =
+      opts.scan ??
+      (await trackerStep('scanTasks', undefined, () =>
+        ctx.tracker.scanTasks(opts.all ? {} : lookbackScan(ctx.cfg, ctx.now())),
+      ));
   } catch (error) {
     actions.push({ issue: 0, kind: 'error', detail: reasonOf(error) });
     return [];

@@ -9,21 +9,23 @@ export function describeReconcile(result: ReconcileResult): string {
   return lines.join('\n');
 }
 
-/** Registers `sdlc reconcile [--dry-run] [--issue N] [--json]`; exits 1 when any action is an error. */
+/** Registers `sdlc reconcile [--dry-run] [--issue N] [--all] [--json]`; exits 1 when any action is an error. */
 export function registerReconcileCommand(program: Command, makeContext: ContextFactory): void {
   program
     .command('reconcile')
     .description('Bring tasks, the board and issues in line with merges, approvals and deployments')
     .option('--dry-run', 'report what would change without writing anything')
     .option('--issue <number>', 'only reconcile this task')
+    .option('--all', 'also read tasks closed longer ago than reconcile.closed_lookback_days')
     .option('--json', 'print machine-readable JSON')
-    .action(async (options: { dryRun?: boolean; issue?: string; json?: boolean }) => {
+    .action(async (options: { dryRun?: boolean; issue?: string; all?: boolean; json?: boolean }) => {
       await runCommand(
         makeContext,
         options,
         async ctx => {
           const result = await reconcile(ctx, {
             dryRun: options.dryRun === true,
+            all: options.all === true,
             ...(options.issue !== undefined && { issue: parseIssueNumber(options.issue) }),
           });
           if (result.errors > 0) process.exitCode = 1;

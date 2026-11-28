@@ -52,7 +52,16 @@ export interface UntrackedIssue {
   reason: string;
 }
 
-/** Every `sdlc:task` issue, sorted into those with readable state and those without. */
+/** Which `sdlc:task` issues `scanTasks` reads. */
+export interface ScanOptions {
+  /**
+   * A date (`YYYY-MM-DD`, UTC). Read every open issue, and of the closed ones only those updated on
+   * or after this date. Left out, every issue is read, however long ago it was closed.
+   */
+  closedSince?: string;
+}
+
+/** The `sdlc:task` issues that were read, sorted into those with readable state and those without. */
 export interface TaskScan {
   tracked: TrackedTask[];
   untracked: UntrackedIssue[];
@@ -126,8 +135,12 @@ export interface Tracker {
   listTrackedTasks(): Promise<TrackedTask[]>;
   /** `sdlc:task` issues with no state comment, or one that cannot be parsed, oldest issue first. */
   listUntracked(): Promise<UntrackedIssue[]>;
-  /** `listTrackedTasks` and `listUntracked` from one scan of the `sdlc:task` issues. */
-  scanTasks(): Promise<TaskScan>;
+  /**
+   * `listTrackedTasks` and `listUntracked` from one scan of the `sdlc:task` issues: all of them, or
+   * with `closedSince` the open ones plus the recently closed ones (see `ScanOptions`). A scan that
+   * may have missed issues because a list hit its size limit rejects instead of returning a part.
+   */
+  scanTasks(opts?: ScanOptions): Promise<TaskScan>;
   /** Throws `NoStateCommentError` when the issue has no state comment, and `StateCommentError` when it is corrupt. */
   getTask(issue: number): Promise<TrackedTask>;
   /** Reads one issue, tracked or not. */

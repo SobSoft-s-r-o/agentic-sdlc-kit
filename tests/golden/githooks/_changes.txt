@@ -1,0 +1,4 @@
+file .sdlc/githooks/post-checkout mode=755
+file .sdlc/githooks/post-merge mode=755
+file .sdlc/githooks/pre-commit mode=755
+file .sdlc/githooks/pre-push mode=755

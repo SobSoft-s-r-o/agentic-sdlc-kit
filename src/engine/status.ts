@@ -1,7 +1,7 @@
 import type { CommandContext } from '../commands/context.js';
 import type { Phase, Status, TaskState } from '../core/types.js';
 import type { TaskScan, TrackedTask } from '../tracker/types.js';
-import { reconcile, type ReconcileAction } from './reconcile.js';
+import { lookbackScan, reconcile, type ReconcileAction } from './reconcile.js';
 
 export interface TaskSummary {
   issue: number;
@@ -85,10 +85,17 @@ const pausedOn = (state: TaskState, who: TaskState['waitingOn']): boolean =>
  * cannot read, and what a dry-run reconcile would change. Writes nothing. Failing to read the
  * tasks fails the report; a failing dry-run reconcile only becomes the single `pendingReconcile`
  * entry, so the rest of the picture is still shown.
+ *
+ * Like reconcile, it reads the open tasks and those closed within `reconcile.closedLookbackDays`;
+ * `all` reads every task, however long ago it closed.
  */
-export async function statusReport(ctx: CommandContext, options: { staleDays: number }): Promise<StatusReport> {
-  const nowMs = Date.parse(ctx.now());
-  const scan = await ctx.tracker.scanTasks();
+export async function statusReport(
+  ctx: CommandContext,
+  options: { staleDays: number; all?: boolean },
+): Promise<StatusReport> {
+  const now = ctx.now();
+  const nowMs = Date.parse(now);
+  const scan = await ctx.tracker.scanTasks(options.all ? {} : lookbackScan(ctx.cfg, now));
   const { tracked: tasks, untracked } = scan;
 
   const byStatus = Object.fromEntries(STATUS_ORDER.map(status => [status, [] as TaskSummary[]])) as Record<

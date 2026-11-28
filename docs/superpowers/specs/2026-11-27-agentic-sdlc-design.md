@@ -38,6 +38,9 @@ The reference project is **not touched** and does not migrate to this project.
 7. Enforcement level chosen at install: `observe` or `enforce`.
 8. Installs the agent environment stack: Superpowers, graphify, hooks/guards, and the
    MCP servers the agents need (GitHub MCP by default, others optional).
+9. Secrets never reach the repository: generated rules say where secrets live
+   (local testing: the OS keystore; production: the platform's secret storage), and
+   a commit guard blocks staged secrets for everyone, agents and humans (§14a).
 
 **Non-goals (v1)**
 - Migrating or changing the reference project.
@@ -176,6 +179,11 @@ user content outside managed blocks and custom agents/types.
    green gate when the owner explicitly asks (reference behaviour).
 7a. **MCP servers**: GitHub MCP (default on) plus optional servers from the catalog
    (see §14); for each, project-scoped or user-scoped configuration.
+7b. **Secrets**: where local test secrets live (default `auto`: macOS Keychain,
+   Linux Secret Service via `secret-tool`, Windows Credential Manager, or a password
+   manager CLI the owner names) and the production secret storage (free text, e.g.
+   "GitHub Actions environment secrets", "GCP Secret Manager"); the commit guard is
+   always on.
 8. **Models per tier** for each harness (defaults offered; see §9).
 9. **Stack**: install Superpowers (yes default), graphify (yes default), branch
    protection on default branch (yes default), GitHub Actions reconcile workflow
@@ -221,6 +229,10 @@ stack: { superpowers: true, graphify: true, branch_protection: true, actions: tr
 mcp:
   servers: [github]          # catalog ids; github on by default
   scope: project             # project | user
+secrets:
+  local_store: auto          # auto | keychain | secret-service | wincred | <password manager CLI>
+  production_store: "GitHub Actions environment secrets"   # free text, shown in rules
+  allow: []                  # fingerprints of accepted false positives (see §14a)
 ```
 
 GitHub field/option IDs are **not** stored in config; they are resolved by name at
@@ -414,6 +426,7 @@ alongside and never overwritten by upgrade.
 |---|---|---|---|
 | git hooks (`pre-commit`, `pre-push`, `post-merge`, `post-checkout`) installed via `core.hooksPath=.sdlc/githooks` | everyone incl. humans | warn | block commits to default branch, push of `task/*` branch without known issue; post-merge triggers reconcile |
 | harness hooks | Claude, Codex, Gemini | record gaps in state comment, warn agent | block file edits for a task before its plan is approved (except in phases that allow it: debugging repro, spike, docs); block subagent dispatch without role/tier; block `gh pr merge --admin`; block launching other AI CLIs |
+| secret guard (`pre-commit`, `pre-push`) | everyone incl. humans | **block** (both modes) | **block** |
 | GitHub branch protection | everyone | — | require PR + linked task label on default branch (optional) |
 | instructions + skills | all harnesses | the only layer for AGENTS.md-only harnesses | same |
 
@@ -448,7 +461,7 @@ procedure with Superpowers skills (brainstorming, writing-plans,
 systematic-debugging, subagent-driven-development, requesting-code-review,
 verification-before-completion), task types and end conditions, merge/deploy
 authority, production-data rules (backup, dry-run, owner runs), no external AI CLIs,
-worktree discipline, running work index for compaction survival, graphify usage.
+worktree discipline, secrets handling (§14a), running work index for compaction survival, graphify usage.
 The managed block is concise (target < 150 lines); detail lives in skills loaded on
 demand.
 
@@ -492,6 +505,34 @@ template the owner fills).
   recorded and projected. `doctor` checks each configured server is listed by the
   harness (e.g. `claude mcp list`) and reports missing tokens/auth.
 - Checks: `git`, `gh` (with scopes), Node ≥ 20.
+
+## 14a. Secrets
+
+- **Rule in every harness's instructions**: tokens, keys, passwords and connection
+  strings never go into tracked files, code, commits, issues, PRs, comments or logs.
+  For local testing they live in the OS keystore (per `secrets.local_store`) and are
+  read into environment variables at run time (for example
+  `export GITHUB_PERSONAL_ACCESS_TOKEN="$(security find-generic-password -s
+  github-mcp -w)"` on macOS, `secret-tool lookup service github-mcp` on Linux).
+  Production secrets live only in `secrets.production_store`. An agent that needs a
+  secret asks the owner to store it there; it never asks for the value in chat and
+  never prints it. `.env` files are allowed only gitignored and never committed.
+- **Commit guard** (built into `sdlc githook`, no extra dependency): `pre-commit`
+  scans the staged added lines and staged file names; `pre-push` scans the commits
+  being pushed (catches `--no-verify` commits). It blocks in **both** modes, because a
+  pushed secret cannot be taken back. Detects known token formats (GitHub, AWS, GCP
+  API keys and service-account JSON, Slack, Stripe live keys, OpenAI/Anthropic keys,
+  private key blocks, JWTs) and secret-looking file names (`.env*` except
+  `.env.example`, `*.pem`, `*.key`, `*.p12`, `id_rsa*`, `credentials*.json`). Output
+  names file, line and rule and shows the match masked; it never prints the secret.
+  False positives: an inline `sdlc:allow-secret` marker on the line, or the masked
+  fingerprint added to `secrets.allow` by the owner. If `gitleaks` is on PATH it
+  runs as well and either finding blocks.
+- `.gitignore` managed block adds `.env`, `.env.*`, `!.env.example`.
+- `init` enables GitHub secret scanning push protection where the plan allows it
+  (warns otherwise), as a server-side backstop for clients without the hooks.
+- `doctor` checks the guard is active (`core.hooksPath`), reports push protection
+  status, and warns if a tracked file matches the secret file-name rules.
 
 ## 15. Testing the project itself
 

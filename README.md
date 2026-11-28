@@ -2,11 +2,44 @@
 
 Installable, agent-driven software development lifecycle for GitHub — works with Claude Code, Gemini CLI, OpenAI Codex and any `AGENTS.md`-aware agent.
 
-> Status: the core CLI (`sdlc`, below) is available; the installer that sets it up for each agent is still to come. See [the design](docs/superpowers/specs/2026-11-27-agentic-sdlc-design.md).
+> Status: core CLI and installer available; harness hooks next
+
+See [the design](docs/superpowers/specs/2026-11-27-agentic-sdlc-design.md) for the whole picture.
+
+## Install
+
+Ask your coding agent to install it. In the repository you want to set up, give it this prompt:
+
+```text
+Install agentic-sdlc-kit from https://github.com/SobSoft-s-r-o/agentic-sdlc-kit into this repository. Follow its INSTALL.md.
+```
+
+The agent runs the preflight, detects your setup, asks you the install questions one at a time (agents, board, mode, task types, deploy targets, quality gate, merge policy, MCP servers, where secrets live, models, stack, owners, language), shows you `sdlc.config.yaml` and the plan, installs, and opens a pull request for you to review. The steps only you can do (tokens, MCP approvals) are listed at the end. The full procedure is in [INSTALL.md](INSTALL.md).
+
+## Two-minute walkthrough
+
+Run these yourself instead, from the root of a git repository with `gh` logged in. `<ref>` is the kit version: a release tag such as `v0.1.0`, or `main`.
+
+```sh
+npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> doctor --preflight       # git, Node, gh, repository
+npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> config suggest --write   # sdlc.config.yaml from what it finds
+$EDITOR sdlc.config.yaml                    # answer the questions of INSTALL.md; set kit_ref to <ref>
+npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init --dry-run           # the plan; nothing is written
+npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#<ref> init                     # files, git hooks, board, labels, protection
+$EDITOR sdlc.config.yaml                    # init printed "Created project #N": set github.project.number to N
+npm install --save-dev github:SobSoft-s-r-o/agentic-sdlc-kit#<ref>          # the git hooks need sdlc to resolve
+npx --no-install sdlc doctor                # expect only actions.secret and mcp.token to complain (possibly also secrets.pushProtection, mcp.claude)
+```
+
+Those go away with the owner-only steps in [INSTALL.md](INSTALL.md): `gh secret set SDLC_TOKEN`, and a GitHub token in your OS keystore exported as `GITHUB_PERSONAL_ACCESS_TOKEN`. Then commit the result on a branch, open a pull request, and give the agents their work as tasks: `npx --no-install sdlc task new --type <type> --title "..." --summary "..."`.
 
 ## CLI
 
 `sdlc` tracks each task as a GitHub issue with a hidden state comment and mirrors it onto a Projects v2 board. It needs the [GitHub CLI](https://cli.github.com) (`gh`), authenticated, and reads `sdlc.config.yaml` from the root of the git repository (override with `--config <path>`). Every command prints JSON with `--json` and exits non-zero on failure.
+
+After the project install above, run it as `npx --no-install sdlc <command>`: a dev dependency is in `node_modules/.bin`, not on the PATH. Plain `sdlc <command>`, as written below, works after a global install (`npm install --global`).
+
+Tasks and the board:
 
 - `sdlc task new | set-type | checkpoint | reopen` - create a tracked task, change its type, record progress, or reopen a done task.
 - `sdlc stage start | publish` - start a phase, or post its result as an issue comment.
@@ -14,10 +47,23 @@ Installable, agent-driven software development lifecycle for GitHub — works wi
 - `sdlc review handoff` - hand a task over for review with a linked pull request.
 - `sdlc approve` - record an owner decision: approve a stage, accept a result, confirm a run, or cancel.
 - `sdlc deploy record` - record that a commit is deployed to a target.
-- `sdlc reconcile` - bring tasks, the board and issues in line with merges, approvals and deployments (`--dry-run` only reports).
-- `sdlc status` - show tasks by status, what waits on the owner, what is stale (`--stale-days`, default 7), untracked issues and what reconcile would change.
+- `sdlc reconcile` - bring tasks, the board and issues in line with merges, approvals and deployments (`--dry-run` only reports). It reads open tasks and those closed within `reconcile.closed_lookback_days` (default 30); `--all` reads every task.
+- `sdlc status` - show tasks by status, what waits on the owner, what is stale (`--stale-days`, default 7), untracked issues and what reconcile would change (`--all` also lists tasks closed before the lookback).
 - `sdlc board ensure` - create the board or add its missing fields, options and views (add-only).
 
+Installing and checking:
+
+- `sdlc config validate | suggest` - check `sdlc.config.yaml`, or print one suggested from the repository (`suggest --write` creates it when it does not exist).
+- `sdlc init` - install the managed files, git hooks and GitHub setup (board, labels, branch and push protection) for `sdlc.config.yaml` (`--dry-run` only reports, `--skip-github` leaves GitHub alone, `--overwrite-modified` replaces files you edited). It commits nothing.
+- `sdlc upgrade` - bring the managed files up to the installed kit version and remove what it no longer generates (`--dry-run`, `--overwrite-modified`). It never touches GitHub.
+- `sdlc uninstall` - remove the managed files and the git hooks path, keeping everything you wrote and edited (`--dry-run`). The board, labels and issues on GitHub remain.
+- `sdlc doctor` - check the machine and the installation, with a fix for each failure (`--preflight` runs only the checks that need no config).
+- `sdlc githook <name>` - run one of the kit's git hooks, including the secret guard. The scripts in `.sdlc/githooks` call it; you do not run it by hand.
+
 Run `sdlc <command> --help` for the options of each command.
+
+## Secrets
+
+The commit and push hooks block anything that looks like a secret, in `observe` and `enforce` mode alike, and print only a masked value. Secrets for local testing live in your OS keystore, production secrets in the store you name in the config; none belongs in a repository file. See "Secret guard" in [INSTALL.md](INSTALL.md).
 
 License: MIT

@@ -6,18 +6,35 @@ import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { registerApproveCommand } from './commands/approve.js';
 import { registerBoardCommand, type BoardCommandContext } from './commands/board.js';
+import { registerConfigCommand, type ConfigCommandContext } from './commands/config.js';
 import type { CommandContext, ContextFactory } from './commands/context.js';
 import { registerDeployCommand } from './commands/deploy.js';
+import { registerDoctorCommand, type DoctorContext } from './commands/doctor.js';
 import { registerEvidenceCommand } from './commands/evidence.js';
+import {
+  exitAfterFlush,
+  readAllStdin,
+  registerGitHookCommand,
+  spawnDetachedLogged,
+  type GitHookContext,
+} from './commands/githook.js';
+import { registerInitCommand } from './commands/init.js';
+import type { InstallContext, InstallContextFactory } from './commands/install.js';
 import { registerReconcileCommand } from './commands/reconcile.js';
 import { registerReviewCommand } from './commands/review.js';
 import { registerStageCommand } from './commands/stage.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerTaskCommand } from './commands/task.js';
+import { registerUninstallCommand } from './commands/uninstall.js';
+import { registerUpgradeCommand } from './commands/upgrade.js';
 import { errorAsJson, formatCliError } from './commands/errors.js';
 import { loadConfig, type Config } from './config/schema.js';
 import { defaultGhRunner } from './github/gh.js';
 import { GitHubTracker } from './github/githubTracker.js';
+import { nodeRepoFs } from './install/repoFs.js';
+import { createGitRunner } from './install/provision.js';
+import { execProgram, findOnPath } from './secrets/gitleaks.js';
+import { packageVersion } from './version.js';
 
 const CONFIG_FILE = 'sdlc.config.yaml';
 
@@ -26,6 +43,14 @@ export interface CliDeps {
   makeContext?: ContextFactory;
   /** Builds the context of `board`; defaults to config + `gh`. */
   makeBoardContext?: () => BoardCommandContext | Promise<BoardCommandContext>;
+  /** Builds the context of `config`, which needs no loadable config; defaults to the git root and `gh`. */
+  makeConfigContext?: () => ConfigCommandContext | Promise<ConfigCommandContext>;
+  /** Builds the context of `githook`, which loads the config and builds the tracker only if a hook needs them. */
+  makeGitHookContext?: () => GitHookContext | Promise<GitHookContext>;
+  /** Builds the context of `init`, `upgrade` and `uninstall`; defaults to the git root, git and `gh`. */
+  makeInstallContext?: InstallContextFactory;
+  /** Builds the context of `doctor`, which needs no loadable config; defaults to the git root, git, `gh` and the real PATH. */
+  makeDoctorContext?: () => DoctorContext | Promise<DoctorContext>;
   /** Where results go; defaults to stdout. */
   out?: (text: string) => void;
   /** Where errors go; defaults to stderr. */
@@ -33,13 +58,6 @@ export interface CliDeps {
 }
 
 const writeLine = (stream: NodeJS.WriteStream) => (text: string) => void stream.write(`${text}\n`);
-
-function readVersion(): string {
-  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
-    version?: string;
-  };
-  return manifest.version ?? '0.0.0';
-}
 
 /** The top-level directory of the git repository containing `cwd`, or `undefined` outside one (or without git). */
 function gitRoot(cwd: string): string | undefined {
@@ -52,6 +70,17 @@ function gitRoot(cwd: string): string | undefined {
     return root === '' ? undefined : root;
   } catch {
     return undefined;
+  }
+}
+
+/** The text of a file, `undefined` when there is no such file; any other failure (permissions, a directory) throws. */
+function readFileIfPresent(path: string): string | undefined {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return undefined;
+    throw error;
   }
 }
 
@@ -79,7 +108,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
   const program = new Command()
     .name('sdlc')
     .description('Track agentic SDLC tasks on GitHub Issues and a Projects v2 board')
-    .version(readVersion())
+    .version(packageVersion())
     .option('--config <path>', `config file (default: ${CONFIG_FILE} in the git root)`)
     .option('--json', 'print machine-readable JSON, as --json does on each command');
 
@@ -100,6 +129,95 @@ export function buildProgram(deps: CliDeps = {}): Command {
     deps.makeBoardContext ??
     ((): BoardCommandContext => ({ run: defaultGhRunner, config: environment().cfg, out, err }));
 
+  const makeConfigContext =
+    deps.makeConfigContext ??
+    ((): ConfigCommandContext => {
+      // No `loadEnvironment`: `config validate` reports a broken config and `config suggest` creates one.
+      const cwd = process.cwd();
+      const repoRoot = gitRoot(cwd) ?? cwd;
+      const configOption = program.opts<{ config?: string }>().config;
+      return {
+        run: defaultGhRunner,
+        repoRoot,
+        configPath: configOption === undefined ? join(repoRoot, CONFIG_FILE) : resolve(cwd, configOption),
+        out,
+        err,
+      };
+    });
+
+  const makeInstallContext =
+    deps.makeInstallContext ??
+    ((): InstallContext => {
+      // The config is read by the command's first step, so that a broken one is a reported step.
+      const cwd = process.cwd();
+      const root = gitRoot(cwd);
+      if (root === undefined) {
+        throw new Error('Not inside a git repository: run sdlc from the repository you want to install into');
+      }
+      const configOption = program.opts<{ config?: string }>().config;
+      const configPath = configOption === undefined ? join(root, CONFIG_FILE) : resolve(cwd, configOption);
+      return {
+        fs: nodeRepoFs(root),
+        git: createGitRunner(root),
+        gh: defaultGhRunner,
+        loadConfig: () => loadConfig(configPath),
+        out,
+        err,
+      };
+    });
+
+  const makeDoctorContext =
+    deps.makeDoctorContext ??
+    ((): DoctorContext => {
+      // No `loadEnvironment`: `doctor` reports a missing or broken config and a missing repository as checks.
+      const cwd = process.cwd();
+      const repoRoot = gitRoot(cwd) ?? cwd;
+      const configOption = program.opts<{ config?: string }>().config;
+      const configPath = configOption === undefined ? join(repoRoot, CONFIG_FILE) : resolve(cwd, configOption);
+      return {
+        env: {
+          run: defaultGhRunner,
+          git: createGitRunner(repoRoot),
+          fs: nodeRepoFs(repoRoot),
+          which: async (command, env = process.env) => findOnPath(command, env) !== undefined,
+          exec: (command, args, options) => execProgram(repoRoot, options?.timeoutMs, options?.env)(command, args),
+          env: process.env,
+          nodeVersion: process.version,
+          config: { path: configOption ?? CONFIG_FILE, read: () => readFileIfPresent(configPath) },
+        },
+        out,
+        err,
+      };
+    });
+
+  const makeGitHookContext =
+    deps.makeGitHookContext ??
+    ((): GitHookContext => {
+      // Git runs a hook in the repository root; nothing here may throw, or git would see a failed hook.
+      const cwd = process.cwd();
+      const repoRoot = gitRoot(cwd) ?? cwd;
+      const configOption = program.opts<{ config?: string }>().config;
+      return {
+        repoRoot,
+        git: createGitRunner(repoRoot),
+        exec: execProgram(repoRoot),
+        which: command => findOnPath(command, process.env),
+        loadConfig: () => environment().cfg,
+        makeTracker: cfg => new GitHubTracker(defaultGhRunner, cfg, { repoRoot }),
+        readStdin: () => readAllStdin(),
+        spawnReconcile: logPath => {
+          // The same program that runs this hook, so it works through `sdlc` on the PATH and through npx alike.
+          const entry = process.argv[1];
+          if (entry === undefined) throw new Error('cannot tell which program is running');
+          const config = configOption === undefined ? [] : ['--config', resolve(cwd, configOption)];
+          spawnDetachedLogged({ command: process.execPath, args: [entry, ...config, 'reconcile'], cwd: repoRoot, logPath });
+        },
+        out,
+        err,
+        exit: code => exitAfterFlush(code),
+      };
+    });
+
   // Commander gives `--json` to the program wherever it appears, so hand it on to the command that runs.
   program.hook('preAction', (_program, command) => {
     if (program.opts<{ json?: boolean }>().json) command.setOptionValue('json', true);
@@ -114,6 +232,12 @@ export function buildProgram(deps: CliDeps = {}): Command {
   registerReconcileCommand(program, makeContext);
   registerStatusCommand(program, makeContext);
   registerBoardCommand(program, makeBoardContext);
+  registerConfigCommand(program, makeConfigContext);
+  registerGitHookCommand(program, makeGitHookContext);
+  registerInitCommand(program, makeInstallContext);
+  registerUpgradeCommand(program, makeInstallContext);
+  registerUninstallCommand(program, makeInstallContext);
+  registerDoctorCommand(program, makeDoctorContext, { out, err });
   return program;
 }
 

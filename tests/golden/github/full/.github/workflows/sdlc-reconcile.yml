@@ -1,0 +1,72 @@
+# Managed by agentic-sdlc-kit: `sdlc upgrade` overwrites edits to this file.
+# Brings tasks, the board and issues in line with merges, approvals and deployments.
+name: sdlc-reconcile
+
+on:
+  pull_request:
+    types: [closed]
+  deployment_status:
+  release:
+    types: [published]
+  issue_comment:
+    types: [created]
+  issues:
+    types: [closed, reopened]
+  # Keep the hourly schedule. Reconcile must run at least once per closed_lookback_days
+  # period, and an event it missed (GitHub search lag after a merge, a skipped run) is
+  # picked up by the next scheduled run.
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+jobs:
+  reconcile:
+    # React only to what can change a task:
+    # - a comment that is a command such as /approve or /accept;
+    # - a pull request from this repository: a fork's run gets no repository secrets
+    #   and would only fail, so merges of fork PRs are picked up by the hourly schedule;
+    # - a deployment that succeeded;
+    # - not a Dependabot run: it gets no repository secrets either.
+    if: >-
+      github.actor != 'dependabot[bot]'
+      && (github.event_name != 'issue_comment' || startsWith(github.event.comment.body, '/'))
+      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # One run at a time: a run in progress finishes; a newer waiting run replaces an older waiting one.
+    concurrency:
+      group: sdlc-reconcile
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Check SDLC_TOKEN
+        env:
+          SDLC_TOKEN: ${{ secrets.SDLC_TOKEN }}
+        run: |
+          if [ -z "$SDLC_TOKEN" ]; then
+            echo "::error::Add the SDLC_TOKEN secret (a token with repo and project scopes); see INSTALL.md"
+            exit 1
+          fi
+      # Always read sdlc.config.yaml from the default branch, never from a pull request's
+      # merge ref, so every run uses the configuration that has been merged.
+      # Actions pinned to a full commit SHA (the tag in the comment), so a moved tag cannot change what runs.
+      # persist-credentials: false: the checkout token is not left in .git/config for the later steps.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      # No dependency cache: the job installs nothing from the repository.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      # Download and build the kit without the token: its install scripts never see SDLC_TOKEN.
+      # The next step runs the same command from the npx cache.
+      - name: Install the kit
+        run: npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3 --version
+      - name: Reconcile
+        env:
+          GH_TOKEN: ${{ secrets.SDLC_TOKEN }}
+        run: npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3 reconcile

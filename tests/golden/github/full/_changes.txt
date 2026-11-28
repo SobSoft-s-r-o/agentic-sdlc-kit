@@ -1,0 +1,3 @@
+file .github/pull_request_template.md
+file .github/workflows/sdlc-reconcile.yml
+line-block .gitignore

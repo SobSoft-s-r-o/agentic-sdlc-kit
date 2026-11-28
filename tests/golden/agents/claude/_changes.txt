@@ -1,0 +1,11 @@
+file .claude/agents/sdlc-analyst.md
+file .claude/agents/sdlc-architect.md
+file .claude/agents/sdlc-developer.md
+file .claude/agents/sdlc-diagnostician.md
+file .claude/agents/sdlc-docs-writer.md
+file .claude/agents/sdlc-final-reviewer.md
+file .claude/agents/sdlc-release-manager.md
+file .claude/agents/sdlc-reviewer.md
+file .claude/agents/sdlc-scout.md
+file .claude/agents/sdlc-security-reviewer.md
+file .claude/agents/sdlc-tester.md

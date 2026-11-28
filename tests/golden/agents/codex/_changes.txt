@@ -1,0 +1,11 @@
+file .codex/agents/sdlc-analyst.toml
+file .codex/agents/sdlc-architect.toml
+file .codex/agents/sdlc-developer.toml
+file .codex/agents/sdlc-diagnostician.toml
+file .codex/agents/sdlc-docs-writer.toml
+file .codex/agents/sdlc-final-reviewer.toml
+file .codex/agents/sdlc-release-manager.toml
+file .codex/agents/sdlc-reviewer.toml
+file .codex/agents/sdlc-scout.toml
+file .codex/agents/sdlc-security-reviewer.toml
+file .codex/agents/sdlc-tester.toml
