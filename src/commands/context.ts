@@ -265,13 +265,13 @@ async function queueForSync(ctx: CommandContext, options: RunOptions, error: unk
  * (`{"queued":true,"id":...}` with `--json`). With `SDLC_NO_QUEUE=1` (set by `sdlc sync` when it
  * replays) it is not queued and exits 75 (`EXIT_TEMPFAIL`).
  */
-export async function runCommand<T>(
-  makeContext: ContextFactory,
+export async function runCommand<T, C extends CommandContext = CommandContext>(
+  makeContext: () => C | Promise<C>,
   options: RunOptions,
-  run: (ctx: CommandContext) => Promise<T>,
+  run: (ctx: C) => Promise<T>,
   describe: (result: T) => string,
 ): Promise<void> {
-  let ctx: CommandContext | undefined;
+  let ctx: C | undefined;
   try {
     ctx = await makeContext();
     const result = await run(ctx);

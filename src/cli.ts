@@ -29,6 +29,7 @@ import { registerSyncCommand, spawnReplay, type SyncContext } from './commands/s
 import { registerTaskCommand } from './commands/task.js';
 import { registerUninstallCommand } from './commands/uninstall.js';
 import { registerUpgradeCommand } from './commands/upgrade.js';
+import { registerWorktreeCommand, WORKTREE_GIT_TIMEOUT_MS, type WorktreeContext } from './commands/worktree.js';
 import { errorAsJson, formatCliError } from './commands/errors.js';
 import { loadConfig, type Config } from './config/schema.js';
 import { defaultGhRunner } from './github/gh.js';
@@ -56,6 +57,8 @@ export interface CliDeps {
   makeHookContext?: () => HookContext | Promise<HookContext>;
   /** Builds the context of `sync`, which loads the config only when a gap has to be recorded; defaults to the main checkout, this program and `gh`. */
   makeSyncContext?: () => SyncContext | Promise<SyncContext>;
+  /** Builds the context of `worktree`; defaults to `makeContext` plus git, run in the main checkout. */
+  makeWorktreeContext?: () => WorktreeContext | Promise<WorktreeContext>;
   /** Builds the context of `init`, `upgrade` and `uninstall`; defaults to the git root, git and `gh`. */
   makeInstallContext?: InstallContextFactory;
   /** Builds the context of `doctor`, which needs no loadable config; defaults to the git root, git, `gh` and the real PATH. */
@@ -224,6 +227,17 @@ export function buildProgram(deps: CliDeps = {}): Command {
       };
     });
 
+  const makeWorktreeContext =
+    deps.makeWorktreeContext ??
+    (async (): Promise<WorktreeContext> => {
+      const base = await makeContext();
+      const cwd = process.cwd();
+      // `.worktrees/` is under the main checkout, also when the command runs inside a linked worktree.
+      const mainRoot = base.repoRoot ?? gitRoots(cwd)?.mainRoot;
+      if (mainRoot === undefined) throw new Error('Not inside a git repository: run sdlc worktree from your repository');
+      return { ...base, repoRoot: mainRoot, cwd, git: createGitRunner(mainRoot, { timeoutMs: WORKTREE_GIT_TIMEOUT_MS }) };
+    });
+
   const makeInstallContext =
     deps.makeInstallContext ??
     ((): InstallContext => {
@@ -351,6 +365,7 @@ export function buildProgram(deps: CliDeps = {}): Command {
   registerReconcileCommand(program, makeContext);
   registerStatusCommand(program, makeContext);
   registerSyncCommand(program, makeSyncContext);
+  registerWorktreeCommand(program, makeWorktreeContext);
   registerBoardCommand(program, makeBoardContext);
   registerConfigCommand(program, makeConfigContext);
   registerGitHookCommand(program, makeGitHookContext);

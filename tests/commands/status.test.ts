@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,9 +9,10 @@ import { describeStatus, registerStatusCommand } from '../../src/commands/status
 import { loadConfig, typeRegistry } from '../../src/config/schema.js';
 import { newTask } from '../../src/core/stateMachine.js';
 import type { TaskState } from '../../src/core/types.js';
-import { statusReport } from '../../src/engine/status.js';
+import { statusReport, type StatusReport } from '../../src/engine/status.js';
 import { GAPS_FILE, OUTBOX_FILE } from '../../src/hooks/localLog.js';
 import { FakeTracker } from '../support/fakeTracker.js';
+import { createTestRepo } from '../support/gitRepo.js';
 
 const cfg = loadConfig(join(dirname(fileURLToPath(import.meta.url)), '../fixtures/config/valid.yaml'));
 const types = typeRegistry(cfg);
@@ -321,5 +322,112 @@ describe('describeStatus', () => {
 
     expect(text).toContain('Paused on the agent for more than 7 days (1)');
     expect(text).toContain('#4 Stuck');
+  });
+});
+
+describe('orphan worktrees', () => {
+  const orphan = { path: '/repo/.worktrees/9-lost', branch: 'task/9-lost', reason: 'no-task' } as const;
+  const report = async (orphans: StatusReport['orphanWorktrees']): Promise<StatusReport> => ({
+    ...(await statusReport(setup().ctx, { staleDays: 7 })),
+    orphanWorktrees: orphans,
+  });
+
+  it('prints each one with its path, its branch and why it is one', async () => {
+    const text = describeStatus(
+      await report([
+        orphan,
+        { path: '/repo/.worktrees/4-done', branch: 'task/4-done', reason: 'task-done' },
+        { path: '/repo/.worktrees/old', reason: 'detached' },
+        { path: '/repo/.worktrees/7-gone', branch: 'task/7-gone', reason: 'prunable' },
+      ]),
+      7,
+    );
+
+    const lines = text.split('\n');
+    expect(lines).toContain('Orphan worktrees:');
+    const block = lines.slice(lines.indexOf('Orphan worktrees:') + 1);
+    expect(block).toHaveLength(4);
+    expect(block[0]).toContain('/repo/.worktrees/9-lost (task/9-lost): no-task');
+    expect(block[1]).toContain('/repo/.worktrees/4-done (task/4-done): task-done');
+    expect(block[1]).toContain('sdlc worktree finish 4');
+    expect(block[2]).toContain('/repo/.worktrees/old: detached');
+    expect(block[2]).not.toContain('(');
+    expect(block[3]).toContain('/repo/.worktrees/7-gone (task/7-gone): prunable');
+  });
+
+  it('comes after the queued line, and is the only thing printed for an empty repository', async () => {
+    const queued = { ...(await report([orphan])), queued: { outbox: 1, gaps: 0 } };
+
+    expect(describeStatus(queued, 7)).toBe(
+      [
+        'No tracked tasks.',
+        '',
+        'Queued for sync: 1 write(s), 0 gap(s)',
+        '',
+        'Orphan worktrees:',
+        '  /repo/.worktrees/9-lost (task/9-lost): no-task - no tracked task has this branch',
+      ].join('\n'),
+    );
+    expect(describeStatus(await report([orphan]), 7)).toBe(
+      'No tracked tasks.\n\nOrphan worktrees:\n  /repo/.worktrees/9-lost (task/9-lost): no-task - no tracked task has this branch',
+    );
+  });
+
+  it('leaves the section out when there are none', async () => {
+    expect(describeStatus(await report([]), 7)).toBe('No tracked tasks.');
+  });
+
+  describe('of a real repository', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
+    function repoWithWorktrees() {
+      const repo = createTestRepo();
+      repo.write('.gitignore', '.worktrees/\n');
+      repo.write('README.md', 'x\n');
+      repo.commit('init');
+      repo.git('worktree', 'add', '-q', '-b', 'task/9-lost', '.worktrees/9-lost');
+      repo.git('worktree', 'add', '-q', '-b', 'task/1-live', '.worktrees/1-live');
+      repo.git('worktree', 'add', '-q', '--detach', '.worktrees/old');
+      repo.git('worktree', 'add', '-q', '-b', 'feat/mine', '.worktrees/mine');
+      const h = setup();
+      h.tracker.seedTask(task(1, { status: 'in_progress', phase: 'implementation', updatedAt: ago(1) }), {
+        title: 'Live',
+      });
+      // `repo.root` may be spelled through a symlink (the temp directory of macOS); the root of a context is not normalised.
+      h.ctx.repoRoot = repo.root;
+      return { repo, h, root: realpathSync(repo.root) };
+    }
+
+    it('lists the worktrees nobody needs, with the paths git reports', async () => {
+      const { repo, h, root } = repoWithWorktrees();
+      try {
+        await run(h, '--json');
+
+        const { orphanWorktrees } = JSON.parse(h.out[0] as string) as StatusReport;
+        expect(orphanWorktrees).toEqual([
+          { path: join(root, '.worktrees', '9-lost'), branch: 'task/9-lost', reason: 'no-task' },
+          { path: join(root, '.worktrees', 'old'), reason: 'detached' },
+        ]);
+        expect(process.exitCode).toBe(exitCode);
+      } finally {
+        repo.cleanup();
+      }
+    });
+
+    it('prints them as text', async () => {
+      const { repo, h, root } = repoWithWorktrees();
+      try {
+        await run(h);
+
+        const text = h.out[0] as string;
+        expect(text).toContain('Orphan worktrees:');
+        expect(text).toContain(`${join(root, '.worktrees', '9-lost')} (task/9-lost): no-task`);
+        expect(text).toContain(`${join(root, '.worktrees', 'old')}: detached`);
+        expect(text).not.toContain('1-live');
+        expect(text).not.toContain('mine');
+      } finally {
+        repo.cleanup();
+      }
+    });
   });
 });

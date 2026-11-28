@@ -1,5 +1,8 @@
 import type { CommandContext } from '../commands/context.js';
 import type { Phase, Status, TaskState } from '../core/types.js';
+import { listWorktrees, orphanWorktrees, type OrphanWorktree } from '../git/worktrees.js';
+import { realPathOf } from '../hooks/resolve.js';
+import type { GitRunner } from '../install/provision.js';
 import { queuedCounts } from '../outbox/outbox.js';
 import type { TaskScan, TrackedTask } from '../tracker/types.js';
 import { lookbackScan, reconcile, type ReconcileAction } from './reconcile.js';
@@ -32,6 +35,8 @@ export interface StatusReport {
   pendingReconcile: ReconcileAction[];
   /** What waits in the local queues for `sdlc sync`: commands that could not reach GitHub, and gaps the hooks logged. */
   queued: { outbox: number; gaps: number };
+  /** Worktrees under `.worktrees/` that no live task needs; empty when git or the repository root is not known. */
+  orphanWorktrees: OrphanWorktree[];
 }
 
 const STATUS_ORDER: readonly Status[] = [
@@ -92,12 +97,17 @@ const pausedOn = (state: TaskState, who: TaskState['waitingOn']): boolean =>
  * `queued` counts what waits for `sdlc sync` in the main checkout's cache (nothing when the context has no
  * repository root).
  *
+ * `orphanWorktrees` needs `git` (run in the main checkout) and the main checkout's root, which defaults to
+ * the context's: without either it is empty, and so it is when git cannot list the worktrees. A worktree is
+ * judged against the tasks this report reads, so one whose task closed before the lookback counts as having
+ * no task, unless `all` is set.
+ *
  * Like reconcile, it reads the open tasks and those closed within `reconcile.closedLookbackDays`;
  * `all` reads every task, however long ago it closed.
  */
 export async function statusReport(
   ctx: CommandContext,
-  options: { staleDays: number; all?: boolean },
+  options: { staleDays: number; all?: boolean; git?: GitRunner; repoRoot?: string },
 ): Promise<StatusReport> {
   const now = ctx.now();
   const nowMs = Date.parse(now);
@@ -130,7 +140,24 @@ export async function statusReport(
     untracked: untracked.map(({ issue, title }) => ({ issue, title })),
     pendingReconcile: await pendingReconcile(ctx, scan),
     queued: ctx.repoRoot === undefined ? { outbox: 0, gaps: 0 } : await queuedCounts(ctx.repoRoot),
+    orphanWorktrees: await orphanRadar(options.git, options.repoRoot ?? ctx.repoRoot, tasks),
   };
+}
+
+/** The orphan worktrees, or none when git or the root is missing or git cannot list: the radar never fails the report. */
+async function orphanRadar(
+  git: GitRunner | undefined,
+  repoRoot: string | undefined,
+  tasks: TrackedTask[],
+): Promise<OrphanWorktree[]> {
+  if (git === undefined || repoRoot === undefined) return [];
+  try {
+    const known = new Map(tasks.map(task => [task.issue, { status: task.state.status }]));
+    // git spells paths as they are on disk; the root may come through a symlink.
+    return orphanWorktrees(await listWorktrees(git), realPathOf(repoRoot), known);
+  } catch {
+    return [];
+  }
 }
 
 async function pendingReconcile(ctx: CommandContext, scan: TaskScan): Promise<ReconcileAction[]> {

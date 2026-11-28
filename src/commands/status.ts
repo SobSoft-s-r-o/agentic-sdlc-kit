@@ -2,9 +2,15 @@ import type { Command } from 'commander';
 import { displayPhase, STATUS_LABELS } from '../core/projection.js';
 import type { ReconcileAction } from '../engine/reconcile.js';
 import { statusReport, type StatusReport, type TaskSummary } from '../engine/status.js';
+import type { OrphanWorktree } from '../git/worktrees.js';
+import { createGitRunner } from '../install/provision.js';
 import { runCommand, type ContextFactory } from './context.js';
+import { taskIssueOf } from './githook.js';
 
 const DEFAULT_STALE_DAYS = '7';
+
+/** Listing worktrees reads local files only; a git that takes longer is not worth waiting for. */
+const GIT_TIMEOUT_MS = 10_000;
 
 /** `value` as a positive whole number of days; anything else (`0`, `-1`, `1.5`, `7d`, ...) is an error. */
 export function parseStaleDays(value: string): number {
@@ -29,6 +35,19 @@ function actionLine(action: ReconcileAction): string {
   return `  ${action.issue > 0 ? `#${action.issue} ` : ''}${action.kind}: ${action.detail}`;
 }
 
+/** `<path> (<branch>): <reason> - <what it means>`; a done task's line names the command that cleans up. */
+function orphanLine(orphan: OrphanWorktree): string {
+  const issue = taskIssueOf(orphan.branch);
+  const meaning: Record<OrphanWorktree['reason'], string> = {
+    'no-task': 'no tracked task has this branch',
+    'task-done': `the task is done; run \`sdlc worktree finish ${issue ?? '<issue>'}\``,
+    detached: 'HEAD is detached, so it is no task branch',
+    prunable: 'its directory is gone',
+  };
+  const branch = orphan.branch === undefined ? '' : ` (${orphan.branch})`;
+  return `  ${orphan.path}${branch}: ${orphan.reason} - ${meaning[orphan.reason]}`;
+}
+
 function section(heading: string, lines: string[]): string {
   return [`${heading} (${lines.length})`, ...lines].join('\n');
 }
@@ -36,7 +55,7 @@ function section(heading: string, lines: string[]): string {
 /**
  * Plain-text radar: the tasks grouped by status, then each attention section that has entries
  * (waiting on the owner, stale ones past `staleDays`, untracked issues, pending reconcile actions),
- * and a last line when something waits for `sdlc sync`.
+ * a line when something waits for `sdlc sync`, and the orphan worktrees last.
  */
 export function describeStatus(report: StatusReport, staleDays: number): string {
   const groups = Object.entries(report.byStatus)
@@ -58,6 +77,7 @@ export function describeStatus(report: StatusReport, staleDays: number): string 
   }
   const { outbox, gaps } = report.queued;
   if (outbox > 0 || gaps > 0) blocks.push(`Queued for sync: ${outbox} write(s), ${gaps} gap(s)`);
+  if (report.orphanWorktrees.length > 0) blocks.push(['Orphan worktrees:', ...report.orphanWorktrees.map(orphanLine)].join('\n'));
   return blocks.join('\n\n');
 }
 
@@ -82,7 +102,13 @@ export function registerStatusCommand(program: Command, makeContext: ContextFact
           return makeContext();
         },
         options,
-        ctx => statusReport(ctx, { staleDays, all: options.all === true }),
+        ctx =>
+          statusReport(ctx, {
+            staleDays,
+            all: options.all === true,
+            // The main checkout's worktrees, listed by a git run there; a context without a root has none to list.
+            ...(ctx.repoRoot === undefined ? {} : { git: createGitRunner(ctx.repoRoot, { timeoutMs: GIT_TIMEOUT_MS }) }),
+          }),
         report => describeStatus(report, staleDays),
       );
     });
