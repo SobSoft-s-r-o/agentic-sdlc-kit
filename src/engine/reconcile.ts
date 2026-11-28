@@ -40,6 +40,8 @@ export interface ReconcileAction {
     | 'issue_reopened'
     | 'issue_closed'
     | 'fields_synced'
+    /** `sdlc:partial` added to or removed from a PR so that it matches its body's `Scope:`; the detail is `PR #<n>: +sdlc:partial` or `-sdlc:partial`. */
+    | 'pr_label'
     | 'delivery_report'
     | 'cancel_report'
     | 'skipped_unknown_type'
@@ -157,6 +159,9 @@ function runTracker(inner: Tracker, dryRun: boolean): Tracker {
  *    `cancelled`, checked by `validateCommentApproval` like `sdlc approve`. A comment already
  *    recorded as an approval is skipped silently; any other command that does not count (including
  *    one on a PR that links more than this task) is an `ignored_approval` saying why;
+ * 3b. each PR linking the task gets the `sdlc:partial` label when its body says `Scope: partial`
+ *    and loses it otherwise (`pr_label`; a PR that links several tasks is labelled once); a
+ *    failed label write is an `error` and the other steps still run;
  * 4. a task awaiting deployment gets `targets_deployed` for the targets deployment evidence
  *    satisfies. When a cancellation or the deployments end the task in this run, the cancel or
  *    delivery report is posted before the state is written, unless a trusted author (tracker
@@ -185,10 +190,12 @@ export async function reconcile(ctx: CommandContext, opts: ReconcileOptions = {}
   const types = typeRegistry(ctx.cfg);
   const actions: ReconcileAction[] = [];
 
+  // PRs already labelled (or reported) in this run: one PR can link several tasks.
+  const labelled = new Set<number>();
   for (const task of await loadTasks(run, opts, only, actions)) {
     if (only === 'deployments' && task.state.status !== 'awaiting_deployment') continue;
     try {
-      await reconcileTask(run, task, { dryRun, only, types }, actions);
+      await reconcileTask(run, task, { dryRun, only, types, labelled }, actions);
     } catch (error) {
       actions.push({ issue: task.issue, kind: 'error', detail: reasonOf(error) });
     }
@@ -237,13 +244,20 @@ interface TaskRun {
   type: TaskTypeDef;
   state: TaskState;
   dryRun: boolean;
+  /** Numbers of the PRs whose `sdlc:partial` label this reconcile run has dealt with, shared by all tasks. */
+  labelled: Set<number>;
   push: (kind: ReconcileAction['kind'], detail: string) => void;
 }
 
 async function reconcileTask(
   ctx: CommandContext,
   task: TrackedTask,
-  opts: { dryRun: boolean; only: 'deployments' | 'all'; types: ReadonlyMap<string, TaskTypeDef> },
+  opts: {
+    dryRun: boolean;
+    only: 'deployments' | 'all';
+    types: ReadonlyMap<string, TaskTypeDef>;
+    labelled: Set<number>;
+  },
   actions: ReconcileAction[],
 ): Promise<void> {
   const { issue } = task;
@@ -254,11 +268,12 @@ async function reconcileTask(
     return;
   }
 
-  const t: TaskRun = { ctx, task, type, state: task.state, dryRun: opts.dryRun, push };
+  const t: TaskRun = { ctx, task, type, state: task.state, dryRun: opts.dryRun, labelled: opts.labelled, push };
   if (t.state.status !== 'done' && opts.only === 'all') {
     const prs = await trackerStep('listTaskPrs', issue, () => ctx.tracker.listTaskPrs(issue));
     applyMerges(t, prs);
     await applyApprovals(t, prs);
+    await applyPartialLabels(t, prs);
   }
   const deliveredNow = await applyDeployments(t);
   const reportPosted = await postOutcomeReport(t, deliveredNow);
@@ -410,6 +425,37 @@ async function applyApprovals(t: TaskRun, prs: readonly PrInfo[]): Promise<void>
     } catch (error) {
       if (!(error instanceof ApprovalRefusedError || error instanceof TransitionError)) throw error;
       ignore(error.message);
+    }
+  }
+}
+
+/** The label a PR carries while its body says `Scope: partial` (spec section 8). */
+const PARTIAL_LABEL = 'sdlc:partial';
+
+/**
+ * Step 3b: mirrors each PR's `Scope:` to the `sdlc:partial` label: added to a PR whose body says
+ * `Scope: partial`, removed from any other (a missing or unrecognised scope counts as final, as
+ * `parsePrBody` has it). The label is found without regard to case, as GitHub compares names, and
+ * removed by the name the PR has. A PR in the right state costs no write. A failed write is an
+ * `error` for that PR alone; the next run tries again.
+ */
+async function applyPartialLabels(t: TaskRun, prs: readonly PrInfo[]): Promise<void> {
+  const { ctx, task } = t;
+  for (const pr of prs) {
+    if (t.labelled.has(pr.number)) continue;
+    const present = pr.labels.find(label => label.toLowerCase() === PARTIAL_LABEL);
+    const wanted = parsePrBody(pr.body).scope === 'partial';
+    if (wanted === (present !== undefined)) continue;
+    t.labelled.add(pr.number);
+    try {
+      if (!t.dryRun) {
+        await trackerStep('setLabels', task.issue, () =>
+          ctx.tracker.setLabels(pr.number, wanted ? [PARTIAL_LABEL] : [], wanted ? [] : [present ?? PARTIAL_LABEL]),
+        );
+      }
+      t.push('pr_label', `PR #${pr.number}: ${wanted ? '+' : '-'}${PARTIAL_LABEL}`);
+    } catch (error) {
+      t.push('error', `PR #${pr.number}: ${reasonOf(error)}`);
     }
   }
 }

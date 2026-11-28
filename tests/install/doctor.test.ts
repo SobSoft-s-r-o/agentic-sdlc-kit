@@ -16,7 +16,7 @@ import type { GitRunner } from '../../src/install/provision.js';
 import { graphifyInstall, superpowersInstall } from '../../src/install/stack.js';
 import { renderAll } from '../../src/render/plan.js';
 import { scanFileName } from '../../src/secrets/scan.js';
-import { fakeGh, type FakeGh, type FakeGhStep } from '../support/fakeGh.js';
+import { fakeGh, labelListStep, type FakeGh, type FakeGhStep } from '../support/fakeGh.js';
 import { memoryFs, type MemoryFs } from '../support/memoryFs.js';
 import { githubToken } from '../support/secrets.js';
 import { NoStateCommentError, type TrackedTask, type Tracker } from '../../src/tracker/types.js';
@@ -124,7 +124,7 @@ function ghScript(cfg: Config, over: Partial<Record<GhSlot, FakeGhStep | null>> 
     over.repo ?? { match: ['repo', 'view'], stdout: JSON.stringify({ nameWithOwner: 'acme/shop', defaultBranchRef: { name: 'main' } }) },
     // `null`: a config without a board number, which a dry run does not query.
     ...(over.board === null ? [] : [over.board ?? boardOf(cfg)]),
-    over.labels ?? { match: ['label', 'list'], stdout: JSON.stringify(LABELS.map(name => ({ name }))) },
+    over.labels ?? labelListStep(LABELS),
     ...(cfg.stack.actions ? [over.secrets ?? { match: ['secret', 'list'], stdout: JSON.stringify([{ name: 'SDLC_TOKEN' }, { name: 'OTHER' }]) }] : []),
     over.security ?? { match: ['api', 'repos/acme/shop', '--jq'], stdout: SECURITY_ON },
   ];
@@ -660,7 +660,7 @@ describe('runDoctor', () => {
     expect(notOk(checks)).toEqual([]);
     // read-only: the board is only planned (dry run) and nothing is written to GitHub
     expect(mutations(h.gh)).toEqual([]);
-    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'label', 'secret', 'api']);
+    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'api', 'secret', 'api']);
   });
 
   it('never prints the value of an environment variable', async () => {
@@ -1102,7 +1102,7 @@ describe('runDoctor', () => {
   describe('labels', () => {
     it('fails and names the missing labels, with sdlc init as the fix', async () => {
       const cfg = cfgOf(CONFIG);
-      const h = harness({ gh: ghScript(cfg, { labels: { match: ['label', 'list'], stdout: JSON.stringify([{ name: 'sdlc:task' }, { name: 'type:tooling' }]) } }) });
+      const h = harness({ gh: ghScript(cfg, { labels: labelListStep(['sdlc:task', 'type:tooling']) }) });
       const check = byId(await runDoctor(h.env, cfg), 'labels');
 
       expect(check.status).toBe('fail');
@@ -1115,7 +1115,7 @@ describe('runDoctor', () => {
 
     it('matches names without regard to case, as GitHub does', async () => {
       const cfg = cfgOf(CONFIG);
-      const h = harness({ gh: ghScript(cfg, { labels: { match: ['label', 'list'], stdout: JSON.stringify(LABELS.map(name => ({ name: name.toUpperCase() }))) } }) });
+      const h = harness({ gh: ghScript(cfg, { labels: labelListStep(LABELS.map(name => name.toUpperCase())) }) });
       expect(byId(await runDoctor(h.env, cfg), 'labels').status).toBe('ok');
     });
   });
@@ -1480,7 +1480,7 @@ describe('runDoctor', () => {
   describe('isolation', () => {
     it('keeps every other check when one throws', async () => {
       const cfg = cfgOf(CONFIG);
-      const h = harness({ gh: ghScript(cfg, { labels: { match: ['label', 'list'], stdout: '{{{' } }) });
+      const h = harness({ gh: ghScript(cfg, { labels: { ...labelListStep([]), code: 1, stderr: 'gh: Bad Gateway (HTTP 502)' } }) });
       const checks = await runDoctor(h.env, cfg);
 
       expect(checks.map(c => c.id)).toEqual([...PREFLIGHT_IDS, ...INSTALL_IDS]);
@@ -2162,7 +2162,7 @@ describe('hooks.roundtrip', () => {
 
     expect(byId(checks, 'hooks.roundtrip').status).toBe('ok');
     expect(mutations(h.gh)).toEqual([]);
-    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'label', 'secret', 'api']);
+    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'api', 'secret', 'api']);
     expect(h.fs.log).toHaveLength(before);
     // The round trip needs no git of the repository either: it answers for a repository of its own.
     expect(h.git.calls.filter(call => call[0] === 'symbolic-ref' || call.includes('--show-toplevel'))).toEqual([]);
@@ -2447,7 +2447,7 @@ describe('worktrees.orphans', () => {
     const check = byId(await runDoctor(h.env, h.cfg), 'worktrees.orphans');
     expect(check.status).toBe('ok');
     expect(check.message).toMatch(/no orphan/);
-    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'label', 'secret', 'api']);
+    expect(h.gh.calls.map(call => call[0])).toEqual(['auth', 'repo', 'api', 'api', 'secret', 'api']);
   });
 
   it('is ok for worktrees of live tasks and for ones that are none of the kit (a branch of your own, outside .worktrees)', async () => {

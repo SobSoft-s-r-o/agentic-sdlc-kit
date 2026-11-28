@@ -104,6 +104,14 @@ describe('renderGithub PR template', () => {
     expect(text.endsWith('\n')).toBe(true);
   });
 
+  it('tells the owner under Notes that commands go in a plain comment, not in a review', () => {
+    const text = fileAt(render(cfgOf(MINIMAL)), PR_TEMPLATE_PATH)!.content;
+    const notes = text.slice(text.indexOf('## Notes'));
+    expect(notes).toContain('Owner commands (/approve, /accept, /ran, /cancel) go in a plain comment, not in a review.');
+    // A line of its own, not a Scope or Related line: the parser must not read anything in it.
+    expect(parsePrBody(notes)).toEqual({ issues: [], scope: 'final', scopeRecognized: true, targets: [] });
+  });
+
   it('lists the configured target names on a Targets: line only when targets exist', () => {
     const withTargets = fileAt(render(cfgOf(FULL)), PR_TEMPLATE_PATH)!.content;
     expect(withTargets).toMatch(/^Targets: web, api$/m);

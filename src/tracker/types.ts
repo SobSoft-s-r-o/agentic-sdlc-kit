@@ -99,6 +99,8 @@ export interface PrInfo {
    * have said something else, such as another task (see `prBodyEditedAfter`).
    */
   bodyEditedAt?: string;
+  /** The names of the labels on the PR when it was read (`sdlc:partial` among them, or not). */
+  labels: string[];
 }
 
 /** A comment just posted: its id and GitHub's creation time. */

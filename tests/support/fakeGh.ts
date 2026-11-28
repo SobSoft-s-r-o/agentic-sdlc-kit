@@ -41,3 +41,13 @@ export function fakeGh(script: FakeGhStep[]): FakeGh {
 
   return Object.assign(run, { calls, inputs });
 }
+
+/** The `gh` arguments of reading every label of `repo`, as `ensureLabels` (and `sdlc doctor`) make the call. */
+export const labelListArgs = (repo = 'acme/shop'): string[] => [
+  'api', `repos/${repo}/labels`, '--paginate', '--jq', '.[].name',
+];
+
+/** The answer to `labelListArgs`: `--jq '.[].name'` prints one label name per line, across all pages. */
+export function labelListStep(names: readonly string[], repo = 'acme/shop'): FakeGhStep {
+  return { match: ['api', `repos/${repo}/labels`, '--paginate'], stdout: names.map(name => `${name}\n`).join('') };
+}

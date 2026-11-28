@@ -45,15 +45,18 @@ export interface FakeIssue {
  * the creation time until the comment is edited.
  */
 export type FakeComment = IssueComment & { issue: number; updatedAt: string };
-/** A pull request linked to the task issue `issue` (the real tracker finds these by PR body). */
-export type FakePr = PrInfo & { issue: number };
+/**
+ * A pull request linked to the task issue `issue` (the real tracker finds these by PR body).
+ * `labels` is left out for a PR without labels; `setLabels` on the PR's number changes it.
+ */
+export type FakePr = Omit<PrInfo, 'labels'> & { issue: number; labels?: string[] };
 /** `target` and `description` record what `createDeployment` was given. */
 export type FakeDeployment = DeploymentInfo & { target?: string; description?: string };
 
 const CLOCK_START = Date.UTC(2026, 0, 1);
 const MINUTE = 60_000;
 
-const toPrInfo = ({ number, url, merged, mergeSha, mergedAt, baseRef, body, bodyEditedAt }: FakePr): PrInfo => ({
+const toPrInfo = ({ number, url, merged, mergeSha, mergedAt, baseRef, body, bodyEditedAt, labels }: FakePr): PrInfo => ({
   number,
   url,
   merged,
@@ -62,6 +65,7 @@ const toPrInfo = ({ number, url, merged, mergeSha, mergedAt, baseRef, body, body
   baseRef,
   body,
   ...(bodyEditedAt !== undefined && { bodyEditedAt }),
+  labels: [...(labels ?? [])],
 });
 
 const maxOf = (numbers: number[]): number => numbers.reduce((max, n) => Math.max(max, n), 0);
@@ -278,10 +282,12 @@ export class FakeTracker implements Tracker {
     else found.closeReason = reason;
   }
 
+  /** Issues and pull requests share GitHub's labels API, so `issue` may be a PR's number too. */
   async setLabels(issue: number, add: string[], remove: string[]): Promise<void> {
     this.begin('setLabels', true);
-    const found = this.issue(issue);
-    found.labels = [...new Set([...found.labels.filter(l => !remove.includes(l)), ...add])];
+    const pr = this.prs.find(candidate => candidate.number === issue);
+    const found = pr ?? this.issue(issue);
+    found.labels = [...new Set([...(found.labels ?? []).filter(l => !remove.includes(l)), ...add])];
   }
 
   async syncFields(issue: number, fields: BoardFields): Promise<void> {

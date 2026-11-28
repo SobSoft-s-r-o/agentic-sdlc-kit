@@ -8,7 +8,15 @@
       "oid": "1111111111111111111111111111111111111111"
     },
     "baseRefName": "main",
-    "body": "Related to #12\nScope: partial\nTargets: web"
+    "body": "Related to #12\nScope: partial\nTargets: web",
+    "labels": [
+      {
+        "id": "LA_kwDOAcme01",
+        "name": "sdlc:partial",
+        "description": "A partial PR landed; the task stays open",
+        "color": "fbca04"
+      }
+    ]
   },
   {
     "id": "PR_kwDOAcme32",
@@ -17,7 +25,8 @@
     "mergedAt": null,
     "mergeCommit": null,
     "baseRefName": "main",
-    "body": "Related to #12\nScope: final\nTargets: web, api"
+    "body": "Related to #12\nScope: final\nTargets: web, api",
+    "labels": []
   },
   {
     "id": "PR_kwDOAcme33",
@@ -28,7 +37,8 @@
       "oid": "3333333333333333333333333333333333333333"
     },
     "baseRefName": "main",
-    "body": "Closes #12\n\nThis only mentions the issue with a closing keyword."
+    "body": "Closes #12\n\nThis only mentions the issue with a closing keyword.",
+    "labels": []
   },
   {
     "id": "PR_kwDOAcme34",
@@ -37,7 +47,8 @@
     "mergedAt": null,
     "mergeCommit": null,
     "baseRefName": "main",
-    "body": "Follow-up to the work in Related to #120.\nRelated to #120"
+    "body": "Follow-up to the work in Related to #120.\nRelated to #120",
+    "labels": []
   },
   {
     "id": "PR_kwDOAcme35",
@@ -48,6 +59,20 @@
       "oid": "5555555555555555555555555555555555555555"
     },
     "baseRefName": "main",
-    "body": "Related to #12, #14\nScope: final"
+    "body": "Related to #12, #14\nScope: final",
+    "labels": [
+      {
+        "id": "LA_kwDOAcme02",
+        "name": "bug",
+        "description": "Something isn't working",
+        "color": "d73a4a"
+      },
+      {
+        "id": "LA_kwDOAcme03",
+        "name": "sdlc:task",
+        "description": "Tracked by agentic-sdlc-kit",
+        "color": "0e8a16"
+      }
+    ]
   }
 ]

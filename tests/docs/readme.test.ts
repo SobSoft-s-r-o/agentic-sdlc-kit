@@ -286,6 +286,7 @@ const REQUIRED_TOPICS: Array<{ about: string; terms: string[] }> = [
   { about: 'the dev dependency', terms: ['the PR body of Step 5 must list it', 'pnpm add -D', 'yarn add -D', 'the repository\'s own package manager'] },
   { about: 'the stack installs', terms: ['/plugin install superpowers@claude-plugins-official', 'gemini extensions install https://github.com/obra/superpowers', 'uv tool install graphifyy'] },
   { about: 'owner, agents and tokens', terms: ['## Owner, agents and tokens', 'Agents should write under a separate account', "authored by the agent's own login", 'Use a token with the scopes `repo` and `project`'] },
+  { about: 'owner commands in a plain comment', terms: ['Owner commands (`/approve`, `/accept`, `/ran`, `/cancel`) go in a plain comment, not in a review.'] },
   { about: 'custom agent roles', terms: ['.sdlc/agents/custom', 'To write a literal `{{`, put a backslash before it (`\\{{`)'] },
 ];
 

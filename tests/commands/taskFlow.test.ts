@@ -1279,6 +1279,7 @@ describe('approve sources', () => {
         merged: false,
         baseRef: 'main',
         body: 'Related to #1',
+        labels: [],
         ...extra,
       });
       const URL = 'https://github.test/issues/50#issuecomment-9';

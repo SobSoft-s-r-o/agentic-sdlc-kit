@@ -104,10 +104,12 @@ interface PrRow {
   mergeCommit: { oid: string } | null;
   baseRefName: string;
   body: string | null;
+  /** `gh` answers each label as an object (`id`, `name`, `description`, `color`); only the name is read. */
+  labels?: { name: string }[] | null;
 }
 
 /** The `--json` fields of `gh pr list` and `gh pr view` that `toPrInfo` reads. */
-const PR_FIELDS = 'id,number,url,mergedAt,mergeCommit,baseRefName,body';
+const PR_FIELDS = 'id,number,url,mergedAt,mergeCommit,baseRefName,body,labels';
 
 /**
  * `gh pr list/view --json` offers no edit time of the body, GraphQL does: `PullRequest.lastEditedAt`
@@ -291,6 +293,7 @@ const toPrInfo = (pr: PrRow, bodyEditedAt?: string): PrInfo => ({
   baseRef: pr.baseRefName,
   body: pr.body ?? '',
   ...(bodyEditedAt !== undefined && { bodyEditedAt }),
+  labels: (pr.labels ?? []).map(label => label.name),
 });
 
 interface DeploymentStatusRow {

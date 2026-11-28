@@ -522,9 +522,26 @@ describe('FakeTracker PRs and deployments', () => {
     );
     const prs = await tracker.listTaskPrs(1);
     expect(prs).toEqual([
-      { number: 10, url: 'u10', merged: true, mergeSha: 'abc', mergedAt: NOW, baseRef: 'main', body: 'Related to #1' },
+      { number: 10, url: 'u10', merged: true, mergeSha: 'abc', mergedAt: NOW, baseRef: 'main', body: 'Related to #1', labels: [] },
     ]);
     expect(await tracker.listTaskPrs(404)).toEqual([]);
+  });
+
+  it('carries the labels of a PR, and setLabels changes them by the PR number (PRs share the issue label API)', async () => {
+    const tracker = new FakeTracker();
+    tracker.prs.push(
+      { issue: 1, number: 10, url: 'u10', merged: false, baseRef: 'main', body: 'Related to #1', labels: ['bug'] },
+      { issue: 1, number: 11, url: 'u11', merged: false, baseRef: 'main', body: 'Related to #1' },
+    );
+    expect((await tracker.getPr(10))?.labels).toEqual(['bug']);
+    expect((await tracker.getPr(11))?.labels).toEqual([]);
+
+    await tracker.setLabels(10, ['sdlc:partial'], ['bug']);
+    await tracker.setLabels(11, ['sdlc:partial'], []);
+    expect((await tracker.listTaskPrs(1)).map(pr => pr.labels)).toEqual([['sdlc:partial'], ['sdlc:partial']]);
+    expect(tracker.writes).toBe(2);
+
+    await expect(tracker.setLabels(99, ['x'], [])).rejects.toThrow(/#99/);
   });
 
   it('carries bodyEditedAt of a PR, in a list and in a direct read, and leaves it out when unset', async () => {

@@ -984,7 +984,7 @@ describe('GitHubTracker pull requests', () => {
   const prList = [
     'pr', 'list', '--repo', 'acme/shop', '--state', 'all',
     '--search', '"Related to #12" in:body',
-    '--json', 'id,number,url,mergedAt,mergeCommit,baseRefName,body', '--limit', '100',
+    '--json', 'id,number,url,mergedAt,mergeCommit,baseRefName,body,labels', '--limit', '100',
   ];
   /** What the one GraphQL query for `lastEditedAt` answers: the nodes asked for, by node id. */
   const editTimes = (...nodes: ({ id: string; lastEditedAt: string | null } | null)[]): FakeGhStep =>
@@ -1014,6 +1014,7 @@ describe('GitHubTracker pull requests', () => {
       mergedAt: '2026-11-21T14:00:00Z',
       baseRef: 'main',
       body: 'Related to #12\nScope: partial\nTargets: web',
+      labels: ['sdlc:partial'],
     });
     expect(open).toEqual({
       number: 32,
@@ -1021,6 +1022,7 @@ describe('GitHubTracker pull requests', () => {
       merged: false,
       baseRef: 'main',
       body: 'Related to #12\nScope: final\nTargets: web, api',
+      labels: [],
     });
   });
 
@@ -1097,10 +1099,11 @@ describe('GitHubTracker pull requests', () => {
   });
 
   describe('getPr', () => {
-    const view = ['pr', 'view', '35', '--repo', 'acme/shop', '--json', 'id,number,url,mergedAt,mergeCommit,baseRefName,body'];
+    const view = ['pr', 'view', '35', '--repo', 'acme/shop', '--json', 'id,number,url,mergedAt,mergeCommit,baseRefName,body,labels'];
     const row = {
       id: 'PR_kwDOAcme35', number: 35, url: 'https://github.com/acme/shop/pull/35', mergedAt: '2026-11-22T09:00:00Z',
       mergeCommit: { oid: 'c'.repeat(40) }, baseRefName: 'main', body: 'Related to #12',
+      labels: [{ id: 'LA_1', name: 'sdlc:partial', description: '', color: 'fbca04' }, { id: 'LA_2', name: 'bug', description: '', color: 'd73a4a' }],
     };
 
     it('reads one PR directly, without the search index', async () => {
@@ -1113,7 +1116,14 @@ describe('GitHubTracker pull requests', () => {
         mergedAt: '2026-11-22T09:00:00Z',
         baseRef: 'main',
         body: 'Related to #12',
+        labels: ['sdlc:partial', 'bug'],
       });
+    });
+
+    it('reads no labels from an answer without a labels field', async () => {
+      const { labels: _labels, ...withoutLabels } = row;
+      const { tracker } = trackerFor([ok(view, JSON.stringify(withoutLabels)), editTimes({ id: 'PR_kwDOAcme35', lastEditedAt: null })]);
+      expect((await tracker.getPr(35))?.labels).toEqual([]);
     });
 
     it('fills bodyEditedAt from lastEditedAt', async () => {
