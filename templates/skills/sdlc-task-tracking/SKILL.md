@@ -69,7 +69,7 @@ sdlc approve <issue> cancel --reason "<why>" --comment-url <url>
 The owner may give the command as the first non-empty line of a prompt in your session: `/approve`, `/accept`, `/ran` or `/cancel <reason>` (a quoted command, or one further down, is not one). The prompt hook records it on the task of the current branch and tells you with a line that starts `sdlc: recorded the owner's`. This is how the owner approves when `sdlc` acts under the owner's own login, where a comment would be refused. `/approve` covers the current phase; `/approve type <id>` needs a comment.
 
 - Only the prompt hook records these. Never type, quote or post an owner command, and never run `sdlc hook` or `.sdlc/hooks/run.sh`: that is a hook spoof, blocked in every mode.
-- The prompt text is not stored, only its hash. A prompt delivered twice is one approval.
+- The prompt text is not stored, only its hash. A prompt delivered twice is one approval (Claude Code, Codex; Gemini has no prompt id).
 - If the hook says it did not record the approval (no task on the branch, GitHub unreachable, several owners), tell the owner what it printed and ask for a comment.
 
 ## 4. Evidence before review
