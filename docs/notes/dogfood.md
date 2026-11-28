@@ -4,7 +4,7 @@ Status: installed on 2026-11-28 in `observe` mode with `sdlc init --skip-github`
 
 ## How the repository runs its own build
 
-The hooks and the git hooks start `sdlc` through `.sdlc/hooks/run.sh` and `.sdlc/githooks/hook.sh`. Both look for `sdlc` on PATH, then for `npx --no-install sdlc`. Neither ever downloads anything. Inside this repository, `npx --no-install sdlc` resolves the project's own `bin` entry, which is `dist/cli.js`, so the repository enforces its own last build with no extra setup. This is option 1 of the research in `docs/notes/plan-4-research.md` (section D).
+The harness hooks start `sdlc` through `.sdlc/hooks/run.sh`, and the git hooks through the four scripts in `.sdlc/githooks/` (`pre-commit`, `pre-push`, `post-checkout`, `post-merge`). Both look for `sdlc` on PATH, then for `npx --no-install sdlc`. Neither ever downloads anything. Inside this repository, `npx --no-install sdlc` resolves the project's own `bin` entry, which is `dist/cli.js`, so the repository enforces its own last build with no extra setup. This is option 1 of the research in `docs/notes/plan-4-research.md` (section D).
 
 Consequences to know:
 
@@ -22,7 +22,8 @@ Consequences to know:
 - `kit_ref: main`: no npm release exists yet, so the generated commands use the git form `npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#main`. Set `v0.3.0` after the first publish (the release tags `v0.1.0` and `v0.2.0` were never on npm).
 - `stack.actions: false`: the reconcile workflow needs the `SDLC_TOKEN` secret, which does not exist yet, so `init` does not render `.github/workflows/sdlc-reconcile.yml`.
 - `quality_gate: [npm run typecheck, npm test, npm run build]`: the suggestion only found `npm test`.
-- `owners` holds the owner's GitHub login, which the kit requires. It is a public handle, and it is the only place this page's author put it. The managed skill `sdlc-task-tracking` renders the same list from the config, as it does in every installation.
+- `stack.graphify: false`: this repository ships no `graphify-out/` knowledge graph, so the generated `CLAUDE.md` has no graphify section. The managed files were re-rendered with `sdlc upgrade` after this change.
+- `owners` holds the owner's GitHub login, which the kit requires. It is a public handle. The managed skill `sdlc-task-tracking` renders the same list from the config, as it does in every installation.
 
 ## What `sdlc doctor` reports before the follow-ups
 
@@ -41,10 +42,10 @@ Everything else passes, including `files.managed`, `git.hooksPath`, `secrets.gua
 
 ## Owner follow-ups, in order
 
-1. Run `npx --no-install sdlc init` without `--skip-github`. It creates the board, the labels, the branch protection and the push protection. It prints `Created project #N`. Run it once: a rerun before step 2 creates a second project.
+1. Make sure the `gh` token has the `project` scope (`gh auth refresh -s project`), then run `npx --no-install sdlc init` without `--skip-github`. It creates the board, the labels, the branch protection and the push protection. It prints `Created project #N`. Run it once: a rerun before step 2 creates a second project.
 2. Set `github.project.number: N` in `sdlc.config.yaml`.
-3. Run `gh secret set SDLC_TOKEN` (a token with the `repo` and `project` scopes), then set `stack.actions: true` and run `npx --no-install sdlc init` again to render the reconcile workflow.
-4. Add the CI job (`test` in `.github/workflows/ci.yml`) as a required status check in the branch protection of `main`. `init` sets no required check.
+3. Create a token with the `repo` and `project` scopes under the account that should write as the agents, list that account under `agents` in `sdlc.config.yaml` (INSTALL.md, "Owner, agents and tokens": the workflow must not run under the owner's own login), and run `gh secret set SDLC_TOKEN`. Then set `stack.actions: true` and run `npx --no-install sdlc upgrade` to render `.github/workflows/sdlc-reconcile.yml`. Commit and push that file: the workflow, which runs hourly and on issue and pull request events, starts once it is on the default branch.
+4. Add the CI checks as required status checks in the branch protection of `main`. `init` sets none. The matrix job `test` of `.github/workflows/ci.yml` reports four checks: `test (ubuntu-latest, node 20)`, `test (ubuntu-latest, node 22)`, `test (ubuntu-latest, node 24)` and `test (macos-latest, node 22)`. Pick them from the checks list after one CI run, because GitHub offers only checks it has seen.
 5. Later, after a few tasks have run cleanly in observe mode: `npx --no-install sdlc config set mode enforce`.
 
-Run `npx --no-install sdlc doctor` after each step; every check should pass once step 3 is done.
+Run `npx --no-install sdlc doctor` after each step; no failures remain once step 3 is done. The warnings about the shell environment (`mcp.token`) depend on your own setup.

@@ -82,6 +82,8 @@ Never commit a secret, a token, a personal email address or a private name. Test
 
 The kit is installed in its own repository, in `observe` mode, so its hooks and secret guard watch your commits too. The hooks run `npx --no-install sdlc`, which resolves this checkout's `dist/`. A new clone or task worktree has no `node_modules/` and no `dist/` yet, so run `npm ci && npm run build` there before its hooks can run. Until `dist/` is built, the git hooks print a warning that the secret guard is NOT active and let the commit through, and the harness hooks skip with a one-line notice. After you edit `src/`, build again, or the hooks enforce the old code.
 
+`CLAUDE.md`, `.claude/` and `.mcp.json` are the maintainers' agent workflow. You do not need them to contribute, and the hooks only warn in `observe` mode.
+
 ## Releases
 
 Releases are cut by the maintainers. Bump the version in `package.json`, move the `## [Unreleased]` entries of `CHANGELOG.md` under the new version, and push a tag `v<version>`. The `release` workflow checks that the tag matches `package.json`, runs the tests and publishes to npm through trusted publishing. It skips a version that is already on npm.

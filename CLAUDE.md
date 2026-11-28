@@ -63,9 +63,6 @@ One worktree per task, from fresh `origin/main`: `sdlc worktree start <issue>` (
 ### Context survival
 Keep a running work index beside the plan (for example `docs/plans/<issue>-index.md`): goal, decisions, files touched, what is done, what is next, PR and commit refs. Update it after every step and re-read it first after a compaction or restart. Mirror progress on the board with `sdlc task checkpoint <issue> --current "<step>" --next "<step>"`.
 
-### graphify
-`graphify-out/` is a knowledge graph of this repository. Query it before grepping (`graphify query "<question>"`) and run `graphify update .` after code changes. `graphify-out/` is never committed.
-
 ### Roles
 Delegate to the `sdlc-<role>` agent where the harness has them, otherwise take the role yourself. The tier is the model class to use. Agents never spawn agents.
 - `analyst` (standard): Turns a request into requirements, acceptance criteria and questions for the owner. Use at intake and analysis, before any design.

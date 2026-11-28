@@ -13,8 +13,10 @@ owners: [lubo08]
 agents: []
 merge_policy: owner_only
 quality_gate: [npm run typecheck, npm test, npm run build]
-# The reconcile workflow needs the SDLC_TOKEN secret; switch this to true after the owner adds it.
+# actions: the reconcile workflow needs the SDLC_TOKEN secret; switch this to true after the owner adds it.
+# graphify: false because this repository ships no graphify-out/ knowledge graph.
 stack:
+  graphify: false
   actions: false
 task_types:
   enabled: [tooling, analysis, production-data, artifact, spike]

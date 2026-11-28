@@ -12,5 +12,4 @@ dist/
 !.env.example
 !.env.sample
 !.env.template
-graphify-out/
 # sdlc:end

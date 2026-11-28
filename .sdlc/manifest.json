@@ -104,7 +104,7 @@
     {
       "path": ".gitignore",
       "kind": "line-block",
-      "hash": "sha256:a3b1b2f514ee190104b605a3a0f920d5da1826938a6864c78521d62d488c2b47"
+      "hash": "sha256:c595df5bbb595fe1fb8e850ebacd6629b03b7769dee07e0c82bdbeadd84f48f7"
     },
     {
       "path": ".mcp.json",
@@ -141,7 +141,7 @@
     {
       "path": "CLAUDE.md",
       "kind": "md-block",
-      "hash": "sha256:dc717fa0904829b0ba38fb9fe0905045e7dc2e242c1e3732328ebaf3f1128b00"
+      "hash": "sha256:ddedc9e2c004d9742d90a3c1205b59f72a81a008fcef02c10d87c263f3687cb0"
     }
   ]
 }
