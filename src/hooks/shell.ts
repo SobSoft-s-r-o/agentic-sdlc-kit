@@ -143,6 +143,10 @@ const ADMIN_MERGE = violation(
   'admin-merge',
   '`gh pr merge --admin` bypasses checks and reviews; merge through the normal PR flow',
 );
+const API_MERGE = violation(
+  'api-merge',
+  'merging through gh api bypasses the merge policy; ask the owner to merge',
+);
 const MODE_CHANGE = violation('mode-change', 'only the owner changes sdlc settings (`sdlc config set`); ask the owner');
 const HOOK_SPOOF = violation('hook-spoof', 'sdlc hooks are run by the harness only');
 const KIT_REMOVAL = violation('kit-removal', 'only the owner removes or overwrites the sdlc install');
@@ -331,11 +335,115 @@ function isRmRf(args: readonly string[]): boolean {
   return recursive && force;
 }
 
+/** `gh api` options that take the next word as their value; every other word that is not a flag is the endpoint. */
+const GH_API_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+  '-X',
+  '--method',
+  '-H',
+  '--header',
+  '-f',
+  '--raw-field',
+  '-F',
+  '--field',
+  '-q',
+  '--jq',
+  '-t',
+  '--template',
+  '--input',
+  '--hostname',
+  '--cache',
+  '-p',
+  '--preview',
+]);
+
+/** A REST endpoint that merges a pull request: `repos/<o>/<r>/pulls/<n>/merge`, with or without host, slash or query. */
+const MERGE_ENDPOINT = /(?:^|\/)pulls\/[^/]+\/merge\/?(?:[?#].*)?$/;
+const GRAPHQL_ENDPOINT = /(?:^|\/)graphql\/?$/;
+
+/**
+ * Whether the arguments of `gh api` (after `api`) merge a pull request: the REST endpoint
+ * `.../pulls/<n>/merge` with any method, or a GraphQL call that mentions `mergePullRequest` in any
+ * word, the `query=` field included. The words are read as written, not through `withoutTextValues`,
+ * which would drop the value of `-F query=...`. A query read from a file or from stdin
+ * (`-f query=@file`, `--input`) is not seen.
+ */
+function mergesThroughApi(args: readonly string[]): boolean {
+  let endpoint: string | undefined;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === '--') {
+      endpoint ??= args[i + 1];
+      break;
+    }
+    if (arg.startsWith('-')) i += GH_API_VALUE_OPTIONS.has(arg) ? 1 : 0;
+    else endpoint ??= arg;
+  }
+  if (endpoint === undefined) return false;
+  if (MERGE_ENDPOINT.test(endpoint)) return true;
+  return GRAPHQL_ENDPOINT.test(endpoint) && args.some(arg => arg.includes('mergePullRequest'));
+}
+
 /** `sdlc`'s arguments after its global options (`--config <path>`, `--json`, ...). */
 function sdlcArgs(args: readonly string[]): string[] {
   let i = 0;
   while (i < args.length && (args[i] as string).startsWith('-')) i += args[i] === '--config' ? 2 : 1;
   return args.slice(i);
+}
+
+/** The rules the owner-only commands of `sdlc` break; `args` are the ones after the program, as written. */
+function sdlcViolations(args: readonly string[]): Violation[] {
+  const found: Violation[] = [];
+  const [sub, ...rest] = sdlcArgs(args);
+  if (sub === 'hook') found.push(HOOK_SPOOF);
+  if (sub === 'config' && rest.find(arg => !arg.startsWith('-')) === 'set') found.push(MODE_CHANGE);
+  // `sdlc upgrade` stays allowed: it reinstalls the hooks rather than removing them.
+  if ((sub === 'uninstall' && !rest.includes('--dry-run')) || (sub === 'init' && rest.includes('--overwrite-modified'))) {
+    found.push(KIT_REMOVAL);
+  }
+  return found;
+}
+
+/** The kit's own entry file run through `node`: `.../dist/cli.js` (any depth under a `dist` directory). */
+const KIT_ENTRY = /(?:^|[/\\])dist[/\\](?:[^/\\]+[/\\])*cli\.js$/;
+/** The kit's launcher in `node_modules/.bin`, which `node` can run as a script too. */
+const KIT_BIN = /(?:^|[/\\])node_modules[/\\]\.bin[/\\]sdlc$/;
+
+/** `node` options that take the next word as their value (`-r`, `--import`, ...); the others stand alone or use `=`. */
+const NODE_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+  '-r',
+  '--require',
+  '--import',
+  '--loader',
+  '--experimental-loader',
+  '-C',
+  '--conditions',
+  '--env-file',
+  '--inspect-port',
+  '--stack-trace-limit',
+]);
+/** `node` options that run text instead of a script file. */
+const NODE_EVAL_OPTIONS: ReadonlySet<string> = new Set(['-e', '--eval', '-p', '--print', '-pe']);
+
+/**
+ * The arguments `sdlc` gets when `node` runs the kit's entry file (`dist/cli.js` under any
+ * directory, or `node_modules/.bin/sdlc`) as its script; `undefined` for any other script. Options
+ * of `node` come first (`--enable-source-maps`, `-r <module>`).
+ */
+function nodeKitArgs(args: readonly string[]): readonly string[] | undefined {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === '--') {
+      const script = args[i + 1];
+      return script !== undefined && (KIT_ENTRY.test(script) || KIT_BIN.test(script)) ? args.slice(i + 2) : undefined;
+    }
+    if (NODE_EVAL_OPTIONS.has(arg)) return undefined;
+    if (arg.startsWith('-')) {
+      i += NODE_VALUE_OPTIONS.has(arg) ? 1 : 0;
+    } else {
+      return KIT_ENTRY.test(arg) || KIT_BIN.test(arg) ? args.slice(i + 1) : undefined;
+    }
+  }
+  return undefined;
 }
 
 const isLauncherPath = (word: string): boolean => word === '.sdlc/hooks/run.sh' || word.endsWith('/.sdlc/hooks/run.sh');
@@ -360,6 +468,7 @@ function callViolations(call: Invocation): Violation[] {
     case 'gh': {
       const args = withoutTextValues(call.args);
       if (args[0] === 'pr' && args[1] === 'merge' && args.includes('--admin')) found.push(ADMIN_MERGE);
+      if (args[0] === 'api' && mergesThroughApi(call.args.slice(1))) found.push(API_MERGE);
       break;
     }
     case 'git':
@@ -368,14 +477,13 @@ function callViolations(call: Invocation): Violation[] {
     case 'rm':
       if (isRmRf(call.args)) found.push(RM_RF);
       break;
-    case 'sdlc': {
-      const [sub, ...rest] = sdlcArgs(call.args);
-      if (sub === 'hook') found.push(HOOK_SPOOF);
-      if (sub === 'config' && rest.find(arg => !arg.startsWith('-')) === 'set') found.push(MODE_CHANGE);
-      // `sdlc upgrade` stays allowed: it reinstalls the hooks rather than removing them.
-      if ((sub === 'uninstall' && !rest.includes('--dry-run')) || (sub === 'init' && rest.includes('--overwrite-modified'))) {
-        found.push(KIT_REMOVAL);
-      }
+    case 'sdlc':
+      found.push(...sdlcViolations(call.args));
+      break;
+    case 'node': {
+      // The kit's own entry file is `sdlc` under another name: `node dist/cli.js config set ...`.
+      const kitArgs = nodeKitArgs(call.args);
+      if (kitArgs !== undefined) found.push(...sdlcViolations(kitArgs));
       break;
     }
     default:

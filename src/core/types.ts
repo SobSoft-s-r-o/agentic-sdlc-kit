@@ -78,6 +78,7 @@ export type GapRule =
   | 'subagent-role'
   | 'subagent-tier'
   | 'admin-merge'
+  | 'api-merge'
   | 'ai-cli'
   | 'mode-change'
   | 'hook-spoof'

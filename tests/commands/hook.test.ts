@@ -571,6 +571,30 @@ describe('runHook pre-tool: shell and subagent', () => {
     expect(gapLines()).toMatchObject([{ rule: 'admin-merge', blocked: true, issue: 5, harness: 'claude' }]);
   });
 
+  it('denies a merge through gh api in enforce, and only warns in observe (it is no both-modes rule)', async () => {
+    taskBranch('task/5-x');
+    const command = 'gh api -X PUT repos/o/r/pulls/3/merge';
+
+    const denied = await claudePreTool(payload(repo.root, 'Bash', { command }));
+    expect(denyReason(denied.stdout)).toBe('sdlc (enforce): merging through gh api bypasses the merge policy; ask the owner to merge');
+    expect(gapLines()).toMatchObject([{ rule: 'api-merge', blocked: true, issue: 5 }]);
+
+    const warned = await claudePreTool(payload(repo.root, 'Bash', { command }), { cfg: observe });
+    expect(warned.stdout).not.toContain('deny');
+    expect((JSON.parse(warned.stdout) as { systemMessage: string }).systemMessage).toContain('merging through gh api');
+    expect(gapLines().at(-1)).toMatchObject({ rule: 'api-merge', blocked: false });
+  });
+
+  it('reads `node dist/cli.js` as sdlc: a mode change is denied in enforce, spoofing the hook in both modes', async () => {
+    const mode = await claudePreTool(payload(repo.root, 'Bash', { command: 'node dist/cli.js config set mode observe' }));
+    expect(denyReason(mode.stdout)).toContain('only the owner changes sdlc settings');
+
+    const spoof = await claudePreTool(payload(repo.root, 'Bash', { command: 'node ./node_modules/agentic-sdlc-kit/dist/cli.js hook claude prompt' }), {
+      cfg: observe,
+    });
+    expect(denyReason(spoof.stdout)).toContain('sdlc hooks are run by the harness only');
+  });
+
   it('observe: a shell violation warns only', async () => {
     const result = await claudePreTool(payload(repo.root, 'Bash', { command: 'git push --force origin x' }), {
       cfg: observe,
