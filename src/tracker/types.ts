@@ -12,6 +12,8 @@ export interface TrackedTask {
   stateCommentId: string;
   /** The state comment's `updated_at` when read: `writeState` refuses to write over a newer one. */
   stateCommentUpdatedAt: string;
+  /** The state comment's body when read: `writeState` also refuses when it differs, whatever the time says. */
+  stateCommentBody: string;
 }
 
 /** The issue has no trusted state comment: it is not a tracked task (yet). */
@@ -34,6 +36,11 @@ export interface IssueInfo {
 export interface ExpectedStateComment {
   id: string;
   updatedAt: string;
+  /**
+   * Its body. GitHub's `updated_at` has one-second resolution, so a second writer inside the same
+   * second leaves id and time unchanged; comparing the body (trimmed) closes that window.
+   */
+  body: string;
 }
 
 /** The state comment changed between reading and writing it: re-running reads the new state. */
@@ -148,7 +155,8 @@ export interface Tracker {
   /**
    * Updates the state comment in place, or posts one when there is none (or an edit is refused).
    * With `expected`, the state comment is read again first and `StateChangedError` is thrown,
-   * writing nothing, unless it is still that comment with that `updated_at`.
+   * writing nothing, unless it is still that comment with that `updated_at` and that body
+   * (compared after trimming).
    */
   writeState(issue: number, state: TaskState, expected?: ExpectedStateComment): Promise<void>;
   /** Posts a comment and returns its id and the time GitHub created it. */

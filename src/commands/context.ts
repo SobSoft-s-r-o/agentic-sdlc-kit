@@ -139,6 +139,7 @@ export interface CommitOptions {
 export const expectedOf = (task: TrackedTask): ExpectedStateComment => ({
   id: task.stateCommentId,
   updatedAt: task.stateCommentUpdatedAt,
+  body: task.stateCommentBody,
 });
 
 /** Saves `next` for an already loaded task: `beforeWrite`, then `writeState` -> `syncFields` -> issue open/close. */

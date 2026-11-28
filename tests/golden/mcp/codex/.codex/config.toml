@@ -4,8 +4,8 @@ bearer_token_env_var = "GITHUB_PERSONAL_ACCESS_TOKEN"
 
 [mcp_servers.context7]
 command = "npx"
-args = ["-y", "@upstash/context7-mcp"]
+args = ["-y", "@upstash/context7-mcp@4.9.1"]
 
 [mcp_servers.playwright]
 command = "npx"
-args = ["@playwright/mcp@latest"]
+args = ["@playwright/mcp@0.0.86"]

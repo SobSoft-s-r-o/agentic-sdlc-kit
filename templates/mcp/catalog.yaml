@@ -5,11 +5,16 @@
 #   token from. Only the header `Authorization` with the scheme `Bearer` is supported.
 # - `local.env` lists variable names the harness forwards to the server process; never values.
 # - `default: true` marks a server the kit offers by default (`mcp.servers` defaults to `[github]`).
+# - npx packages are pinned to an exact version (never `@latest`, never a range), so a generated
+#   config does not change under the user when upstream publishes. Bump the version here and in
+#   tests/render/mcp.test.ts together, then refresh the goldens
+#   (`UPDATE_GOLDEN=1 npx vitest run tests/render/mcp.test.ts`).
 #
-# Sources (checked 2026-11-27):
+# Sources (checked 2026-11-28):
 # - github: https://github.com/github/github-mcp-server (remote endpoint and docker command)
-# - context7: https://github.com/upstash/context7 (`npx -y @upstash/context7-mcp`)
-# - playwright: https://github.com/microsoft/playwright-mcp (`npx @playwright/mcp@latest`)
+# - context7: https://github.com/upstash/context7 (`npx -y @upstash/context7-mcp@4.9.1`)
+# - playwright: https://github.com/microsoft/playwright-mcp (`npx @playwright/mcp@0.0.86`)
+# - versions: the output of `npm view <package> version` on 2026-11-28
 
 - id: github
   description: "GitHub's official MCP server: repositories, issues, pull requests and Actions."
@@ -30,11 +35,11 @@
   default: false
   local:
     command: npx
-    args: [-y, "@upstash/context7-mcp"]
+    args: [-y, "@upstash/context7-mcp@4.9.1"]
 
 - id: playwright
   description: Browser automation and page inspection through Playwright.
   default: false
   local:
     command: npx
-    args: ["@playwright/mcp@latest"]
+    args: ["@playwright/mcp@0.0.86"]

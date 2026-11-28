@@ -24,6 +24,7 @@ import {
 } from '../../src/commands/task.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
 import { STATE_MARKER } from '../../src/core/stateComment.js';
+import { renderStageSummary } from '../../src/core/summary.js';
 import { reconcile } from '../../src/engine/reconcile.js';
 import { applyEvent, newTask as newTaskState } from '../../src/core/stateMachine.js';
 import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
@@ -373,6 +374,122 @@ describe('stagePublish', () => {
 
     expect(visibleComments(h.tracker, issue)).toHaveLength(1);
     expect(await stateOf(h.tracker, issue)).toEqual(before);
+  });
+
+  describe('when re-run after its comment was already posted (M7)', () => {
+    /** A publish whose comment was posted and whose state write then failed; returns the issue and the file. */
+    async function publishFailingAfterPost(h: Harness, needsApproval = true) {
+      const issue = await newTask(h);
+      const file = await summaryFile();
+      h.tracker.failNext('writeState');
+      await expect(stagePublish(h.ctx, issue, 'planning', { file, needsApproval })).rejects.toThrow(
+        /the stage summary was posted/,
+      );
+      return { issue, file };
+    }
+
+    it('posts no second comment and still writes the state, at the time of the first comment', async () => {
+      const h = setup();
+      const { issue, file } = await publishFailingAfterPost(h);
+      const [posted] = visibleComments(h.tracker, issue);
+      expect(await stateOf(h.tracker, issue)).toMatchObject({ status: 'in_progress', stages: {} });
+
+      const state = await stagePublish(h.ctx, issue, 'planning', { file, needsApproval: true });
+
+      expect(visibleComments(h.tracker, issue)).toHaveLength(1);
+      expect(state.stages.planning).toMatchObject({ revision: 1, publishedAt: posted!.createdAt });
+      expect(state).toMatchObject({ status: 'paused', waitingOn: 'owner' });
+      expect(await stateOf(h.tracker, issue)).toEqual(state);
+      expect(h.tracker.fields.get(issue)).toMatchObject({ status: 'Paused', waitingOn: 'Owner' });
+    });
+
+    it('compares the body after trimming', async () => {
+      const h = setup();
+      const { issue, file } = await publishFailingAfterPost(h);
+      const posted = visibleComments(h.tracker, issue)[0]!;
+      posted.body = `\n\n${posted.body}  \n`;
+
+      await stagePublish(h.ctx, issue, 'planning', { file, needsApproval: true });
+
+      expect(visibleComments(h.tracker, issue)).toHaveLength(1);
+      expect((await stateOf(h.tracker, issue)).stages.planning?.revision).toBe(1);
+    });
+
+    it('does not count a matching comment that another sdlc comment has since been posted after', async () => {
+      const h = setup();
+      const { issue, file } = await publishFailingAfterPost(h);
+      await h.tracker.postComment(issue, 'Heads up: tests are red.');
+
+      await stagePublish(h.ctx, issue, 'planning', { file, needsApproval: true });
+
+      const bodies = visibleComments(h.tracker, issue).map(c => c.body);
+      expect(bodies).toHaveLength(3);
+      expect(bodies[0]).toBe(bodies[2]);
+    });
+
+    it('does not count an identical comment written by someone else', async () => {
+      const h = setup();
+      const issue = await newTask(h);
+      const file = await summaryFile();
+      h.tracker.seedComment(issue, {
+        author: 'intruder',
+        body: renderStageSummary({
+          phase: 'planning',
+          revision: 1,
+          markdown: 'Goal: add search.\n\nDecision: use the index.',
+          needsApproval: true,
+        }),
+      });
+
+      await stagePublish(h.ctx, issue, 'planning', { file, needsApproval: true });
+
+      const mine = visibleComments(h.tracker, issue).filter(c => c.author === h.tracker.login);
+      expect(mine).toHaveLength(1);
+    });
+
+    it('does not count a comment with a different body, such as an edited summary file', async () => {
+      const h = setup();
+      const { issue } = await publishFailingAfterPost(h);
+
+      await stagePublish(h.ctx, issue, 'planning', { file: await summaryFile('Goal: something else.'), needsApproval: true });
+
+      expect(visibleComments(h.tracker, issue)).toHaveLength(2);
+    });
+
+    it('posts as before when the tracker has no login to match comments to', async () => {
+      const h = setup();
+      const { issue, file } = await publishFailingAfterPost(h);
+      h.tracker.authenticatedLogin = async () => undefined;
+
+      await stagePublish(h.ctx, issue, 'planning', { file, needsApproval: true });
+
+      expect(visibleComments(h.tracker, issue)).toHaveLength(2);
+      expect((await stateOf(h.tracker, issue)).stages.planning?.revision).toBe(1);
+    });
+
+    it('matches the login in any letter case', async () => {
+      const h = setup();
+      const { issue, file } = await publishFailingAfterPost(h);
+      h.tracker.login = h.tracker.login.toUpperCase();
+
+      await stagePublish(h.ctx, issue, 'planning', { file, needsApproval: true });
+
+      expect(visibleComments(h.tracker, issue)).toHaveLength(1);
+    });
+
+    it('changes nothing when the comments cannot be read', async () => {
+      const h = setup();
+      const issue = await newTask(h);
+      const writes = h.tracker.writes;
+      h.tracker.failNext('listComments');
+
+      await expect(
+        stagePublish(h.ctx, issue, 'planning', { file: await summaryFile(), needsApproval: true }),
+      ).rejects.toThrow(/listComments failed for #1.*state was not changed/);
+
+      expect(visibleComments(h.tracker, issue)).toHaveLength(0);
+      expect(h.tracker.writes).toBe(writes);
+    });
   });
 
   it('posts no comment for a phase the task type does not have', async () => {

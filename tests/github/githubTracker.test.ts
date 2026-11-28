@@ -12,7 +12,7 @@ import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
 import { GhError } from '../../src/github/gh.js';
 import { resolveFieldIds } from '../../src/github/board.js';
 import { GitHubTracker } from '../../src/github/githubTracker.js';
-import { NoStateCommentError } from '../../src/tracker/types.js';
+import { NoStateCommentError, StateChangedError } from '../../src/tracker/types.js';
 import { fakeGh, type FakeGh, type FakeGhStep } from '../support/fakeGh.js';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '../fixtures');
@@ -21,6 +21,10 @@ const cfg = loadConfig(join(FIXTURES, 'config/valid.yaml'));
 
 const fixture = (name: string): string => readFileSync(join(FIXTURES, 'gh', name), 'utf8');
 const json = <T>(name: string): T => JSON.parse(fixture(name)) as T;
+
+/** The body of one comment of a `comments-<issue>.json` fixture, as GitHub returned it. */
+const bodyOfComment = (issue: number, id: number): string =>
+  json<{ id: number; body: string }[]>(`comments-${issue}.json`).find(c => c.id === id)!.body;
 
 const ok = (match: string[], stdout: string): FakeGhStep => ({ match, stdout });
 const fromFixture = (match: string[], name: string): FakeGhStep => ok(match, fixture(name));
@@ -433,6 +437,9 @@ describe('GitHubTracker login', () => {
 });
 
 describe('GitHubTracker.writeState', () => {
+  /** The state comment of issue 12 as `getTask` reads it. */
+  const STATE_BODY_12 = bodyOfComment(12, 5003);
+
   it('writeState patches existing comment', async () => {
     const state = task(12);
     const { run, tracker } = trackerFor([
@@ -495,14 +502,56 @@ describe('GitHubTracker.writeState', () => {
       comments(12),
       ok(['api', '-X', 'PATCH', 'repos/acme/shop/issues/comments/5003', '--input', '-'], '{}'),
     ]);
-    await tracker.writeState(12, task(12), { id: '5003', updatedAt: '2026-11-19T09:00:00Z' });
+    await tracker.writeState(12, task(12), { id: '5003', updatedAt: '2026-11-19T09:00:00Z', body: STATE_BODY_12 });
     expect(run.calls).toHaveLength(3);
+  });
+
+  it('compares the body after trimming, so GitHub trimming or padding it does not count as a change', async () => {
+    const { run, tracker } = trackerFor([
+      LOGIN,
+      comments(12),
+      ok(['api', '-X', 'PATCH', 'repos/acme/shop/issues/comments/5003', '--input', '-'], '{}'),
+    ]);
+    await tracker.writeState(12, task(12), {
+      id: '5003',
+      updatedAt: '2026-11-19T09:00:00Z',
+      body: `\n  ${STATE_BODY_12.trim()}  \n\n`,
+    });
+    expect(run.calls).toHaveLength(3);
+  });
+
+  it('refuses, and writes nothing, when the body differs inside the same updated_at second (I4)', async () => {
+    // Two writers within one second: GitHub's updated_at has second resolution, so id and time match.
+    const rewritten = json<{ id: number; body: string }[]>('comments-12.json').map(c =>
+      c.id === 5003 ? { ...c, body: c.body.replace('Writing the export endpoint', 'Written by someone else') } : c,
+    );
+    expect(rewritten.find(c => c.id === 5003)!.body).not.toBe(STATE_BODY_12);
+    const { run, tracker } = trackerFor([
+      LOGIN,
+      ok(['api', '--paginate', 'repos/acme/shop/issues/12/comments?per_page=100'], JSON.stringify(rewritten)),
+    ]);
+    const error = await tracker
+      .writeState(12, task(12), { id: '5003', updatedAt: '2026-11-19T09:00:00Z', body: STATE_BODY_12 })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(StateChangedError);
+    expect((error as Error).message).toBe('state of #12 changed since it was read; re-run');
+    expect(run.calls).toHaveLength(2);
+  });
+
+  it('getTask carries the state comment body, which is what writeState compares', async () => {
+    const { tracker } = trackerFor([
+      ok(['issue', 'view', '12'], fixture('issue-view-12.json')),
+      LOGIN,
+      comments(12),
+    ]);
+    const read = await tracker.getTask(12);
+    expect(read.stateCommentBody).toBe(STATE_BODY_12);
   });
 
   it('refuses, and writes nothing, when the state comment changed since it was read', async () => {
     for (const expected of [
-      { id: '5003', updatedAt: '2026-11-19T08:59:00Z' },
-      { id: '4999', updatedAt: '2026-11-19T09:00:00Z' },
+      { id: '5003', updatedAt: '2026-11-19T08:59:00Z', body: STATE_BODY_12 },
+      { id: '4999', updatedAt: '2026-11-19T09:00:00Z', body: STATE_BODY_12 },
     ]) {
       const { run, tracker } = trackerFor([LOGIN, comments(12)]);
       await expect(tracker.writeState(12, task(12), expected)).rejects.toThrow(
@@ -514,7 +563,7 @@ describe('GitHubTracker.writeState', () => {
 
   it('refuses when a state comment was expected and none is left', async () => {
     const { run, tracker } = trackerFor([LOGIN, comments(14)]);
-    await expect(tracker.writeState(14, task(14), { id: '1', updatedAt: '2026-11-19T09:00:00Z' })).rejects.toThrow(
+    await expect(tracker.writeState(14, task(14), { id: '1', updatedAt: '2026-11-19T09:00:00Z', body: 'gone' })).rejects.toThrow(
       'state of #14 changed since it was read; re-run',
     );
     expect(run.calls).toHaveLength(2);

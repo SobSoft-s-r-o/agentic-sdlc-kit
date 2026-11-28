@@ -21,7 +21,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@upstash/context7-mcp"
+        "@upstash/context7-mcp@4.9.1"
       ]
     }
   },
@@ -33,7 +33,7 @@
     "value": {
       "command": "npx",
       "args": [
-        "@playwright/mcp@latest"
+        "@playwright/mcp@0.0.86"
       ]
     }
   }

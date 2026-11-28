@@ -32,6 +32,7 @@ const task = (overrides: Partial<TrackedTask> = {}): TrackedTask => ({
   state,
   stateCommentId: '1',
   stateCommentUpdatedAt: '2026-06-01T00:00:00.000Z',
+  stateCommentBody: '<!-- sdlc:state -->',
   ...overrides,
 });
 
