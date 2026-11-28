@@ -183,16 +183,19 @@ describe('renderGithub workflow', () => {
     expect(text).toMatch(/^\s*#.*fork.*hourly schedule/im);
   });
 
-  it('checks the token first, then checks out, sets up Node 20, installs the kit without the token and runs reconcile with it', () => {
+  it('checks the token first, then checks out, sets up Node 22, installs the kit without the token and runs reconcile with it', () => {
     const { job } = workflowOf(render(cfgOf(FULL)));
     expect(job.steps).toHaveLength(5);
     const [check, checkout, node, install, reconcile] = job.steps as [Step, Step, Step, Step, Step];
     expect(check.run).toContain('::error::Add the SDLC_TOKEN secret (a token with repo and project scopes); see INSTALL.md');
     expect(checkout).toEqual({
-      uses: 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
-      with: { ref: '${{ github.event.repository.default_branch }}' },
+      uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      with: { ref: '${{ github.event.repository.default_branch }}', 'persist-credentials': false },
     });
-    expect(node).toEqual({ uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020', with: { 'node-version': 20 } });
+    expect(node).toEqual({
+      uses: 'actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1',
+      with: { 'node-version': 22, 'package-manager-cache': false },
+    });
     expect(install).toEqual({ name: 'Install the kit', run: 'npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3 --version' });
     expect(reconcile.run).toBe('npx -y github:SobSoft-s-r-o/agentic-sdlc-kit#v1.2.3 reconcile');
     expect(reconcile.env).toEqual({ GH_TOKEN: '${{ secrets.SDLC_TOKEN }}' });
@@ -203,7 +206,8 @@ describe('renderGithub workflow', () => {
     const uses = job.steps.flatMap(step => (step.uses === undefined ? [] : [step.uses]));
     expect(uses.length).toBe(2);
     for (const action of uses) expect(action).toMatch(/^actions\/[a-z-]+@[0-9a-f]{40}$/);
-    for (const action of uses) expect(text).toContain(`${action} # v4.4.0`);
+    expect(text).toContain(`${uses[0]} # v7.0.1`);
+    expect(text).toContain(`${uses[1]} # v7.1.0`);
   });
 
   it('skips Dependabot runs, which get no repository secrets', () => {

@@ -1,6 +1,6 @@
 import { execFile, type ExecFileException } from 'node:child_process';
 import { accessSync, constants, statSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
 
 /** What running a program gave: its exit code and what it wrote. */
 export interface ExecResult {
@@ -8,6 +8,22 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
 }
+
+/**
+ * The name `env` uses for the variable `name`. Windows names are case-insensitive and its PATH is
+ * often `Path`; `process.env` hides that, but a plain copy of it does not.
+ */
+export function envKey(env: NodeJS.ProcessEnv, name: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== 'win32' || name in env) return name;
+  return Object.keys(env).find(key => key.toUpperCase() === name.toUpperCase()) ?? name;
+}
+
+/** The value of the variable `name` in `env`, found case-insensitively on Windows. */
+export const envValue = (env: NodeJS.ProcessEnv, name: string, platform: NodeJS.Platform = process.platform): string | undefined =>
+  env[envKey(env, name, platform)];
+
+/** The separator of PATH entries on `platform`. */
+export const pathDelimiter = (platform: NodeJS.Platform = process.platform): string => (platform === 'win32' ? ';' : ':');
 
 /** Runs `command`; it rejects only when the program cannot run at all (not found, not allowed, too slow). */
 export type Exec = (command: string, args: string[]) => Promise<ExecResult>;
@@ -79,9 +95,9 @@ export function execProgram(cwd: string, timeoutMs = 120_000, env?: NodeJS.Proce
 }
 
 /** Looks `command` up on the PATH of `env` (with the extensions of PATHEXT on Windows). */
-export function findOnPath(command: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const extensions = process.platform === 'win32' ? ['', ...(env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')] : [''];
-  for (const directory of (env.PATH ?? '').split(delimiter)) {
+export function findOnPath(command: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | undefined {
+  const extensions = platform === 'win32' ? ['', ...(envValue(env, 'PATHEXT', platform) ?? '.EXE;.CMD;.BAT').split(';')] : [''];
+  for (const directory of (envValue(env, 'PATH', platform) ?? '').split(pathDelimiter(platform))) {
     if (directory === '') continue;
     for (const extension of extensions) {
       const candidate = join(directory, `${command}${extension}`);

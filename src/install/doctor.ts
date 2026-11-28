@@ -1,10 +1,10 @@
-import { delimiter } from 'node:path';
 import { loadConfigFromString, type Config } from '../config/schema.js';
 import { ensureBoard } from '../github/board.js';
 import { GhError, ghJson, type GhRunner } from '../github/gh.js';
 import { WORKFLOW_PATH } from '../render/github.js';
 import { KIT_GIT_URL } from '../render/instructions.js';
 import { mcpEnvVars } from '../render/mcp.js';
+import { envKey, pathDelimiter } from '../secrets/gitleaks.js';
 import { scanFileName } from '../secrets/scan.js';
 import { MANIFEST_PATH, entryDiskHash, readManifest, type Manifest, type ManifestEntry } from './manifest.js';
 import {
@@ -362,13 +362,16 @@ const underNpmExec = (env: NodeJS.ProcessEnv): boolean => env.npm_command === 'e
  * doctor run through `npx -y github:...` would otherwise find its own temporary `sdlc` and
  * report the hooks as able to run when they are not. `stripped` counts the PATH entries removed.
  */
-export function hookEnvironment(env: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; stripped: number } {
+export function hookEnvironment(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): { env: NodeJS.ProcessEnv; stripped: number } {
   const npm = underNpmExec(env);
+  // On Windows the variable is often `Path`: strip it under the name it has, so the copy keeps that name.
+  const pathKey = envKey(env, 'PATH', platform);
+  const delimiter = pathDelimiter(platform);
   const result: NodeJS.ProcessEnv = {};
   let stripped = 0;
   for (const [key, value] of Object.entries(env)) {
     if (npm && /^npm_/i.test(key)) continue;
-    if (key.toUpperCase() !== 'PATH' || value === undefined) {
+    if (key !== pathKey || value === undefined) {
       result[key] = value;
       continue;
     }
@@ -404,9 +407,15 @@ async function checkSdlcOnPath(env: DoctorEnv): Promise<Check> {
   );
 }
 
-/** The repository's own hooks that the kit's scripts run after the sdlc step; one that is not executable is skipped, which is a warning. */
-async function checkLegacyHooks(env: DoctorEnv): Promise<Check> {
+/**
+ * The repository's own hooks in `.git/hooks`. Only while `core.hooksPath` is the kit's do the sdlc
+ * hooks run them after their own step (one that is not executable is skipped: a warning). With
+ * `core.hooksPath` unset git runs them itself, and with it pointing at another manager (husky, say)
+ * git runs neither them nor the sdlc hooks; `git.hooksPath` reports that case.
+ */
+async function checkLegacyHooks(env: DoctorEnv, hooks: Hooks): Promise<Check> {
   const id = 'git.legacyHooks';
+  if ('error' in hooks) return notChecked(id, 'core.hooksPath could not be read');
   let found: Awaited<ReturnType<typeof findLegacyHooks>>;
   try {
     found = await findLegacyHooks(env.git, env.fs.root, env.hookProbe);
@@ -414,6 +423,13 @@ async function checkLegacyHooks(env: DoctorEnv): Promise<Check> {
     return warn(id, `cannot check for hooks of your own: ${describeError(error)}`);
   }
   const dir = printable(found.dir);
+  const own = [...found.chained, ...found.notExecutable];
+  if (!hooksActive(hooks)) {
+    const names = own.length > 0 ? `${own.join(', ')} in ${dir}` : `none in ${dir}`;
+    return hooks.value === undefined
+      ? ok(id, `core.hooksPath is not set, so the sdlc hooks are not active and git runs your own hooks itself (${names}); once it is set, the sdlc hooks run them after their own step`)
+      : ok(id, `core.hooksPath is ${printable(hooks.value)}, so git runs the hooks there: neither the sdlc hooks nor your hooks in ${dir} (${own.length > 0 ? own.join(', ') : 'none'}) run; see git.hooksPath`);
+  }
   if (found.notExecutable.length > 0) {
     return warn(
       id,
@@ -440,7 +456,8 @@ async function checkKitRef(env: DoctorEnv, cfg: Config): Promise<Check> {
   let result: Awaited<ReturnType<DoctorEnv['exec']>>;
   try {
     result = await env.exec('git', ['ls-remote', '--exit-code', KIT_GIT_URL, ref], {
-      env: { ...env.env, GIT_TERMINAL_PROMPT: '0' },
+      // No prompt for credentials, and no ssh passphrase or host-key prompt when a url.insteadOf rule turns the URL into ssh.
+      env: { ...env.env, GIT_TERMINAL_PROMPT: '0', ...(env.env.GIT_SSH_COMMAND === undefined ? { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' } : {}) },
       timeoutMs: KIT_REF_TIMEOUT_MS,
     });
   } catch (error) {
@@ -664,7 +681,7 @@ export async function runDoctor(env: DoctorEnv, cfg: Config): Promise<Check[]> {
 
   const hooks = await readHooks(env.git);
   await add(isolated('git.hooksPath', () => checkHooksPath(hooks)));
-  await add(isolated('git.legacyHooks', () => checkLegacyHooks(env)));
+  await add(isolated('git.legacyHooks', () => checkLegacyHooks(env, hooks)));
   const onPath = await add(isolated('sdlc.onPath', () => checkSdlcOnPath(env)));
   await add(isolated('kit.ref', () => checkKitRef(env, cfg)));
 

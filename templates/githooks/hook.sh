@@ -3,13 +3,14 @@
 # It runs `sdlc githook {{name}}`, then the repository's own {{name}} hook from the git hooks
 # directory, if there is one: core.hooksPath points git here, so git no longer runs that one itself.
 {{#if stdin}}
-# git feeds pre-push the refs on stdin and both steps need them, so keep a copy (shell builtins only;
-# a ref line holds no character that `read -r` would change).
-sdlc_stdin=''
-while IFS= read -r sdlc_line || [ -n "$sdlc_line" ]; do
-  sdlc_stdin="$sdlc_stdin$sdlc_line
-"
-done
+# git feeds pre-push the refs on stdin and both steps need them, so keep a copy, byte for byte: the
+# `.` keeps the trailing newlines that $(...) would drop, and is removed again. If stdin cannot be
+# read the push is blocked, because the secret guard would otherwise see no refs and let it through.
+if ! sdlc_stdin=$(cat && echo .); then
+  echo "agentic-sdlc-kit: pre-push could not read the refs git passed on stdin; push blocked" >&2
+  exit 1
+fi
+sdlc_stdin=${sdlc_stdin%.}
 {{/if}}
 sdlc_status=0
 if command -v sdlc >/dev/null 2>&1; then

@@ -242,12 +242,14 @@ describe('sdlc githook (built)', () => {
     return root;
   }
 
-  /** A PATH that finds git and nothing else, so no hook can reach `gh` and the real GitHub. */
+  /** A PATH that finds git (and `cat`, which pre-push uses to keep its stdin) and nothing else, so no hook can reach `gh` and the real GitHub. */
   function onlyGit(): NodeJS.ProcessEnv {
     const bin = join(dir, 'only-git');
     if (!existsSync(bin)) {
       mkdirSync(bin);
-      symlinkSync(execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim(), join(bin, 'git'));
+      for (const tool of ['git', 'cat']) {
+        symlinkSync(execFileSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim(), join(bin, tool));
+      }
     }
     return isolatedEnv(bin);
   }

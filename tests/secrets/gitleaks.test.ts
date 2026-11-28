@@ -111,6 +111,18 @@ describe('findOnPath', () => {
     expect(findOnPath('tool', { PATH: '' })).toBeUndefined();
     expect(findOnPath('tool', {})).toBeUndefined();
   });
+
+  it('on Windows reads the PATH under any casing (a copied environment keeps `Path`), split at `;`', () => {
+    dir = mkdtempSync(join(tmpdir(), 'sdlc-path-'));
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'tool'), '#!/bin/sh\n');
+    chmodSync(join(bin, 'tool'), 0o755);
+    const env = { Path: [join(dir, 'none'), bin].join(';'), PathExt: '.EXE' };
+
+    expect(findOnPath('tool', env, 'win32')).toBe(join(bin, 'tool'));
+    expect(findOnPath('tool', env, 'linux')).toBeUndefined();
+  });
 });
 
 describe('execProgram', () => {

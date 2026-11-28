@@ -38,14 +38,22 @@ function fakeBin(name: string, body: string, bin = join(dir, 'bin')): string {
   return bin;
 }
 
-/** Runs the rendered hook with `/bin/sh` and a PATH of only `bins`: nothing else on the machine is visible to it. */
+/** A bin directory with only `cat`, which pre-push uses to keep its stdin (every system that has git has it). */
+function catOnly(): string {
+  const tools = join(dir, 'cat-only');
+  mkdirSync(tools, { recursive: true });
+  const found = execFileSync('sh', ['-c', 'command -v cat'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(tools, 'cat'), `#!/bin/sh\nexec ${found} "$@"\n`);
+  chmodSync(join(tools, 'cat'), 0o755);
+  return tools;
+}
+
+/** Runs the rendered hook with `/bin/sh` and a PATH of only `bins` and `cat`: nothing else on the machine is visible to it. */
 function runHook(name: string, args: string[], bins: string[], input = '') {
   const script = join(dir, `${name}.sh`);
   writeFileSync(script, scriptOf(name).content);
-  const emptyPath = join(dir, 'empty');
-  mkdirSync(emptyPath, { recursive: true });
   const result = spawnSync('/bin/sh', [script, ...args], {
-    env: { PATH: [...bins, emptyPath].join(':') },
+    env: { PATH: [...bins, catOnly()].join(':') },
     input,
     encoding: 'utf8',
   });
@@ -75,7 +83,8 @@ describe('renderGitHooks', () => {
     expect(content).toContain(`\n  ${feed}sdlc githook ${name} "$@"\n`);
     expect(content).toContain(`\n  ${feed}npx --no-install sdlc githook ${name} "$@"\n`);
     expect(content).toContain(`\n${feed}"$sdlc_legacy" "$@"\nexit $?\n`);
-    expect(content).not.toMatch(/\[\[|\bbash\b|\bfunction\b|<\(|\$\{[^}]*[#%/:^,][^}]*\}/);
+    // `${x%.}` (POSIX suffix removal) is allowed; the bash-only forms are not.
+    expect(content).not.toMatch(/\[\[|\bbash\b|\bfunction\b|<\(|\$\{[^}]*[#/:^,][^}]*\}/);
     expect(content).not.toMatch(/\$@(?!")|(?<!")\$@/);
     expect(content.endsWith('\n')).toBe(true);
   });
@@ -151,6 +160,35 @@ describe('the rendered scripts, run under /bin/sh', () => {
     expect(result.status).toBe(0);
     expect(readFileSync(calls, 'utf8')).toBe('--no-install sdlc --version\n');
     expect(result.stderr).toContain('sdlc not found; agentic-sdlc-kit git hook pre-push skipped');
+  });
+
+  it('pre-push hands stdin over byte for byte: blank lines, trailing newlines and no final newline', () => {
+    const bin = fakeBin('sdlc', 'cat');
+    for (const input of ['a 1 b 2\n\n\n', 'no newline at the end', '\n', '']) {
+      const result = runHook('pre-push', [], [bin], input);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe(input);
+    }
+  });
+
+  it('pre-push keeps 5000 ref lines in linear time', () => {
+    const bin = fakeBin('sdlc', 'cat');
+    const line = 'refs/heads/task/1-some-branch 0123456789abcdef0123456789abcdef01234567 refs/heads/task/1-some-branch 0000000000000000000000000000000000000000\n';
+    const input = line.repeat(5000);
+    const started = Date.now();
+    const result = runHook('pre-push', [], [bin], input);
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(input);
+  });
+
+  it('pre-push blocks when it cannot read its stdin (no cat): the guard fails closed', () => {
+    const bin = fakeBin('sdlc', 'cat');
+    const script = join(dir, 'pre-push.sh');
+    writeFileSync(script, scriptOf('pre-push').content);
+    const result = spawnSync('/bin/sh', [script], { env: { PATH: bin }, input: 'refs/heads/a 1 refs/heads/a 0\n', encoding: 'utf8' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('could not read the refs git passed on stdin');
   });
 
   it('the npx probe never reads stdin: pre-push hands all of it to the real command', () => {

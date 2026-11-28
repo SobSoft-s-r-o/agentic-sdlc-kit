@@ -705,6 +705,23 @@ describe('runDoctor', () => {
       expect(check.fix).toBe('chmod +x .git/hooks/post-merge');
     });
 
+    it('with core.hooksPath unset, says the sdlc hooks are not active and git runs your hooks itself; nothing to chmod', async () => {
+      const h = harness({ git: { hooksPath: undefined }, legacyHooks: { 'pre-commit': 'executable', 'post-merge': 'not-executable' } });
+      const check = byId(await runDoctor(h.env, h.cfg), 'git.legacyHooks');
+      expect(check.status).toBe('ok');
+      expect(check.message).toBe(
+        'core.hooksPath is not set, so the sdlc hooks are not active and git runs your own hooks itself (pre-commit, post-merge in .git/hooks); ' +
+          'once it is set, the sdlc hooks run them after their own step',
+      );
+    });
+
+    it('with core.hooksPath at another manager, says neither the sdlc hooks nor yours run', async () => {
+      const h = harness({ git: { hooksPath: '.husky' }, legacyHooks: { 'pre-commit': 'executable' } });
+      const check = byId(await runDoctor(h.env, h.cfg), 'git.legacyHooks');
+      expect(check.status).toBe('ok');
+      expect(check.message).toBe('core.hooksPath is .husky, so git runs the hooks there: neither the sdlc hooks nor your hooks in .git/hooks (pre-commit) run; see git.hooksPath');
+    });
+
     it('warns, and does not fail, when git cannot name its directory', async () => {
       const h = harness();
       const base = h.env.git;
@@ -723,6 +740,14 @@ describe('runDoctor', () => {
       const index = h.execCalls.findIndex(([command]) => command === 'git');
       expect(h.execCalls[index]).toEqual(['git', ['ls-remote', '--exit-code', 'https://github.com/SobSoft-s-r-o/agentic-sdlc-kit.git', 'main']]);
       expect(h.execEnvs[index]?.GIT_TERMINAL_PROMPT).toBe('0');
+      expect(h.execEnvs[index]?.GIT_SSH_COMMAND).toBe('ssh -o BatchMode=yes');
+    });
+
+    it('keeps a GIT_SSH_COMMAND the owner set', async () => {
+      const h = harness({ env: { GIT_SSH_COMMAND: 'ssh -i ~/.ssh/other' } });
+      await runDoctor(h.env, h.cfg);
+      const index = h.execCalls.findIndex(([command]) => command === 'git');
+      expect(h.execEnvs[index]?.GIT_SSH_COMMAND).toBe('ssh -i ~/.ssh/other');
     });
 
     it('warns when the ref does not exist, and says how to fix it', async () => {
@@ -1485,6 +1510,15 @@ describe('hookEnvironment', () => {
       HOME: '/h',
     });
     expect(env).toEqual({ PATH: '/usr/local/bin', HOME: '/h' });
+    expect(stripped).toBe(2);
+  });
+
+  it('on Windows strips the PATH under the name it has (`Path`), split and joined at `;`', () => {
+    const { env, stripped } = hookEnvironment(
+      { Path: 'C:\\npm-cache\\_npx\\1a\\node_modules\\.bin;C:\\repo\\node_modules\\.bin;C:\\Windows', npm_command: 'exec' },
+      'win32',
+    );
+    expect(env).toEqual({ Path: 'C:\\Windows' });
     expect(stripped).toBe(2);
   });
 
