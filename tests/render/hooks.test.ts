@@ -320,11 +320,23 @@ describe('the rendered launcher, run under /bin/sh', () => {
   });
 
   it('without sdlc and without npx prints nothing to stdout, one line to stderr and exits 0', () => {
-    const result = run(['claude', 'pre-tool'], [], '{"tool_name":"Bash"}');
+    for (const harness of ['claude', 'codex']) {
+      const result = run([harness, 'pre-tool'], [], '{"tool_name":"Bash"}');
 
-    expect(result.status).toBe(0);
-    expect(result.stdout).toBe('');
-    expect(result.stderr).toBe('sdlc: hook skipped: sdlc not found\n');
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('sdlc: hook skipped: sdlc not found\n');
+    }
+  });
+
+  it('for gemini the skip answers {} on stdout, with the same single stderr line, and exits 0', () => {
+    for (const event of ['session-start', 'prompt', 'pre-tool']) {
+      const result = run(['gemini', event], [], '{"tool_name":"run_shell_command"}');
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe('{}\n');
+      expect(result.stderr).toBe('sdlc: hook skipped: sdlc not found\n');
+    }
   });
 
   it('runs sdlc hook with the harness and event, and passes stdin and stdout through', () => {
@@ -382,13 +394,68 @@ describe('the rendered launcher, run under /bin/sh', () => {
     expect(run(['claude', 'prompt'], [bin]).stdout).toBe('sdlc ran\n');
   });
 
-  it('exits 0 even when sdlc fails, so no harness reads a crash as a block', () => {
+  it('exits 0 even when sdlc fails, so no harness reads a crash as a block, and keeps what sdlc printed', () => {
     const bin = fakeBin('sdlc', 'echo "partial"; exit 2');
 
-    const result = run(['claude', 'pre-tool'], [bin]);
+    for (const harness of ['claude', 'gemini']) {
+      const result = run([harness, 'pre-tool'], [bin]);
 
-    expect(result.status).toBe(0);
-    expect(result.stdout).toBe('partial\n');
-    expect(result.stderr).toBe('sdlc: hook skipped: sdlc exited with status 2\n');
+      expect(result.status).toBe(0);
+      // output that is there stays as it is, for Gemini too: no {} is added to it
+      expect(result.stdout).toBe('partial\n');
+      expect(result.stderr).toBe('sdlc: hook skipped: sdlc exited with status 2\n');
+    }
+  });
+
+  it('when sdlc fails with nothing on stdout, claude and codex get an empty stdout and gemini gets {}', () => {
+    const bin = fakeBin('sdlc', 'exit 1');
+
+    for (const harness of ['claude', 'codex']) {
+      const result = run([harness, 'prompt'], [bin]);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('sdlc: hook skipped: sdlc exited with status 1\n');
+    }
+    const gemini = run(['gemini', 'prompt'], [bin]);
+    expect(gemini.status).toBe(0);
+    expect(gemini.stdout).toBe('{}\n');
+    expect(gemini.stderr).toBe('sdlc: hook skipped: sdlc exited with status 1\n');
+  });
+
+  it('the npx route skips the same way: {} for gemini after a failure with no output, nothing for claude', () => {
+    const bin = fakeBin('npx', 'if [ "$*" = "--no-install sdlc --version" ]; then exit 0; fi; exit 3');
+
+    expect(run(['claude', 'pre-tool'], [bin]).stdout).toBe('');
+    const gemini = run(['gemini', 'pre-tool'], [bin]);
+    expect(gemini.status).toBe(0);
+    expect(gemini.stdout).toBe('{}\n');
+    expect(gemini.stderr).toBe('sdlc: hook skipped: sdlc exited with status 3\n');
+  });
+
+  it('adds nothing when sdlc succeeds with an empty answer, for gemini as for the others', () => {
+    const bin = fakeBin('sdlc', 'exit 0');
+
+    for (const harness of ['claude', 'codex', 'gemini']) {
+      const result = run([harness, 'session-start'], [bin]);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('');
+    }
+  });
+
+  it('hands sdlc stdout over byte for byte: no final newline, trailing blank lines, dots in the text', () => {
+    const bin = fakeBin('sdlc', 'cat');
+    for (const input of ['{"a":"1.5.0"}', '{"a":1}\n\n\n', 'x.y.z.\n', '\n', '.']) {
+      const result = run(['gemini', 'prompt'], [bin], input);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe(input);
+      expect(result.stderr).toBe('');
+    }
+  });
+
+  it('still forwards stdin to sdlc while it keeps the answer in a variable', () => {
+    const bin = fakeBin('sdlc', 'read -r line; echo "got:[$line]"');
+
+    expect(run(['claude', 'prompt'], [bin], 'hello\n').stdout).toBe('got:[hello]\n');
   });
 });

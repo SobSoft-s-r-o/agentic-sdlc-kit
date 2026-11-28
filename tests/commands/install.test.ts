@@ -923,6 +923,33 @@ describe('sdlc upgrade', () => {
     expect(gh.calls).toEqual([]);
   });
 
+  it('dropping codex removes only our hooks from a .codex/hooks.json the user already had, and restores it byte for byte', async () => {
+    const original =
+      '{\n' +
+      '  "hooks": {\n' +
+      '    "PreToolUse": [\n' +
+      '      { "matcher": "^Bash$", "hooks": [{ "type": "command", "command": "./scripts/our-check.sh", "timeout": 5 }] }\n' +
+      '    ]\n' +
+      '  }\n' +
+      '}\n';
+    const h = await installed({ '.codex/hooks.json': original });
+    const hooks = (JSON.parse(h.fs.files.get('.codex/hooks.json') as string) as { hooks: Record<string, unknown[]> }).hooks;
+    // their hook first, ours after it; the events they did not use were added whole
+    expect(Object.keys(hooks)).toEqual(['PreToolUse', 'SessionStart', 'UserPromptSubmit']);
+    expect(hooks.PreToolUse).toHaveLength(2);
+    expect(JSON.stringify(hooks.PreToolUse?.[0])).toContain('our-check.sh');
+    expect(JSON.stringify(hooks.PreToolUse?.[1])).toContain('.sdlc/hooks/run.sh');
+    h.setConfig(configWith('stack: { actions: true }', '[claude]'));
+
+    await h.go(['upgrade']);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(h.fs.files.get('.codex/hooks.json')).toBe(original);
+    // claude is still configured: its hooks and the launcher stay
+    expect(JSON.stringify(h.fs.files.get('.claude/settings.json'))).toContain('.sdlc/hooks/run.sh');
+    expect(h.fs.files.has('.sdlc/hooks/run.sh')).toBe(true);
+  });
+
   it('--dry-run lists the update and the removals and changes nothing', async () => {
     const h = await installed({}, TWO_SERVERS);
     const before = h.fs.snapshot();
