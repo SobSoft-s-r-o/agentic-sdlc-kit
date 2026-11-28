@@ -3,10 +3,10 @@
 Managed by agentic-sdlc-kit: edits between the markers are overwritten, so change `sdlc.config.yaml` instead. Detail lives in the skills `sdlc-task-tracking`, `sdlc-delivery` and `sdlc-orientation`; read the one you need.
 {{#if enforce}}
 
-Mode: **enforce**. The git hooks block commits to `{{defaultBranch}}` and pushes of `task/*` branches without a tracked task, and `sdlc` refuses steps the rules do not allow. Harness hooks that block edits before the plan is approved are coming; until then, keep that rule yourself. Fix the cause of a block; never work around it.
+Mode: **enforce**. The git hooks block commits to `{{defaultBranch}}` and pushes of `task/*` branches without a tracked task. Harness hooks block file edits before the plan is approved (docs, debugging repro and task types without a planning phase excepted), subagents without a role and model tier, `gh pr merge --admin`, other AI CLIs and `sdlc config set`, and `sdlc` refuses steps the rules do not allow. Fix the cause of a block; never work around it.
 {{else}}
 
-Mode: **observe**. Gaps are recorded and warned about, not blocked. Follow every rule here anyway.
+Mode: **observe**. The harness hooks warn you and record gaps on the task instead of blocking. Follow every rule here anyway.
 {{/if}}
 
 ### What this is
@@ -24,6 +24,8 @@ Start a phase with `sdlc stage start <issue> <phase>`; publish its result with `
 {{/each}}
 
 Results of phases before implementation (design, diagnosis, plan) need the owner's approval: publish with `--needs-approval`, then stop and wait. The owner approves with a `/approve` comment on the issue; record it with `sdlc approve <issue> approve --comment-url <url>`. A type that ends on the owner's acceptance publishes its result and waits for `/accept`. Never approve, accept or confirm for the owner, and never start the next phase first.
+
+The owner may approve by typing the command (for example `/approve`) as the first line of a prompt; the hook records it. Never type or post an owner command yourself.
 
 {{#if superpowers}}
 ### Superpowers route
@@ -68,7 +70,7 @@ A script that changes production data is a `production-data` task. Before review
 
 {{/if}}
 ### Worktrees
-One worktree per task, from fresh `origin/{{defaultBranch}}`: `git fetch origin && git worktree add .worktrees/<issue>-<slug> -b task/<issue>-<slug> origin/{{defaultBranch}}`. Commit specs and plans there, never in the main checkout. After the merge, fast-forward the local `{{defaultBranch}}` (`git pull --ff-only`), then `git worktree remove .worktrees/<issue>-<slug>` (no force; it must be clean) and `git branch -d task/<issue>-<slug>`. If either is refused, tell the owner; never force it.
+One worktree per task, from fresh `origin/{{defaultBranch}}`: `sdlc worktree start <issue>` (by hand: `git fetch origin && git worktree add .worktrees/<issue>-<slug> -b task/<issue>-<slug> origin/{{defaultBranch}}`). Commit specs and plans there, never in the main checkout. After the merge, run `sdlc worktree finish <issue>` from the main checkout: it fast-forwards `{{defaultBranch}}` when it can, then runs `git worktree remove .worktrees/<issue>-<slug>` and `git branch -d task/<issue>-<slug>`, never forced. It refuses while the worktree has uncommitted or untracked changes or ignored `.env` files; ignored build output goes with the worktree. If it is refused, tell the owner; never force it. A `Queued for sync` message means writes or gaps wait for GitHub: run `sdlc sync`.
 
 ### Secrets
 - Never put tokens, keys, passwords or connection strings into tracked files, code, commits, issues, PRs, comments or logs, and never print them.

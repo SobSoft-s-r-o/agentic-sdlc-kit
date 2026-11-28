@@ -2,7 +2,7 @@
 
 Installable, agent-driven software development lifecycle for GitHub — works with Claude Code, Gemini CLI, OpenAI Codex and any `AGENTS.md`-aware agent.
 
-> Status: core CLI and installer available; harness hooks next
+> Status: core CLI, installer and harness hooks available; npm package next
 
 See [the design](docs/superpowers/specs/2026-11-27-agentic-sdlc-design.md) for the whole picture.
 
@@ -48,19 +48,29 @@ Tasks and the board:
 - `sdlc approve` - record an owner decision: approve a stage, accept a result, confirm a run, or cancel.
 - `sdlc deploy record` - record that a commit is deployed to a target.
 - `sdlc reconcile` - bring tasks, the board and issues in line with merges, approvals and deployments (`--dry-run` only reports). It reads open tasks and those closed within `reconcile.closed_lookback_days` (default 30); `--all` reads every task.
-- `sdlc status` - show tasks by status, what waits on the owner, what is stale (`--stale-days`, default 7), untracked issues and what reconcile would change (`--all` also lists tasks closed before the lookback).
+- `sdlc status` - show tasks by status, what waits on the owner, what is stale (`--stale-days`, default 7), untracked issues, what reconcile would change, what waits for `sdlc sync` (`Queued for sync:`) and the orphan worktrees (`--all` also lists tasks closed before the lookback).
+- `sdlc sync` - replay the commands that were queued while GitHub was unreachable and record the gaps the harness hooks logged (`--dry-run` only lists them). The queue is `.sdlc/cache/outbox.jsonl` in the main checkout; only `stage start`, `stage publish`, `evidence add`, `review handoff`, `approve` and `task checkpoint` are ever replayed.
+- `sdlc worktree start | finish` - create the worktree `.worktrees/<issue>-<slug>` of a task from the fetched default branch, and after the merge remove it and its branch. Nothing is forced: `finish` refuses while the worktree has uncommitted or untracked changes or holds an ignored `.env` file (`--dry-run` shows the plan).
 - `sdlc board ensure` - create the board or add its missing fields, options and views (add-only).
 
 Installing and checking:
 
 - `sdlc config validate | suggest` - check `sdlc.config.yaml`, or print one suggested from the repository (`suggest --write` creates it when it does not exist).
+- `sdlc config set mode <observe|enforce>` - switch the enforcement mode (`--dry-run` only reports). Owners only: a login listed under `agents` is refused, and the harness hooks block an agent from running it. Run `sdlc upgrade` afterwards so the instructions and hooks match.
 - `sdlc init` - install the managed files, git hooks and GitHub setup (board, labels, branch and push protection) for `sdlc.config.yaml` (`--dry-run` only reports, `--skip-github` leaves GitHub alone, `--overwrite-modified` replaces files you edited). It commits nothing.
 - `sdlc upgrade` - bring the managed files up to the installed kit version and remove what it no longer generates (`--dry-run`, `--overwrite-modified`). It never touches GitHub.
 - `sdlc uninstall` - remove the managed files and the git hooks path, keeping everything you wrote and edited (`--dry-run`). The board, labels and issues on GitHub remain.
 - `sdlc doctor` - check the machine and the installation, with a fix for each failure (`--preflight` runs only the checks that need no config).
 - `sdlc githook <name>` - run one of the kit's git hooks, including the secret guard. The scripts in `.sdlc/githooks` call it; you do not run it by hand.
+- `sdlc hook <harness> <event>` - run one of the kit's harness hooks (`claude`, `codex` or `gemini`; `session-start`, `prompt` or `pre-tool`). Claude Code, Codex and Gemini CLI call it through the launcher `.sdlc/hooks/run.sh`, which always exits 0; you do not run it by hand, and agents are blocked from running it.
 
 Run `sdlc <command> --help` for the options of each command.
+
+## Harness hooks
+
+With the hooks installed, `sdlc` is also the referee of the agent's session. At session start the agent is told its task. Every prompt is read for the owner's `/approve`, `/accept`, `/ran` or `/cancel <reason>` as its first line, which is recorded as an approval. Every file edit, shell command and subagent dispatch is checked, and in `enforce` mode a violation is refused: edits before the plan is approved, subagents without a role and model tier, `gh pr merge --admin`, other AI CLIs, `sdlc config set`. In `observe` mode the agent is only warned. Either way a gap is recorded on the task. Hooks fail open: any error of their own lets the action through. Commit `.sdlc/hooks/run.sh`, or new worktrees and clones run no hooks; Codex and Gemini also need the project trusted ([INSTALL.md](INSTALL.md), "Harness hooks and trust").
+
+What the layers guarantee, and what an agent with a shell can still do, is in [the threat model](docs/threat-model.md).
 
 ## Secrets
 

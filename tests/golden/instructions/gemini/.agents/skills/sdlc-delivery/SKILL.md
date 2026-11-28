@@ -58,4 +58,11 @@ Only the owner cancels, with a `/cancel <reason>` comment, recorded by reconcile
 
 ## 6. After Done
 
-Fast-forward the local `main` (`git pull --ff-only`), then remove the task's worktree and merged branch as above. To continue a Done task, `sdlc task reopen <issue>`: it restarts at the first phase and every earlier approval must be given again.
+Run `sdlc worktree finish <issue>` from the main checkout, never from inside the task's worktree. It fast-forwards the local `main` when that checkout is on it and clean, then removes the worktree (`git worktree remove`) and the merged branch (`git branch -d`), never forced. `--dry-run` shows the plan first.
+
+- It refuses while the worktree has uncommitted or untracked changes, holds an ignored `.env` or `.env.*` file, or none of the task's PRs has merged. Move the `.env` file out and commit or discard the changes with the owner's say, then run it again.
+- Other ignored files (`node_modules`, build output) are deleted together with the worktree. Anything you want to keep must be committed or moved out first.
+- A refused `git branch -d` (a squash merge, say) keeps the branch and is no failure: tell the owner, never `git branch -D`.
+- `sdlc status` lists orphan worktrees under `.worktrees/`: one whose task is done is due for `sdlc worktree finish`, and the others (no tracked task, detached HEAD, directory gone) are for the owner to look at.
+
+To continue a Done task, `sdlc task reopen <issue>`: it restarts at the first phase and every earlier approval must be given again.
