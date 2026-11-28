@@ -872,6 +872,12 @@ describe('long lines', () => {
 
   /** How many times slower than plain text a scan of a hostile line may be. Backtracking costs seconds, hundreds of times more. */
   const SLOWDOWN = 25;
+  /**
+   * The bound is never under this many milliseconds: a few-millisecond baseline on a shared CI runner makes
+   * `SLOWDOWN` times it noise-sized (it flaked at 114 ms against 109 ms), while backtracking costs seconds.
+   */
+  const FLOOR_MS = 500;
+  const boundFor = (base: number): number => Math.max(SLOWDOWN * base, FLOOR_MS);
   const scanTime = (text: string): number => {
     const started = performance.now();
     scanAddedLines('min.js', [{ line: 1, text }], []);
@@ -905,11 +911,11 @@ describe('long lines', () => {
    * slows the baseline as well, and a backtracking rule is still hundreds of times over.
    */
   const expectScanFast = (text: string, label: string): void => {
-    let limit = SLOWDOWN * baseline;
+    let limit = boundFor(baseline);
     let took = fastest(text, limit);
     if (took >= limit) {
       baseline = Math.max(baseline, measureBaseline());
-      limit = SLOWDOWN * baseline;
+      limit = boundFor(baseline);
       took = Math.min(took, fastest(text, limit));
     }
     expect(took, `${label} (baseline ${baseline.toFixed(1)} ms)`).toBeLessThan(limit);
