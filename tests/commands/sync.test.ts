@@ -1,4 +1,17 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -6,6 +19,7 @@ import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../../src/commands/context.js';
 import {
+  acquireLock,
   describeSync,
   LOCK_STALE_MS,
   registerSyncCommand,
@@ -736,6 +750,164 @@ describe('syncAll: the lock', () => {
     expect(second.replayed).toEqual([]);
     expect(result).toMatchObject({ replayed: 1 });
     expect(existsSync(lockPath())).toBe(false);
+  });
+
+  describe('acquireLock', () => {
+    const lockFiles = (): string[] => readdirSync(dirname(lockPath())).sort();
+    const tokenOf = (path: string): string => (JSON.parse(readFileSync(path, 'utf8')) as { token: string }).token;
+    const freshLock = (token: string): string => JSON.stringify({ pid: 4242, at: NOW, token });
+
+    it('lets exactly one of two syncs that judge the same lock stale at once take it over', async () => {
+      // The second sync starts a few event-loop turns after the first, so the two interleave at every step.
+      const later = async (turns: number): Promise<string | undefined> => {
+        for (let turn = 0; turn < turns; turn += 1) await new Promise(resolve => setImmediate(resolve));
+        return acquireLock(setup().ctx);
+      };
+      for (let turns = 0; turns < 20; turns += 1) {
+        for (let round = 0; round < 3; round += 1) {
+          writeLock(LOCK_STALE_MS + MINUTE);
+
+          const tokens = await Promise.all([acquireLock(setup().ctx), later(turns)]);
+
+          const label = `${turns} turns, round ${round}`;
+          const winners = tokens.filter((token): token is string => token !== undefined);
+          expect(winners, label).toHaveLength(1);
+          expect(lockFiles(), label).toEqual(['sync.lock']);
+          expect(tokenOf(lockPath()), label).toBe(winners[0]);
+          unlinkSync(lockPath());
+        }
+      }
+    });
+
+    it('leaves a fresh lock alone that another sync created after this one judged the old lock stale', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const h = setup();
+      let calls = 0;
+      h.ctx.now = () => {
+        calls += 1;
+        // The first judgement is made; then another sync takes over the stale lock.
+        if (calls === 1) writeFileSync(lockPath(), freshLock('someone-else'));
+        return NOW;
+      };
+
+      expect(await acquireLock(h.ctx)).toBeUndefined();
+
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe('someone-else');
+    });
+
+    it('gives back a fresh lock it renamed in the belief that it was the stale one', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const h = setup();
+      let calls = 0;
+      h.ctx.now = () => {
+        calls += 1;
+        // The second judgement, under the claim, is made; then the stale lock is replaced, just before the rename.
+        if (calls === 2) writeFileSync(lockPath(), freshLock('someone-else'));
+        return NOW;
+      };
+
+      expect(await acquireLock(h.ctx)).toBeUndefined();
+
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe('someone-else');
+    });
+
+    it('does not put a fresh lock back over one created in the meantime', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const h = setup();
+      let calls = 0;
+      h.ctx.now = () => {
+        calls += 1;
+        if (calls === 2) writeFileSync(lockPath(), freshLock('first'));
+        // The judgement of the renamed file: a third sync has created a lock in the gap.
+        if (calls === 3) writeFileSync(lockPath(), freshLock('third'));
+        return NOW;
+      };
+
+      expect(await acquireLock(h.ctx)).toBeUndefined();
+
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe('third');
+    });
+
+    it('reports the lock as held while another sync is taking it over, and leaves both files alone', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const before = readFileSync(lockPath(), 'utf8');
+      writeFileSync(`${lockPath()}.takeover`, '');
+
+      expect(await acquireLock(setup().ctx)).toBeUndefined();
+
+      expect(lockFiles()).toEqual(['sync.lock', 'sync.lock.takeover']);
+      expect(readFileSync(lockPath(), 'utf8')).toBe(before);
+    });
+
+    it('breaks a takeover claim that a sync that died left behind', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const claim = `${lockPath()}.takeover`;
+      writeFileSync(claim, '');
+      const old = new Date(Date.now() - 10 * MINUTE);
+      utimesSync(claim, old, old);
+
+      const token = await acquireLock(setup().ctx);
+
+      expect(token).toEqual(expect.any(String));
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe(token);
+    });
+
+    it('leaves no .stale file after taking over', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+
+      const token = await acquireLock(setup().ctx);
+
+      expect(token).toEqual(expect.any(String));
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe(token);
+    });
+
+    it('removes the lock file it created when writing it failed', async () => {
+      const h = setup();
+      h.ctx.now = () => {
+        throw new Error('clock failed');
+      };
+
+      await expect(acquireLock(h.ctx)).rejects.toThrow('clock failed');
+
+      expect(lockFiles()).toEqual([]);
+    });
+
+    it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+      'releases an orphan lock: the read-back misses, so the file this call created is removed',
+      async () => {
+        const h = setup();
+        // The file is made unreadable after it was created: the read-back cannot show the token.
+        h.ctx.now = () => {
+          chmodSync(lockPath(), 0o000);
+          return NOW;
+        };
+
+        expect(await acquireLock(h.ctx)).toBeUndefined();
+
+        expect(lockFiles()).toEqual([]);
+      },
+    );
+
+    it('leaves the lock of another sync alone when the read-back shows its token', async () => {
+      const h = setup();
+      h.ctx.now = () => {
+        // Another sync replaced the file this call created, before the read-back.
+        const other = `${lockPath()}.other`;
+        writeFileSync(other, freshLock('someone-else'));
+        renameSync(other, lockPath());
+        return NOW;
+      };
+
+      expect(await acquireLock(h.ctx)).toBeUndefined();
+
+      expect(lockFiles()).toEqual(['sync.lock']);
+      expect(tokenOf(lockPath())).toBe('someone-else');
+    });
   });
 
   it('writes the time into the lock again after each command, so a long sync is not taken over', async () => {
