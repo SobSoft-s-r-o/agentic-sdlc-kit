@@ -60,7 +60,7 @@ Never commit a secret, a token, a personal email address or a private name. Test
 
 ## This repository uses the kit
 
-The kit is installed in its own repository, in `observe` mode, so its hooks and secret guard watch your commits too. The hooks run `npx --no-install sdlc`, which resolves this checkout's `dist/`. A new clone or task worktree has no `node_modules/` and no `dist/` yet, so run `npm ci && npm run build` there before its hooks can run; until then they skip silently. After you edit `src/`, build again, or the hooks enforce the old code.
+The kit is installed in its own repository, in `observe` mode, so its hooks and secret guard watch your commits too. The hooks run `npx --no-install sdlc`, which resolves this checkout's `dist/`. A new clone or task worktree has no `node_modules/` and no `dist/` yet, so run `npm ci && npm run build` there before its hooks can run. Until `dist/` is built, the git hooks print a warning that the secret guard is NOT active and let the commit through, and the harness hooks skip with a one-line notice. After you edit `src/`, build again, or the hooks enforce the old code.
 
 ## Releases
 

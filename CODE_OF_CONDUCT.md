@@ -62,8 +62,8 @@ Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement through GitHub's
 private reporting at
 <https://github.com/SobSoft-s-r-o/agentic-sdlc-kit/security/advisories/new>
-(the repository's Security tab, "Report a vulnerability", which reaches the
-maintainers and nobody else), or by a private message to a maintainer on
+(the repository's Security tab, "Report a vulnerability"; such a report is
+private to the maintainers), or by a private message to a maintainer on
 GitHub. Please do not report in a public issue or pull request.
 All complaints will be reviewed and investigated promptly and fairly.
 

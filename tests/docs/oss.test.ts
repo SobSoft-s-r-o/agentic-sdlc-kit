@@ -23,6 +23,7 @@ interface Step {
 }
 interface Job {
   'runs-on': string;
+  needs?: string;
   permissions?: Record<string, string>;
   strategy?: { matrix: { os: string[]; node: number[]; include: Array<{ os: string; node: number }> } };
   steps: Step[];
@@ -104,7 +105,11 @@ describe('open-source files', () => {
     const changelog = read('CHANGELOG.md');
     expect(changelog).toContain('keepachangelog.com');
     const headings = changelog.split('\n').filter(line => line.startsWith('## '));
-    expect(headings).toEqual(['## [Unreleased]', '## [0.2.0] - 2026-11-28', '## [0.1.0] - 2026-11-28']);
+    // Newer releases are added between `[Unreleased]` and `[0.2.0]`.
+    expect(headings[0]).toBe('## [Unreleased]');
+    const at = (heading: string): number => headings.indexOf(heading);
+    expect(at('## [0.2.0] - 2026-11-28'), '0.2.0 is listed').toBeGreaterThan(0);
+    expect(at('## [0.1.0] - 2026-11-28'), '0.1.0 follows 0.2.0').toBeGreaterThan(at('## [0.2.0] - 2026-11-28'));
     expect(changelog).toContain('## [0.2.0]');
   });
 
@@ -163,7 +168,9 @@ describe('workflows', () => {
   describe('release.yml', () => {
     const text = read('.github/workflows/release.yml');
     const release = workflow('release.yml');
-    const job = release.jobs.publish ?? emptyJob;
+    const test = release.jobs.test ?? emptyJob;
+    const publish = release.jobs.publish ?? emptyJob;
+    const order = (job: Job): string[] => job.steps.map(step => step.run?.trim() ?? step.uses ?? '');
 
     it('publishes with trusted publishing: id-token, the npm registry, and no token secret', () => {
       expect(text).toContain('id-token: write');
@@ -171,8 +178,19 @@ describe('workflows', () => {
       expect(text).not.toContain('NPM_TOKEN');
       expect(text).not.toMatch(/NODE_AUTH_TOKEN:\s*\$\{\{\s*secrets/);
       expect(text).not.toMatch(/secrets\./);
-      expect(job.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
-      expect(job['runs-on']).toBe('ubuntu-latest');
+      expect(release.permissions).toEqual({ contents: 'read' });
+      expect(publish.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+      expect(publish['runs-on']).toBe('ubuntu-latest');
+    });
+
+    it('splits the work: the job that runs the repository code cannot ask for an OIDC token', () => {
+      expect(Object.keys(release.jobs).sort()).toEqual(['publish', 'test']);
+      expect(test.permissions).toEqual({ contents: 'read' });
+      expect(test.steps.some(step => step.with?.['registry-url'] !== undefined)).toBe(false);
+      expect(publish.needs).toBe('test');
+      expect(test.needs).toBeUndefined();
+      // id-token: write appears once, on the publish job.
+      expect(text.match(/id-token: write/g)).toHaveLength(1);
     });
 
     it('runs on version tags only', () => {
@@ -180,33 +198,47 @@ describe('workflows', () => {
       expect(release.on).not.toHaveProperty('pull_request');
     });
 
-    it('uses Node 24 and refuses an npm older than 11.5.1', () => {
-      const setup = job.steps.find(step => step.uses?.startsWith('actions/setup-node@'));
+    it('uses Node 24 and refuses an npm older than 11.5.1 before publishing', () => {
+      const setup = publish.steps.find(step => step.uses?.startsWith('actions/setup-node@'));
       expect(setup?.with?.['node-version']).toBe(24);
-      const check = job.steps.find(step => step.run?.includes('npm --version'));
+      const check = publish.steps.find(step => step.run?.includes('npm --version'));
       expect(check?.run).toContain('11.5.1');
       expect(check?.run).toContain('exit 1');
     });
 
-    it('checks the tag against package.json, tests, and publishes unless the version is already on npm', () => {
-      const commands = commandsOf(job);
-      expect(commands).toContain('npm ci');
-      expect(commands).toContain('npm test');
+    it('tests, and checks the tag against package.json, in the test job', () => {
+      expect(commandsOf(test)).toContain('npm ci');
+      expect(commandsOf(test)).toContain('npm test');
       expect(text).toContain('${GITHUB_REF_NAME}');
       expect(text).toContain(`require('./package.json').version`);
-      const tag = job.steps.find(step => step.run?.includes('GITHUB_REF_NAME'));
+      const tag = test.steps.find(step => step.run?.includes('GITHUB_REF_NAME'));
       expect(tag?.run).toContain('exit 1');
-      const probe = job.steps.find(step => step.id === 'published');
+      expect(order(test).findIndex(entry => entry.includes('GITHUB_REF_NAME'))).toBeLessThan(order(test).indexOf('npm test'));
+    });
+
+    it('installs without dependency scripts, builds, and publishes unless the version is already on npm', () => {
+      const steps = order(publish);
+      expect(steps).toContain('npm ci --ignore-scripts');
+      expect(commandsOf(publish)).not.toContain('npm ci');
+      expect(commandsOf(publish)).not.toContain('npm test');
+      expect(steps.indexOf('npm ci --ignore-scripts')).toBeLessThan(steps.indexOf('npm run build'));
+      expect(steps.indexOf('npm run build')).toBeLessThan(steps.indexOf('npm publish'));
+      const probe = publish.steps.find(step => step.id === 'published');
       expect(probe?.run).toContain('npm view');
       expect(probe?.run).toContain('agentic-sdlc-kit@');
       expect(probe?.run).toContain('skip=true');
-      const publish = job.steps.filter(step => step.run?.trim() === 'npm publish');
-      expect(publish).toHaveLength(1);
-      expect(publish[0]?.if).toBe("steps.published.outputs.skip != 'true'");
-      // The gates run before the publish step.
-      const order = job.steps.map(step => step.run?.trim() ?? step.uses ?? '');
-      expect(order.indexOf('npm test')).toBeLessThan(order.indexOf('npm publish'));
-      expect(order.findIndex(entry => entry.includes('GITHUB_REF_NAME'))).toBeLessThan(order.indexOf('npm publish'));
+      expect(steps.findIndex(entry => entry.includes('npm view'))).toBeLessThan(steps.indexOf('npm publish'));
+      const published = publish.steps.filter(step => step.run?.trim() === 'npm publish');
+      expect(published).toHaveLength(1);
+      expect(published[0]?.if).toBe("steps.published.outputs.skip != 'true'");
+    });
+
+    it('treats only a 404 as not published; any other npm view failure fails the job', () => {
+      const probe = publish.steps.find(step => step.id === 'published')?.run ?? '';
+      expect(probe).toContain('E404');
+      expect(probe).toContain('skip=false');
+      // Three branches: success -> skip=true, E404 -> skip=false, anything else -> print the output and exit 1.
+      expect(probe).toMatch(/if output="\$\(npm view [^)]*2>&1\)"; then[\s\S]*skip=true[\s\S]*elif[\s\S]*E404[\s\S]*skip=false[\s\S]*else[\s\S]*\$output[\s\S]*exit 1[\s\S]*fi/);
     });
   });
 });

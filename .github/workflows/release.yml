@@ -2,6 +2,8 @@
 # Trusted publishing (OIDC): npm trusts this workflow file, so no npm token is stored in the repository.
 # Owner setup, once: publish the first version by hand, then
 #   npm trust github agentic-sdlc-kit --file release.yml --repo SobSoft-s-r-o/agentic-sdlc-kit --allow-publish
+# Two jobs: `test` runs the repository's code (dependencies, tests) with a read-only token and no OIDC;
+# `publish` is the only job that can ask for an OIDC token, and it installs without running dependency scripts.
 # A version that is already on npm is skipped, so a re-run of a tag is harmless.
 # Actions are pinned to a full commit SHA (the tag in the comment), so a moved tag cannot change what runs.
 name: release
@@ -14,7 +16,33 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      # persist-credentials: false: the checkout token is not left in .git/config for the later steps.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No dependency cache in a release build.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Check the tag matches package.json
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "$expected" ]; then
+            echo "::error::The tag ${GITHUB_REF_NAME} does not match package.json, which says $expected"
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm test
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -22,11 +50,10 @@ jobs:
       # Required for trusted publishing: the job asks GitHub for an OIDC token that npm exchanges for a publish credential.
       id-token: write
     steps:
-      # persist-credentials: false: the checkout token is not left in .git/config for the later steps.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Node 24 ships npm 11, which trusted publishing needs. No dependency cache in a release build.
+      # Node 24 ships npm 11, which trusted publishing needs.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -40,26 +67,24 @@ jobs:
             exit 1
           fi
           echo "npm $npm_version"
-      - name: Check the tag matches package.json
-        run: |
-          expected="v$(node -p "require('./package.json').version")"
-          if [ "${GITHUB_REF_NAME}" != "$expected" ]; then
-            echo "::error::The tag ${GITHUB_REF_NAME} does not match package.json, which says $expected"
-            exit 1
-          fi
-      - run: npm ci
-      - run: npm test
+      # No dependency install script runs in the job that holds the OIDC permission; the build is explicit.
+      - run: npm ci --ignore-scripts
+      - run: npm run build
       - name: Check whether this version is already on npm
         id: published
         run: |
           V="$(node -p "require('./package.json').version")"
-          if npm view "agentic-sdlc-kit@$V" version >/dev/null 2>&1; then
+          if output="$(npm view "agentic-sdlc-kit@$V" version 2>&1)"; then
             echo "agentic-sdlc-kit@$V is already on npm; nothing to publish."
             echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
+          elif printf '%s\n' "$output" | grep -q 'E404'; then
+            echo "agentic-sdlc-kit@$V is not on npm yet."
             echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$output"
+            echo "::error::Could not tell whether agentic-sdlc-kit@$V is on npm"
+            exit 1
           fi
-      # `npm publish` runs the package's `prepare` script (tsc), so it ships a fresh build.
       # publishConfig in package.json sets access public and provenance.
       - name: Publish to npm
         if: steps.published.outputs.skip != 'true'
