@@ -1,3 +1,4 @@
+import { ChildProcess } from 'node:child_process';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -168,6 +169,44 @@ describe.skipIf(process.platform === 'win32')('defaultGhRunner', () => {
 
     const pid = Number((await readFile(marker, 'utf8')).trim());
     await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), { timeout: 2000 });
+  });
+
+  it('kills a gh that ignores SIGTERM after a short grace', async () => {
+    const marker = join(await mkdtemp(join(tmpdir(), 'sdlc-gh-')), 'pid');
+    dirs.push(dirname(marker));
+    await withFakeGh(`[ "$1" = warm ] && exit 0\necho $$ > ${marker}\ntrap '' TERM\nwhile :; do sleep 0.2; done`);
+    await defaultGhRunner(['warm']);
+    let pid = 0;
+    try {
+      const error = await createGhRunner({ timeoutMs: 500, killGraceMs: 200 })(['api']).catch((e: unknown) => e);
+      pid = Number((await readFile(marker, 'utf8')).trim());
+
+      // The caller is released at once; the process is gone shortly after.
+      expect(error).toBeInstanceOf(GhError);
+      expect(() => process.kill(pid, 0)).not.toThrow();
+      await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), { timeout: 3000 });
+    } finally {
+      if (pid > 0) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    }
+  });
+
+  it('does not kill again a gh that ended on SIGTERM', async () => {
+    await withFakeGh('exec sleep 5');
+    const kill = vi.spyOn(ChildProcess.prototype, 'kill');
+    try {
+      await createGhRunner({ timeoutMs: 200, killGraceMs: 200 })(['api']).catch(() => undefined);
+      await new Promise(resolve => setTimeout(resolve, 600));
+
+      expect(kill.mock.calls.map(call => call[0])).toEqual(['SIGTERM']);
+    } finally {
+      kill.mockRestore();
+    }
   });
 
   it('words the timeout in seconds', async () => {

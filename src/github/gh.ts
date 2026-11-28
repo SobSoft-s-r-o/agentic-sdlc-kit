@@ -31,15 +31,19 @@ export class GhError extends Error {
 /** How long one `gh` call may take before it is killed; a hung `gh` (an auth prompt, a stalled network) would stall the command, the hook and the Actions job. */
 export const GH_TIMEOUT_MS = 60_000;
 
+/** How long a `gh` that was sent SIGTERM may take to end before it is sent SIGKILL. */
+export const GH_KILL_GRACE_MS = 2_000;
+
 /**
  * A runner for the real `gh` CLI. A non-zero exit is returned, not thrown; it rejects only when `gh`
  * cannot be run at all (not installed, output over the buffer limit, ...) or runs longer than `timeoutMs`
- * (`GH_TIMEOUT_MS` by default): then it is sent SIGTERM and the error says so. The error text matches what
- * the outbox counts as GitHub being unreachable, so a command that timed out is queued like one that could
- * not connect.
+ * (`GH_TIMEOUT_MS` by default): then it is sent SIGTERM (SIGKILL after `killGraceMs`, if it is still running)
+ * and the error says so. The error text matches what the outbox counts as GitHub being unreachable, so a
+ * command that timed out is queued like one that could not connect.
  */
-export function createGhRunner(opts: { timeoutMs?: number } = {}): GhRunner {
+export function createGhRunner(opts: { timeoutMs?: number; killGraceMs?: number } = {}): GhRunner {
   const timeoutMs = opts.timeoutMs ?? GH_TIMEOUT_MS;
+  const killGraceMs = opts.killGraceMs ?? GH_KILL_GRACE_MS;
   return (args, input) =>
     new Promise((resolve, reject) => {
       let timer: NodeJS.Timeout | undefined;
@@ -69,6 +73,17 @@ export function createGhRunner(opts: { timeoutMs?: number } = {}): GhRunner {
       // Rejecting here, not when the process is gone: a `gh` that ignores SIGTERM must not hold the caller.
       timer = setTimeout(() => {
         child.kill('SIGTERM');
+        // A `gh` that ignores SIGTERM is sent SIGKILL after a grace. Neither that timer, the child nor its
+        // pipes may keep this process alive: the caller has its error and goes on.
+        const killer = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        }, killGraceMs);
+        killer.unref();
+        child.once('exit', () => clearTimeout(killer));
+        child.stdin?.destroy();
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref();
         const stderr = `gh timed out after ${timeoutMs / 1000} s`;
         reject(new GhError(args, stderr, `${stderr}: ${describeCommand(args)}`));
       }, timeoutMs);

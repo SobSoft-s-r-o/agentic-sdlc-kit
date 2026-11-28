@@ -199,7 +199,10 @@ async function claimTakeover(path: string): Promise<string | undefined> {
       found => Date.now() - found.mtimeMs,
       () => undefined,
     );
-    if (age !== undefined && age <= TAKEOVER_STALE_MS) return undefined;
+    // No age: the claim was released between the two calls, or cannot be read. Try to create it again; never
+    // unlink what was not seen to be old, it may be a claim another sync has just made.
+    if (age === undefined) continue;
+    if (age <= TAKEOVER_STALE_MS) return undefined;
     await unlink(claim).catch(() => undefined);
   }
   return undefined;

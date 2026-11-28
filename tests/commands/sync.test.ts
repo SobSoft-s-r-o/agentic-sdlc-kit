@@ -1,6 +1,8 @@
+import { execFileSync, spawn } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -8,6 +10,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
@@ -16,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CommandContext } from '../../src/commands/context.js';
 import {
   acquireLock,
@@ -856,6 +859,19 @@ describe('syncAll: the lock', () => {
       expect(tokenOf(lockPath())).toBe(token);
     });
 
+    // A dangling symlink is a claim that exists for `wx` (EEXIST) and cannot be read by `stat`: the state
+    // of a claim that was released between the two calls. Its age is unknown, so it is not judged dead.
+    it.skipIf(process.platform === 'win32')('does not break a takeover claim whose age cannot be read', async () => {
+      writeLock(LOCK_STALE_MS + MINUTE);
+      const claim = `${lockPath()}.takeover`;
+      symlinkSync(join(root, 'gone'), claim);
+
+      expect(await acquireLock(setup().ctx)).toBeUndefined();
+
+      expect(lstatSync(claim).isSymbolicLink()).toBe(true);
+      expect(lockFiles()).toEqual(['sync.lock', 'sync.lock.takeover']);
+    });
+
     it('leaves no .stale file after taking over', async () => {
       writeLock(LOCK_STALE_MS + MINUTE);
 
@@ -908,6 +924,65 @@ describe('syncAll: the lock', () => {
       expect(lockFiles()).toEqual(['sync.lock']);
       expect(tokenOf(lockPath())).toBe('someone-else');
     });
+  });
+
+  // Real processes: the in-process tests above interleave at every await, but only separate processes
+  // race on the file system the way two `sdlc sync` runs do.
+  describe.skipIf(process.platform === 'win32')('acquireLock across processes', () => {
+    const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+    const PROCESSES = 8;
+    let build: string;
+    let script: string;
+
+    beforeAll(() => {
+      // A private build, inside node_modules so that the packages resolve, and not `dist`, which other tests rebuild.
+      build = mkdtempSync(join(repo, 'node_modules', '.sdlc-sync-race-'));
+      execFileSync(process.execPath, [join(repo, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', repo, '--outDir', build, '--noCheck'], {
+        cwd: repo,
+        stdio: 'pipe',
+      });
+      script = join(build, 'acquire.mjs');
+      writeFileSync(
+        script,
+        [
+          "import { acquireLock } from './commands/sync.js';",
+          'const [root, startAt] = process.argv.slice(2);',
+          'while (Date.now() < Number(startAt)) {}',
+          'const token = await acquireLock({ repoRoot: root, now: () => new Date().toISOString() });',
+          "process.stdout.write((token ?? 'none') + '\\n');",
+        ].join('\n'),
+      );
+    }, 60_000);
+    afterAll(() => {
+      rmSync(build, { recursive: true, force: true });
+    });
+
+    const acquireInChild = (startAt: number): Promise<string> =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [script, root, String(startAt)], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', chunk => (stdout += chunk));
+        child.stderr.on('data', chunk => (stderr += chunk));
+        child.on('error', reject);
+        child.on('close', code => (code === 0 ? resolve(stdout.trim()) : reject(new Error(`exit ${code}: ${stderr}`))));
+      });
+
+    it('lets exactly one of several syncs take over a stale lock, and leaves no .stale or .takeover file', async () => {
+      for (let round = 0; round < 3; round += 1) {
+        writeLock(LOCK_STALE_MS + MINUTE);
+
+        // All start at the same instant; one that starts late finds the winner's fresh lock, which is also right.
+        const startAt = Date.now() + 500;
+        const results = await Promise.all(Array.from({ length: PROCESSES }, () => acquireInChild(startAt)));
+
+        const winners = results.filter(result => result !== 'none');
+        expect(winners, `round ${round}: ${results.join(', ')}`).toHaveLength(1);
+        expect(readdirSync(dirname(lockPath())).sort(), `round ${round}`).toEqual(['sync.lock']);
+        expect((JSON.parse(readFileSync(lockPath(), 'utf8')) as { token: string }).token, `round ${round}`).toBe(winners[0]);
+        unlinkSync(lockPath());
+      }
+    }, 30_000);
   });
 
   it('writes the time into the lock again after each command, so a long sync is not taken over', async () => {
