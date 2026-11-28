@@ -1,8 +1,9 @@
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { defaultGhRunner, GhError, ghJson, graphql } from '../../src/github/gh.js';
+import { dirname, join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { isTransportError } from '../../src/outbox/outbox.js';
+import { createGhRunner, defaultGhRunner, GH_TIMEOUT_MS, GhError, ghJson, graphql } from '../../src/github/gh.js';
 import { fakeGh } from '../support/fakeGh.js';
 
 describe('ghJson', () => {
@@ -140,6 +141,48 @@ describe.skipIf(process.platform === 'win32')('defaultGhRunner', () => {
     const result = await defaultGhRunner(['api']);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('SIGKILL');
+  });
+
+  it('rejects with a GhError when gh runs longer than the timeout', async () => {
+    await withFakeGh('sleep 5');
+    const started = Date.now();
+
+    const error = await createGhRunner({ timeoutMs: 100 })(['api', 'x']).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(GhError);
+    expect((error as GhError).message).toMatch(/^gh timed out after 0\.1 s: gh api x$/);
+    expect((error as GhError).args).toEqual(['api', 'x']);
+    expect(Date.now() - started).toBeLessThan(3000);
+    // The outbox sees a timeout like any other "GitHub did not answer", so the command is queued.
+    expect(isTransportError(error)).toBe(true);
+  });
+
+  it('kills the gh process when it times out', async () => {
+    const marker = join(await mkdtemp(join(tmpdir(), 'sdlc-gh-')), 'pid');
+    dirs.push(dirname(marker));
+    await withFakeGh(`[ "$1" = warm ] && exit 0\necho $$ > ${marker}\nexec sleep 5`);
+    // The first run of a new executable can be slow (the OS scans it); the timed run must not pay for that.
+    await defaultGhRunner(['warm']);
+
+    await createGhRunner({ timeoutMs: 500 })(['api']).catch(() => undefined);
+
+    const pid = Number((await readFile(marker, 'utf8')).trim());
+    await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), { timeout: 2000 });
+  });
+
+  it('words the timeout in seconds', async () => {
+    await withFakeGh('sleep 5');
+    const error = await createGhRunner({ timeoutMs: 2000 })(['api']).catch((e: unknown) => e);
+    expect((error as GhError).message).toMatch(/^gh timed out after 2 s: gh api$/);
+  });
+
+  it('allows a minute by default', () => {
+    expect(GH_TIMEOUT_MS).toBe(60_000);
+  });
+
+  it('does not time out a gh that answers in time', async () => {
+    await withFakeGh('printf ok');
+    expect(await createGhRunner({ timeoutMs: 5000 })(['api'])).toEqual({ stdout: 'ok', code: 0, stderr: '' });
   });
 
   it('rejects with a GhError when gh is not installed', async () => {

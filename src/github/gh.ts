@@ -28,38 +28,58 @@ export class GhError extends Error {
   }
 }
 
+/** How long one `gh` call may take before it is killed; a hung `gh` (an auth prompt, a stalled network) would stall the command, the hook and the Actions job. */
+export const GH_TIMEOUT_MS = 60_000;
+
 /**
- * Runs the real `gh` CLI. A non-zero exit is returned, not thrown; it rejects only when `gh`
- * cannot be run at all (not installed, output over the buffer limit, ...).
+ * A runner for the real `gh` CLI. A non-zero exit is returned, not thrown; it rejects only when `gh`
+ * cannot be run at all (not installed, output over the buffer limit, ...) or runs longer than `timeoutMs`
+ * (`GH_TIMEOUT_MS` by default): then it is sent SIGTERM and the error says so. The error text matches what
+ * the outbox counts as GitHub being unreachable, so a command that timed out is queued like one that could
+ * not connect.
  */
-export const defaultGhRunner: GhRunner = (args, input) =>
-  new Promise((resolve, reject) => {
-    const child = execFile(
-      'gh',
-      args,
-      { maxBuffer: MAX_BUFFER, encoding: 'utf8' },
-      (error, stdout, stderr) => {
-        if (!error) {
-          resolve({ stdout, code: 0, stderr });
-          return;
-        }
-        const failure = error as ExecFileException;
-        if (failure.code === 'ENOENT') {
-          reject(new GhError(args, '', 'gh CLI not found; install https://cli.github.com'));
-        } else if (typeof failure.code === 'number') {
-          resolve({ stdout, code: failure.code, stderr });
-        } else if (failure.signal) {
-          // The process ran but was killed: report it like a failed exit.
-          resolve({ stdout, code: 1, stderr: stderr || `terminated by ${failure.signal}` });
-        } else {
-          reject(new GhError(args, stderr, `could not run ${describeCommand(args)}: ${failure.message}`));
-        }
-      },
-    );
-    // `gh` may exit before reading stdin; that must not surface as an unhandled stream error.
-    child.stdin?.on('error', () => undefined);
-    child.stdin?.end(input);
-  });
+export function createGhRunner(opts: { timeoutMs?: number } = {}): GhRunner {
+  const timeoutMs = opts.timeoutMs ?? GH_TIMEOUT_MS;
+  return (args, input) =>
+    new Promise((resolve, reject) => {
+      let timer: NodeJS.Timeout | undefined;
+      const child = execFile(
+        'gh',
+        args,
+        { maxBuffer: MAX_BUFFER, encoding: 'utf8' },
+        (error, stdout, stderr) => {
+          clearTimeout(timer);
+          if (!error) {
+            resolve({ stdout, code: 0, stderr });
+            return;
+          }
+          const failure = error as ExecFileException;
+          if (failure.code === 'ENOENT') {
+            reject(new GhError(args, '', 'gh CLI not found; install https://cli.github.com'));
+          } else if (typeof failure.code === 'number') {
+            resolve({ stdout, code: failure.code, stderr });
+          } else if (failure.signal) {
+            // The process ran but was killed: report it like a failed exit.
+            resolve({ stdout, code: 1, stderr: stderr || `terminated by ${failure.signal}` });
+          } else {
+            reject(new GhError(args, stderr, `could not run ${describeCommand(args)}: ${failure.message}`));
+          }
+        },
+      );
+      // Rejecting here, not when the process is gone: a `gh` that ignores SIGTERM must not hold the caller.
+      timer = setTimeout(() => {
+        child.kill('SIGTERM');
+        const stderr = `gh timed out after ${timeoutMs / 1000} s`;
+        reject(new GhError(args, stderr, `${stderr}: ${describeCommand(args)}`));
+      }, timeoutMs);
+      // `gh` may exit before reading stdin; that must not surface as an unhandled stream error.
+      child.stdin?.on('error', () => undefined);
+      child.stdin?.end(input);
+    });
+}
+
+/** The runner every command uses: the real `gh`, with the default timeout. */
+export const defaultGhRunner: GhRunner = createGhRunner();
 
 /**
  * Runs `gh` and parses stdout as JSON. `input`, when given, is JSON-stringified to stdin (the
