@@ -63,7 +63,8 @@ function nearestDirectory(path: string): string | undefined {
 /**
  * The checkout that contains `dir`, which may not exist yet: git runs in its nearest existing
  * ancestor. `undefined` outside any git checkout (also inside a `.git` directory, which is no work
- * tree). Rejects only when git cannot run at all.
+ * tree) and when git fails or is killed before it has said where it is. Rejects only when git
+ * cannot run at all.
  */
 export async function checkoutOf(dir: string, gitFor: (cwd: string) => GitRunner): Promise<Checkout | undefined> {
   const start = nearestDirectory(realPathOf(dir));
@@ -76,6 +77,9 @@ export async function checkoutOf(dir: string, gitFor: (cwd: string) => GitRunner
   if (!root || !commonDir) return undefined;
 
   const head = await git(['symbolic-ref', '--short', '-q', 'HEAD']);
+  // A detached HEAD is git's own answer: exit 1 and nothing said (`-q`). Any other failure, a git
+  // that was killed on its time limit included, leaves the checkout unresolved, not detached.
+  if (head.code !== 0 && !(head.code === 1 && head.stderr.trim() === '')) return undefined;
   const branch = head.code === 0 ? head.stdout.trim() : '';
   const issue = taskIssueOf(branch === '' ? undefined : branch);
   return {

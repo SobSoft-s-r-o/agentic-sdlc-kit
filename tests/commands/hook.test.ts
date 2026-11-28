@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { registerHookCommand, runHook, type HookContext } from '../../src/commands/hook.js';
+import { DEFAULT_DEADLINE_MS, GIT_TIMEOUT_MS, registerHookCommand, runHook, type HookContext } from '../../src/commands/hook.js';
 import { loadConfig, typeRegistry, type Config } from '../../src/config/schema.js';
 import { StateCommentError } from '../../src/core/stateComment.js';
 import { newTask } from '../../src/core/stateMachine.js';
@@ -130,6 +130,17 @@ const denyReason = (stdout: string): string => {
   expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny');
   return parsed.hookSpecificOutput.permissionDecisionReason;
 };
+
+describe('the time the hook may take', () => {
+  /** The `timeout` the harness settings get for the pre-tool hook. */
+  const PRE_TOOL_TIMEOUT_MS = 15_000;
+
+  it('fits the pre-tool timeout in the worst case: the checkout of the cwd and of a file (two git calls each), then GitHub', () => {
+    expect(GIT_TIMEOUT_MS).toBe(2000);
+    expect(DEFAULT_DEADLINE_MS).toBe(6000);
+    expect(4 * GIT_TIMEOUT_MS + DEFAULT_DEADLINE_MS).toBeLessThan(PRE_TOOL_TIMEOUT_MS);
+  });
+});
 
 describe('runHook pre-tool: edits', () => {
   it('denies an edit before the plan is approved and records the gap', async () => {
@@ -341,6 +352,26 @@ describe('runHook pre-tool: edits', () => {
     expect(result.stdout).toBe('');
     expect(result.stderr).toEqual([]);
     expect(getTask).not.toHaveBeenCalled();
+  });
+
+  it('leaves an edit alone when git is killed before it names the branch of the file: unresolved, not a branch-less checkout', async () => {
+    taskBranch('task/5-x');
+    const getTask = vi.spyOn(tracker, 'getTask');
+    let calls = 0;
+    const gitFor = (dir: string): GitRunner => {
+      const real = createGitRunner(dir);
+      // Calls 1 and 2 find the checkout of the cwd; 3 and 4 are rev-parse and symbolic-ref of the file's.
+      return args =>
+        ++calls === 4 ? Promise.resolve({ stdout: '', code: 1, stderr: 'terminated by SIGTERM' }) : real(args);
+    };
+
+    const result = await claudePreTool(claudeWrite(join(repo.root, 'src', 'a.ts')), { gitFor });
+
+    expect(calls).toBe(4);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toEqual([]);
+    expect(getTask).not.toHaveBeenCalled();
+    expect(gapLines()).toEqual([]);
   });
 
   it('does not call the tracker for Markdown and docs edits (Codex apply_patch)', async () => {

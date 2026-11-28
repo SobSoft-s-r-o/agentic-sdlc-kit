@@ -79,6 +79,35 @@ describe('checkoutOf', () => {
     expect(checkout?.root).toBe(root);
   });
 
+  describe('a symbolic-ref that does not answer', () => {
+    /** Real git, except `symbolic-ref`, which gives `result`. */
+    const withSymbolicRef =
+      (result: { stdout: string; code: number; stderr: string }) =>
+      (cwd: string): GitRunner => {
+        const real = createGitRunner(cwd);
+        return args => (args[0] === 'symbolic-ref' ? Promise.resolve(result) : real(args));
+      };
+
+    it('is unresolved when git was killed, not a detached HEAD', async () => {
+      // How createGitRunner reports a killed git: code 1 and "terminated by <signal>".
+      const killed = withSymbolicRef({ stdout: '', code: 1, stderr: 'terminated by SIGTERM' });
+
+      expect(await checkoutOf(repo.root, killed)).toBeUndefined();
+    });
+
+    it('is unresolved when git fails for any other reason', async () => {
+      const failed = withSymbolicRef({ stdout: '', code: 128, stderr: 'fatal: bad object HEAD' });
+
+      expect(await checkoutOf(repo.root, failed)).toBeUndefined();
+    });
+
+    it('is a detached HEAD only on git\'s own answer: exit 1 and nothing said', async () => {
+      const detached = withSymbolicRef({ stdout: '', code: 1, stderr: '' });
+
+      expect(await checkoutOf(repo.root, detached)).toEqual({ root, commonDir: join(root, '.git') });
+    });
+  });
+
   it('gives undefined for a directory outside any repository', async () => {
     plain = mkdtempSync(join(tmpdir(), 'sdlc-plain-'));
 

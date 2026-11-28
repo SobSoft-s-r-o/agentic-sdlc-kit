@@ -212,23 +212,39 @@ function gitCommand(args: readonly string[]): { sub: string | undefined; rest: s
   return { sub: args[i], rest: args.slice(i + 1), settings };
 }
 
-/** `core.hooksPath` as a `-c` setting (`core.hooksPath=x`, or the bare key), in any letter case. */
-const isHooksPathSetting = (setting: string): boolean => /^core\.hookspath(=|$)/i.test(setting);
+/**
+ * A configuration key that switches the git hooks off, or brings a setting that does in:
+ * `core.hooksPath`, `include.path` and `includeIf.<condition>.path`. Any letter case.
+ */
+const isHookConfigKey = (key: string): boolean =>
+  /^core\.hookspath$/i.test(key) || /^include\.path$/i.test(key) || /^includeif\..+\.path$/i.test(key);
+
+/** The same keys as a `-c` setting: `core.hooksPath=x`, or the bare key. */
+const isHookConfigSetting = (setting: string): boolean => isHookConfigKey(setting.split('=')[0] as string);
 
 /** `git config` options that take their value as the next argument. */
 const CONFIG_VALUE_OPTIONS: readonly string[] = ['-f', '--file', '--blob', '--default', '--type', '--comment'];
 const CONFIG_READ_OPTIONS: readonly string[] = ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '-l', '--list'];
 const CONFIG_WRITE_OPTIONS: readonly string[] = ['--unset', '--unset-all', '--replace-all', '--add'];
+/** `git config` subcommands (git 2.46 and later) that are not a read; `get` and `list` are. */
+const CONFIG_SUBCOMMANDS: readonly string[] = ['set', 'unset', 'edit', 'remove-section', 'rename-section'];
+/** Sections a rename may not touch: a section renamed into one of them, or out of `core`, changes the hooks. */
+const HOOK_SECTIONS: readonly string[] = ['core', 'include', 'includeif'];
 
 /**
- * Whether the arguments of `git config` set or unset `core.hooksPath`, in any scope: the key with
- * a value, `--unset`, `--replace-all`, ..., or the `set` and `unset` subcommands. Reading it
- * (`--get`, the key alone, `get`, `--list`) is not.
+ * Whether the arguments of `git config` (as written, so that the value of `--file` is skipped here
+ * and nowhere else) change what switches the git hooks off, in any scope or file: set or unset
+ * `core.hooksPath`, `include.path` or `includeIf.*.path` (the key with a value, `--unset`,
+ * `--replace-all`, `--add`, the `set` and `unset` subcommands), remove the `core` section, rename a
+ * section from or to `core`, `include` or `includeIf`, or open the file in an editor. Reading a
+ * key (`--get`, the key alone, `get`, `--list`) is not.
  */
-function changesHooksPath(args: readonly string[]): boolean {
+function changesHookConfig(args: readonly string[]): boolean {
   const named: string[] = [];
   let reads = false;
   let writes = false;
+  let edit = false;
+  let sectionOperation: string | undefined;
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
     if (arg === '--') {
@@ -237,22 +253,41 @@ function changesHooksPath(args: readonly string[]): boolean {
     }
     if (CONFIG_READ_OPTIONS.includes(arg)) reads = true;
     else if (CONFIG_WRITE_OPTIONS.includes(arg)) writes = true;
+    else if (arg === '-e' || arg === '--edit') edit = true;
+    else if (arg === '--remove-section' || arg === '--rename-section') sectionOperation = arg.slice(2);
     else if (CONFIG_VALUE_OPTIONS.includes(arg)) i += 1;
     else if (!arg.startsWith('-')) named.push(arg);
   }
+  if (edit) return true;
   if (reads) return false;
-  const subcommand = named[0]?.toLowerCase();
-  if (subcommand === 'get' || subcommand === 'list') return false;
-  const sets = subcommand === 'set' || subcommand === 'unset';
-  const [key, ...values] = sets ? named.slice(1) : named;
-  return key !== undefined && /^core\.hookspath$/i.test(key) && (sets || writes || values.length > 0);
+
+  const first = named[0]?.toLowerCase() ?? '';
+  const operation = sectionOperation ?? (CONFIG_SUBCOMMANDS.includes(first) ? first : undefined);
+  const operands = CONFIG_SUBCOMMANDS.includes(first) ? named.slice(1) : named;
+  const sectionOf = (name: string): string => (name.split('.')[0] as string).toLowerCase();
+  switch (operation) {
+    case 'edit':
+      return true;
+    case 'remove-section':
+      return operands[0]?.toLowerCase() === 'core';
+    case 'rename-section':
+      return operands.slice(0, 2).some(name => HOOK_SECTIONS.includes(sectionOf(name)));
+    case 'set':
+    case 'unset':
+      return operands[0] !== undefined && isHookConfigKey(operands[0]);
+    default: {
+      const [key, ...values] = operands;
+      return key !== undefined && isHookConfigKey(key) && (writes || values.length > 0);
+    }
+  }
 }
 
 function gitViolations(args: readonly string[]): Violation[] {
-  const { sub, rest, settings } = gitCommand(args);
+  const { sub, rest: written, settings } = gitCommand(args);
+  const rest = withoutTextValues(written);
   const found: Violation[] = [];
   // Turning the hooks off by configuration is --no-verify for every command at once.
-  if (settings.some(isHooksPathSetting) || (sub === 'config' && changesHooksPath(rest))) found.push(NO_VERIFY);
+  if (settings.some(isHookConfigSetting) || (sub === 'config' && changesHookConfig(written))) found.push(NO_VERIFY);
   if (sub !== undefined && NO_VERIFY_SUBCOMMANDS.has(sub)) {
     // `-n` is `--no-verify` for commit only; for push it is `--dry-run`.
     if (rest.includes('--no-verify') || (sub === 'commit' && hasShortFlag(rest, 'n', 'mFCctuS'))) {
@@ -327,7 +362,7 @@ function callViolations(call: Invocation): Violation[] {
       break;
     }
     case 'git':
-      found.push(...gitViolations(withoutTextValues(call.args)));
+      found.push(...gitViolations(call.args));
       break;
     case 'rm':
       if (isRmRf(call.args)) found.push(RM_RF);

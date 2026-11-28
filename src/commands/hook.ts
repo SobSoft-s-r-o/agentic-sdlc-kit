@@ -79,10 +79,14 @@ export interface HookContext {
   exit?(code: number): void;
 }
 
-/** Longest the hook waits, in all, for GitHub; the rendered `pre-tool` timeout is 15 s. */
-export const DEFAULT_DEADLINE_MS = 8000;
+/**
+ * Longest the hook waits, in all, for GitHub. The rendered `pre-tool` timeout is 15 s, and the git
+ * calls come first: the checkout of the cwd and the checkout of an edited file, two calls each, one
+ * after the other (`4 * GIT_TIMEOUT_MS + DEFAULT_DEADLINE_MS` stays under it).
+ */
+export const DEFAULT_DEADLINE_MS = 6000;
 /** Longest one git call of the hook may take; the real context kills a slower git (see `createGitRunner`). */
-export const GIT_TIMEOUT_MS = 5000;
+export const GIT_TIMEOUT_MS = 2000;
 /** How long a cached task state, read while edits were allowed, is trusted. */
 export const TASK_CACHE_TTL_MS = 10 * 60_000;
 
