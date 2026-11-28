@@ -149,10 +149,60 @@ describe('e2e guard: gh api', () => {
     expect(refusal(['api', 'repos/Acme/Sandbox'])).toBeUndefined();
   });
 
+  it('reads the last method flag, as gh does', () => {
+    // A harmless first flag cannot hide the method that counts.
+    expect(refusal(['api', '-X', 'GET', '-X', 'DELETE', 'repos/Acme/Sandbox'])).toMatch(/repository itself/);
+    expect(refusal(['api', '--method', 'GET', '--method=DELETE', 'repos/Acme/Sandbox'])).toMatch(/repository itself/);
+    expect(refusal(['api', '-X', 'GET', '--method', 'PATCH', 'repos/Acme/Sandbox', '--input', '-'])).toMatch(/repository itself/);
+    expect(refusal(['api', '-X', 'DELETE', '-X', 'GET', 'repos/Acme/Sandbox'])).toBeUndefined();
+    expect(refusal(['api', '-X', 'GET', '-X', 'DELETE', 'users/acme'])).toMatch(/not in/);
+    expect(refusal(['api', '-X', 'GET', '-X', 'PATCH', 'user', '--input', '-'])).toMatch(/not in/);
+    expect(refusal(['api', '-X', 'GET', '-X', 'DELETE', '/users/acme/projectsV2/7'])).toMatch(/DELETE on a project is not allowed/);
+    expect(refusal(['api', '--method=GET', '--method', 'DELETE', '/orgs/acme/projectsV2/7/items/3'])).toMatch(/DELETE on a project/);
+    expect(refusal(['api', '-X', 'DELETE', '-X', 'GET', '/users/acme/projectsV2/7/fields'])).toBeUndefined();
+  });
+
+  it('recognises the repository root through trailing slashes and queries', () => {
+    for (const path of ['repos/Acme/Sandbox/', 'repos/Acme/Sandbox//', '/repos/acme/sandbox/', 'repos/Acme/Sandbox?x=1', 'repos/Acme/Sandbox/?x=1']) {
+      expect(refusal(['api', '-X', 'DELETE', path]), path).toMatch(/repository itself|plain path/);
+      expect(refusal(['api', '--method', 'PATCH', path, '--input', '-']), path).toMatch(/repository itself|plain path/);
+    }
+    expect(refusal(['api', '-X', 'DELETE', 'repos/Acme/Sandbox/'])).toMatch(/repository itself/);
+    expect(refusal(['api', '-X', 'POST', 'repos/Acme/Sandbox/transfer/', '--input', '-'])).toMatch(/moves or archives/);
+    expect(refusal(['api', '-X', 'POST', 'repos/Acme/Sandbox/archive?x=1', '--input', '-'])).toMatch(/moves or archives/);
+    expect(refusal(['api', 'repos/Acme/Sandbox/'])).toBeUndefined();
+    expect(refusal(['api', 'repos/Acme/Sandbox/issues/'])).toBeUndefined();
+  });
+
+  it('refuses dot and empty segments, encoded separators, backslashes and fragments in the path', () => {
+    for (const path of [
+      'repos/Acme/Sandbox/.',
+      'repos/Acme/Sandbox/./',
+      'repos/Acme/Sandbox/./issues',
+      'repos/Acme/Sandbox/issues/..',
+      'repos/Acme/Sandbox/issues/../..',
+      'repos/Acme/Sandbox/..?x=1',
+      'repos/Acme/./Sandbox',
+      'repos/Acme/Sandbox//issues',
+      'repos/Acme/Sandbox%2fissues',
+      'repos/Acme%2FSandbox',
+      'repos/Acme/Sandbox/%2E',
+      'repos/Acme/Sandbox/%5Cissues',
+      'repos/Acme/Sandbox#x',
+      'repos/Acme/Sandbox\\issues',
+    ]) {
+      expect(refusal(['api', '-X', 'DELETE', path]), path).toMatch(/plain path|not in Acme\/Sandbox/);
+    }
+    // A dot inside a name is not a segment, and a query string may be encoded.
+    expect(refusal(['api', 'repos/Acme/Sandbox/contents/a.b/.github'])).toBeUndefined();
+    expect(refusal(['api', 'repos/Acme/Sandbox/deployments?environment=a%2Fb&per_page=1'])).toBeUndefined();
+  });
+
   it('only touches the projects the suite owns', () => {
     expect(refusal(['api', '/users/acme/projectsV2/8/fields'])).toMatch(/project #8 is not one the suite owns/);
     expect(refusal(['api', '/users/acme/projectsV2/8/fields'], undefined, [8])).toBeUndefined();
-    expect(refusal(['api', '-X', 'DELETE', '/users/acme/projectsV2/7'])).toMatch(/deleting a project/);
+    expect(refusal(['api', '-X', 'DELETE', '/users/acme/projectsV2/7'])).toMatch(/DELETE on a project is not allowed/);
+    expect(refusal(['api', '-X', 'PATCH', '/users/acme/projectsV2/7', '--input', '-'])).toMatch(/PATCH on a project is not allowed/);
   });
 });
 

@@ -69,9 +69,9 @@ function parseArgs(args: readonly string[]): { flags: Flag[]; positionals: strin
   return { flags, positionals };
 }
 
-/** The HTTP method `gh api` would use: `-X`/`--method`, else POST when it sends fields or a body, else GET. */
+/** The HTTP method `gh api` would use: the LAST `-X`/`--method` (as gh does), else POST when it sends fields or a body, else GET. */
 function methodOf(flags: readonly Flag[]): string {
-  const given = flags.find(flag => flag.name === '-X' || flag.name === '--method');
+  const given = flags.filter(flag => flag.name === '-X' || flag.name === '--method').pop();
   if (given !== undefined) return (given.value ?? '').trim().toUpperCase();
   return flags.some(flag => WRITE_FLAGS.has(flag.name)) ? 'POST' : 'GET';
 }
@@ -152,12 +152,19 @@ function checkApi(
   const owner = lower(scope.projectOwner);
   if (positionals.length !== 1) return 'cannot tell which endpoint gh api calls';
   const endpoint = (positionals[0] as string).replace(/^\/+/, '');
-  if (/(?:^|\/)\.\.(?:\/|\?|$)|%2e|\\/i.test(endpoint)) return `the endpoint ${endpoint} is not a plain path`;
+  // `.` and `..` segments, an empty segment, and an encoded dot, slash or backslash in the path, or a
+  // backslash or fragment anywhere, could reach a path other than the one compared below. A query
+  // string may be encoded (`?environment=a%2Fb`).
+  const pathPart = endpoint.split('?')[0] as string;
+  if (/(?:^|\/)\.{1,2}(?=\/|$)|\/\/|%2e|%2f|%5c/i.test(pathPart) || /[\\#]/.test(endpoint)) {
+    return `the endpoint ${endpoint} is not a plain path`;
+  }
   const path = lower(endpoint);
+  // The path without its query and trailing slashes: what the routes below are compared with.
+  const route = (path.split('?')[0] as string).replace(/\/+$/, '');
 
   const repoRoot = new RegExp(`^repos/${escapeRegExp(sandbox)}(?:[/?]|$)`);
   if (repoRoot.test(path)) {
-    const [route = ''] = path.split('?');
     // The repository itself is never changed, moved or deleted; only what is inside it is written.
     if (route === `repos/${sandbox}` && !isRead(flags)) return `${methodOf(flags)} ${endpoint} would change the repository itself`;
     if (/\/(?:transfer|archive)$/.test(route)) return `the endpoint ${endpoint} moves or archives the repository`;
@@ -169,7 +176,7 @@ function checkApi(
   const project = new RegExp(`^(?:users|orgs)/${escapeRegExp(owner)}/projectsv2/(\\d+)(?:[/?]|$)`).exec(path);
   if (project) {
     if (!scope.projects.has(Number(project[1]))) return `project #${project[1]} is not one the suite owns`;
-    return methodOf(flags) === 'DELETE' ? 'deleting a project is not allowed' : undefined;
+    return ['GET', 'HEAD', 'POST'].includes(methodOf(flags)) ? undefined : `${methodOf(flags)} on a project is not allowed`;
   }
 
   // Who is logged in, and what kind of account the project owner is: reads only.
