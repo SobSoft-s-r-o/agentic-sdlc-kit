@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { FILE_NAME_RULES, SECRET_RULES } from '../../src/secrets/rules.js';
 import {
   ALLOW_MARKER,
@@ -870,18 +870,49 @@ describe('long lines', () => {
     ['mixed', fill('token = "' + 'x'.repeat(11) + ' eyJ-sk--xoxb-')],
   ];
 
-  /**
-   * The fastest of three scans: a slow machine slows every run, a backtracking rule slows every run by
-   * seconds. A scan that is fast the first time is not repeated.
-   */
-  const bestOfThree = (text: string): number => {
+  /** How many times slower than plain text a scan of a hostile line may be. Backtracking costs seconds, hundreds of times more. */
+  const SLOWDOWN = 25;
+  const scanTime = (text: string): number => {
+    const started = performance.now();
+    scanAddedLines('min.js', [{ line: 1, text }], []);
+    return performance.now() - started;
+  };
+  /** The fastest of up to three scans, stopping at the first that is under `limit`. */
+  const fastest = (text: string, limit = Infinity): number => {
     let best = Infinity;
-    for (let run = 0; run < 3 && best >= 200; run += 1) {
-      const started = performance.now();
-      scanAddedLines('min.js', [{ line: 1, text }], []);
-      best = Math.min(best, performance.now() - started);
-    }
+    for (let run = 0; run < 3 && best >= limit; run += 1) best = Math.min(best, scanTime(text));
     return best;
+  };
+  /**
+   * What a scan of 100k characters of plain text takes on this machine: the best of three. The bound for
+   * every other line is a multiple of it, so a slow or busy machine moves the bound with it. Never 0, so
+   * a timer that reads 0 ms cannot make every bound 0.
+   */
+  const measureBaseline = (): number => {
+    const plain = 'a'.repeat(LONG);
+    let best = Infinity;
+    for (let run = 0; run < 3; run += 1) best = Math.min(best, scanTime(plain));
+    return Math.max(best, 1);
+  };
+  let baseline = 1;
+  beforeAll(() => {
+    baseline = measureBaseline();
+  });
+
+  /**
+   * Whether scanning `text` takes less than `SLOWDOWN` times the baseline. A line that is over is
+   * measured again against a fresh baseline: when the machine got busy after the first one was taken, it
+   * slows the baseline as well, and a backtracking rule is still hundreds of times over.
+   */
+  const expectScanFast = (text: string, label: string): void => {
+    let limit = SLOWDOWN * baseline;
+    let took = fastest(text, limit);
+    if (took >= limit) {
+      baseline = Math.max(baseline, measureBaseline());
+      limit = SLOWDOWN * baseline;
+      took = Math.min(took, fastest(text, limit));
+    }
+    expect(took, `${label} (baseline ${baseline.toFixed(1)} ms)`).toBeLessThan(limit);
   };
 
   /**
@@ -909,22 +940,22 @@ describe('long lines', () => {
   const expectFast = (text: string, nearMiss: string): void => {
     for (const [name, line] of adversarial(text, nearMiss)) {
       expect(line.length, name).toBeGreaterThanOrEqual(LONG - 500);
-      expect(bestOfThree(line), `${name}: ${line.length} characters`).toBeLessThan(1_000);
+      expectScanFast(line, `${name}: ${line.length} characters`);
     }
   };
 
-  it.each(SAMPLES)('$rule: its sample, the near miss and a long run around them are scanned in well under a second', sample => {
+  it.each(SAMPLES)('$rule: its sample, the near miss and a long run around them are scanned about as fast as plain text', sample => {
     expectFast(sample.text, sample.nearMiss);
   });
 
-  it.each(VARIANTS)('$rule ($name): its variant and a long run around it are scanned in well under a second', variant => {
+  it.each(VARIANTS)('$rule ($name): its variant and a long run around it are scanned about as fast as plain text', variant => {
     expectFast(variant.text, variant.text.slice(0, -1));
   });
 
-  it.each(shapes)('%s: a line of 100k characters is scanned in well under a second', (_name, text) => {
+  it.each(shapes)('%s: a line of 100k characters is scanned about as fast as plain text', (_name, text) => {
     expect(text.length).toBeGreaterThanOrEqual(LONG - 100);
 
-    expect(bestOfThree(text)).toBeLessThan(1_000);
+    expectScanFast(text, 'line of 100k characters');
   });
 
   it('still finds a secret in the middle of a very long line', () => {
