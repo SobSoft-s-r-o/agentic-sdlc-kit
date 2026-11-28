@@ -68,7 +68,7 @@ describe('constants', () => {
 describe('isKitHookItem', () => {
   const group = (command: unknown) => ({ matcher: 'Bash', hooks: [{ type: 'command', command }] });
 
-  it('owns a group whose command is a rendered command, of this version or the earlier shape', () => {
+  it('owns a group whose command is a rendered command, of this version or the earlier one (an exact list)', () => {
     for (const harness of ['claude', 'codex', 'gemini'] as const) {
       for (const event of ['session-start', 'prompt', 'pre-tool'] as const) {
         expect(isKitHookItem(group(hookCommand(harness, event)))).toBe(true);
@@ -86,9 +86,20 @@ describe('isKitHookItem', () => {
       '"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude other-event',
       '"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh.bak" claude prompt',
       './mine.sh # .sdlc/hooks/run.sh claude prompt',
+      // A quoted prefix that is not the rendered root is someone else's launcher.
+      '"$(my-tool)/.sdlc/hooks/run.sh" claude prompt',
+      '"/other/.sdlc/hooks/run.sh" claude prompt',
+      '"$(git rev-parse --show-toplevel)/../other/.sdlc/hooks/run.sh" claude prompt',
+      '"$(cd other && git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude prompt',
+      '"${HOME}/.sdlc/hooks/run.sh" codex pre-tool',
+      '"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude prompt ',
+      '"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude prompt --extra',
+      '$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh claude prompt',
     ]) {
       expect(isKitHookItem(group(command)), command).toBe(false);
     }
+    // The only earlier shape: the git root of the working directory, for every harness (Claude included).
+    expect(isKitHookItem(group('"$(git rev-parse --show-toplevel)/.sdlc/hooks/run.sh" claude pre-tool'))).toBe(true);
     expect(isKitHookItem({ note: '.sdlc/hooks/run.sh' })).toBe(false);
     expect(isKitHookItem(group(7))).toBe(false);
     expect(isKitHookItem('.sdlc/hooks/run.sh')).toBe(false);

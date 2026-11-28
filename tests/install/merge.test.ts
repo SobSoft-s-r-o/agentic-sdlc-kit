@@ -468,6 +468,19 @@ describe('mergeJsonKeys with the hook launcher as the marker', () => {
     expect(ownedItems([mentions, earlier, rendered], HOOK_MARKER)).toEqual([earlier, rendered]);
   });
 
+  it('keeps a user hook that runs another launcher with the same file name, on upgrade and on uninstall', () => {
+    const other = group('"/other/.sdlc/hooks/run.sh" claude prompt');
+    const computed = group('"$(my-tool)/.sdlc/hooks/run.sh" claude prompt');
+    const doc = JSON.stringify({ hooks: { UserPromptSubmit: [other, earlier, computed] } });
+
+    const merged = JSON.parse(mergeJsonKeys(doc, [entry], new Set()).text) as unknown;
+    expect(merged).toEqual({ hooks: { UserPromptSubmit: [other, computed, rendered] } });
+    expect(ownedItems([other, earlier, computed, rendered], HOOK_MARKER)).toEqual([earlier, rendered]);
+
+    const removed = JSON.parse(removeJsonKeys(doc, [{ pointer: ['hooks', 'UserPromptSubmit'], marker: HOOK_MARKER }], 'a.json')) as unknown;
+    expect(removed).toEqual({ hooks: { UserPromptSubmit: [other, computed] } });
+  });
+
   it('uninstall leaves the user hook that mentions the launcher', () => {
     const doc = JSON.stringify({ hooks: { UserPromptSubmit: [mentions, rendered] } });
     const removed = JSON.parse(removeJsonKeys(doc, [{ pointer: ['hooks', 'UserPromptSubmit'], marker: HOOK_MARKER }], 'a.json')) as unknown;
