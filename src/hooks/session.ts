@@ -23,6 +23,8 @@ export interface SessionContextInput {
   pending: number;
   /** What waits in the local queue for `sdlc sync`. */
   queued: { outbox: number; gaps: number };
+  /** Whether the hook started `sdlc sync` in the background; defaults to true. When not, the agent is told to run it. */
+  syncRunning?: boolean;
 }
 
 /**
@@ -47,9 +49,8 @@ export function sessionContext(input: SessionContextInput): string[] {
   ];
   if (pending > 0) lines.push(`Pending reconcile for #${task.issue}: ${pending} action(s); run \`sdlc reconcile\`.`);
   if (queued.outbox > 0 || queued.gaps > 0) {
-    lines.push(
-      `Queued for sync: ${queued.outbox} write(s), ${queued.gaps} gap(s); \`sdlc sync\` is running in the background.`,
-    );
+    const next = input.syncRunning === false ? 'run `sdlc sync`.' : '`sdlc sync` is running in the background.';
+    lines.push(`Queued for sync: ${queued.outbox} write(s), ${queued.gaps} gap(s); ${next}`);
   }
   return lines;
 }
@@ -70,12 +71,21 @@ export function pendingActions(result: ReconcileResult): number | undefined {
 export const promptSha256 = (prompt: string): string => createHash('sha256').update(prompt).digest('hex');
 
 /**
- * The `ref` of an approval recorded from a prompt: it names the harness, the session and the first
- * 16 hex digits of the prompt's hash, so the same prompt in the same session is the same approval
- * (a resubmitted or replayed prompt is recorded once).
+ * The `ref` of an approval recorded from a prompt: it names the harness, the session, a key that
+ * tells this prompt from the others of the session, and the first 16 hex digits of the prompt's
+ * hash. The key is the harness's own id of the prompt (`promptId`: Claude's `prompt_id`, Codex's
+ * `turn_id`), so a prompt that is delivered again is the same approval and a new prompt, even with
+ * the same text, is a new one. Gemini has no such id: its key is `fallbackKey`, which names the
+ * decision (`approve-<phase>`, or the action alone), so the same text approves each stage once.
  */
-export const promptRef = (harness: HookHarness, sessionId: string | undefined, prompt: string): string =>
-  `prompt:${harness}:${sessionId ?? 'nosession'}:${promptSha256(prompt).slice(0, 16)}`;
+export const promptRef = (
+  harness: HookHarness,
+  sessionId: string | undefined,
+  promptId: string | undefined,
+  fallbackKey: string,
+  prompt: string,
+): string =>
+  `prompt:${harness}:${sessionId ?? 'nosession'}:${promptId ?? fallbackKey}:${promptSha256(prompt).slice(0, 16)}`;
 
 /**
  * Who a prompt approval is recorded for. The prompt comes from the human at the keyboard, so with

@@ -400,19 +400,20 @@ async function queuedWork(root: string): Promise<{ outbox: number; gaps: number 
 async function sessionStart(env: HookEnv): Promise<HookOutcome> {
   const { ctx, checkout, cfg } = env;
   const mainRoot = mainRootOf(checkout);
-  let queued = await queuedWork(mainRoot);
+  const queued = await queuedWork(mainRoot);
+  // Only a sync that was started is said to be running; otherwise the agent is told to run it.
+  let syncRunning = false;
   if (queued.outbox + queued.gaps > 0 && ctx.spawnSync !== undefined) {
     try {
       ctx.spawnSync(mainRoot);
+      syncRunning = true;
     } catch (error) {
       ctx.err(`sdlc: warning: could not start sdlc sync in the background (${oneLine(reasonOf(error))})`);
-      // Not running, so the agent is not told it is.
-      queued = { outbox: 0, gaps: 0 };
     }
   }
 
   const { issue, branch } = checkout;
-  if (issue === undefined) return asContext(...sessionContext({ cfg, branch, pending: 0, queued }));
+  if (issue === undefined) return asContext(...sessionContext({ cfg, branch, pending: 0, queued, syncRunning }));
 
   const commandCtx = commandContextOf(env);
   let task: TrackedTask | undefined;
@@ -439,6 +440,7 @@ async function sessionStart(env: HookEnv): Promise<HookOutcome> {
       ...(unreadable === undefined ? {} : { unreadable }),
       pending,
       queued,
+      syncRunning,
     }),
   );
 }
@@ -493,9 +495,20 @@ async function promptApproval(env: HookEnv, prompt: string): Promise<string | un
     }
     const { state } = loaded.task;
 
-    // The same prompt of the same session is one decision, however often it is delivered.
-    const ref = promptRef(env.event.harness, env.event.sessionId, prompt);
-    if (recordedRefs(state).has(normalizeCommentUrl(ref))) return `sdlc: this approval was already recorded for #${issue}.`;
+    // The same prompt of the same session is one decision, however often it is delivered. Only an
+    // `approve` is about a stage (the current one); the other decisions are about the task.
+    const stage = action === 'approve' ? state.phase : undefined;
+    const ref = promptRef(
+      env.event.harness,
+      env.event.sessionId,
+      env.event.promptId,
+      stage === undefined ? action : `${action}-${stage}`,
+      prompt,
+    );
+    const target = stage === undefined ? '' : ` (${stage})`;
+    if (recordedRefs(state).has(normalizeCommentUrl(ref))) {
+      return `sdlc: this approval was already recorded for #${issue}${target}.`;
+    }
 
     // The prompt comes from the human at the keyboard: with one owner it is that owner, whatever login gh runs as.
     const login =
@@ -512,7 +525,7 @@ async function promptApproval(env: HookEnv, prompt: string): Promise<string | un
       { source: 'prompt', ref, by: approver.by, at: env.ctx.now() },
       loaded,
     );
-    return `sdlc: recorded the owner's ${action} for #${issue} (${state.phase}) from this prompt.`;
+    return `sdlc: recorded the owner's ${action} for #${issue}${target} from this prompt.`;
   } catch (error) {
     if (timedOut(error)) return GITHUB_UNREACHABLE;
     return `sdlc: approval not recorded: ${oneLine(reasonOf(error))}`;

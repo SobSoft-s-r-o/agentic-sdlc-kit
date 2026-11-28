@@ -792,13 +792,15 @@ const jsonLines = (name: string, at = repo.root): Array<Record<string, unknown>>
         .map(line => JSON.parse(line) as Record<string, unknown>)
     : [];
 
-/** #`issue` is in planning and its plan is published, waiting for the owner. */
-const publishedPlan = (issue = 5): TaskState => ({
-  ...feature(issue, false),
+/** #`issue` is in `phase` and that stage is published, waiting for the owner. */
+const publishedStage = (phase: Phase, issue = 5): TaskState => ({
+  ...feature(issue, false, phase),
   status: 'paused',
   waitingOn: 'owner',
-  stages: { planning: { revision: 1, publishedAt: '2026-05-30T01:00:00.000Z' } },
+  stages: { [phase]: { revision: 1, publishedAt: '2026-05-30T01:00:00.000Z' } },
 });
+/** #`issue` is in planning and its plan is published, waiting for the owner. */
+const publishedPlan = (issue = 5): TaskState => publishedStage('planning', issue);
 
 const sessionStart = (extra: Record<string, unknown> = {}, cwd = repo.root): string =>
   JSON.stringify({ session_id: 's1', cwd, source: 'startup', ...extra });
@@ -980,16 +982,19 @@ describe('runHook session-start', () => {
       const result = await run('claude', 'session-start', { stdin: sessionStart(), spawnSync });
 
       expect(result.stderr).toEqual(['sdlc: warning: could not start sdlc sync in the background (spawn denied)']);
-      expect(contextLines(result.stdout)[0]).toMatch(/^sdlc: mode enforce\. Task #5 /);
+      const lines = contextLines(result.stdout);
+      expect(lines[0]).toMatch(/^sdlc: mode enforce\. Task #5 /);
+      // The queue is still named, but the agent is not told that sync runs.
+      expect(lines.at(-1)).toBe('Queued for sync: 0 write(s), 1 gap(s); run `sdlc sync`.');
     });
 
-    it('works without a way to start sync', async () => {
+    it('works without a way to start sync, and says to run it', async () => {
       repo.write('.sdlc/cache/gaps.jsonl', '{"rule":"no-task"}\n');
 
       const result = await run('claude', 'session-start', { stdin: sessionStart() });
 
       expect(result.stderr).toEqual([]);
-      expect(contextLines(result.stdout)).toHaveLength(2);
+      expect(contextLines(result.stdout).at(-1)).toBe('Queued for sync: 0 write(s), 1 gap(s); run `sdlc sync`.');
     });
   });
 
@@ -1103,7 +1108,7 @@ describe('runHook prompt: owner approvals', () => {
     expect(contextLines(result.stdout)).toEqual(["sdlc: recorded the owner's approve for #5 (planning) from this prompt."]);
     expect((await stateOf()).stages.planning?.approval).toEqual({
       source: 'prompt',
-      ref: promptRef('claude', 's1', APPROVE),
+      ref: promptRef('claude', 's1', 'p1', 'approve-planning', APPROVE),
       by: 'shop-owner',
       at: NOW,
     });
@@ -1120,15 +1125,15 @@ describe('runHook prompt: owner approvals', () => {
     expect((await stateOf()).stages.planning?.approval).toMatchObject({ source: 'prompt', by: 'shop-owner' });
   });
 
-  it('records it once: the same prompt again says it was already recorded and writes nothing', async () => {
+  it('records it once: the same prompt (same prompt id) again says it was already recorded and writes nothing', async () => {
     tracker.seedTask(publishedPlan());
     await run('claude', 'prompt', { stdin: claudePrompt(APPROVE) });
     const writes = tracker.writes;
     const before = await stateOf();
 
-    const again = await run('claude', 'prompt', { stdin: claudePrompt(APPROVE, { prompt_id: 'p2' }) });
+    const again = await run('claude', 'prompt', { stdin: claudePrompt(APPROVE) });
 
-    expect(contextLines(again.stdout)).toEqual(['sdlc: this approval was already recorded for #5.']);
+    expect(contextLines(again.stdout)).toEqual(['sdlc: this approval was already recorded for #5 (planning).']);
     expect(tracker.writes).toBe(writes);
     expect(await stateOf()).toEqual(before);
   });
@@ -1153,7 +1158,100 @@ describe('runHook prompt: owner approvals', () => {
     const other = await run('claude', 'prompt', { stdin: claudePrompt(APPROVE, { session_id: 's2' }) });
 
     expect(contextLines(other.stdout)).toEqual(["sdlc: recorded the owner's approve for #5 (planning) from this prompt."]);
-    expect((await stateOf()).stages.planning?.approval?.ref).toBe(promptRef('claude', 's2', APPROVE));
+    expect((await stateOf()).stages.planning?.approval?.ref).toBe(
+      promptRef('claude', 's2', 'p1', 'approve-planning', APPROVE),
+    );
+  });
+
+  describe('the same text for a later stage', () => {
+    /** Publishes `phase` on #5 as an agent would after the stage before it was approved. */
+    const publish = async (phase: Phase): Promise<void> => {
+      const { state } = await tracker.getTask(5);
+      await tracker.writeState(5, {
+        ...state,
+        phase,
+        status: 'paused',
+        waitingOn: 'owner',
+        stages: { ...state.stages, [phase]: { revision: 1, publishedAt: '2026-05-30T02:00:00.000Z' } },
+      });
+    };
+
+    it('is recorded for Claude when the prompt id is new, and refused when that prompt id comes again', async () => {
+      tracker.seedTask(publishedStage('brainstorming'));
+      await run('claude', 'prompt', { stdin: claudePrompt(APPROVE, { prompt_id: 'p1' }) });
+      await publish('planning');
+
+      const later = await run('claude', 'prompt', { stdin: claudePrompt(APPROVE, { prompt_id: 'p2' }) });
+
+      expect(contextLines(later.stdout)).toEqual(["sdlc: recorded the owner's approve for #5 (planning) from this prompt."]);
+      const { stages } = await stateOf();
+      expect(stages.brainstorming?.approval?.ref).toBe(promptRef('claude', 's1', 'p1', 'approve-brainstorming', APPROVE));
+      expect(stages.planning?.approval?.ref).toBe(promptRef('claude', 's1', 'p2', 'approve-planning', APPROVE));
+
+      const writes = tracker.writes;
+      const again = await run('claude', 'prompt', { stdin: claudePrompt(APPROVE, { prompt_id: 'p2' }) });
+
+      expect(contextLines(again.stdout)).toEqual(['sdlc: this approval was already recorded for #5 (planning).']);
+      expect(tracker.writes).toBe(writes);
+    });
+
+    it('is recorded for Codex by its turn id in the same way', async () => {
+      tracker.seedTask(publishedStage('brainstorming'));
+      const turn = (turn_id: string): string =>
+        JSON.stringify({ session_id: 'thr', turn_id, cwd: repo.root, prompt: '/approve' });
+      await run('codex', 'prompt', { stdin: turn('t1') });
+      await publish('planning');
+
+      const later = await run('codex', 'prompt', { stdin: turn('t2') });
+      const again = await run('codex', 'prompt', { stdin: turn('t2') });
+
+      expect(contextLines(later.stdout)).toEqual(["sdlc: recorded the owner's approve for #5 (planning) from this prompt."]);
+      expect(contextLines(again.stdout)).toEqual(['sdlc: this approval was already recorded for #5 (planning).']);
+    });
+
+    it('is recorded for Gemini, which has no prompt id, once per stage', async () => {
+      tracker.seedTask(publishedStage('brainstorming'));
+      const stdin = JSON.stringify({ session_id: 'g1', cwd: repo.root, prompt: '/approve' });
+      const first = await run('gemini', 'prompt', { stdin });
+      await publish('planning');
+
+      const later = await run('gemini', 'prompt', { stdin });
+      const sameStage = await run('gemini', 'prompt', { stdin });
+
+      expect(contextLines(first.stdout)).toEqual(["sdlc: recorded the owner's approve for #5 (brainstorming) from this prompt."]);
+      expect(contextLines(later.stdout)).toEqual(["sdlc: recorded the owner's approve for #5 (planning) from this prompt."]);
+      expect(contextLines(sameStage.stdout)).toEqual(['sdlc: this approval was already recorded for #5 (planning).']);
+      const { stages } = await stateOf();
+      expect(stages.brainstorming?.approval?.ref).toBe(promptRef('gemini', 'g1', undefined, 'approve-brainstorming', '/approve'));
+      expect(stages.planning?.approval?.ref).toBe(promptRef('gemini', 'g1', undefined, 'approve-planning', '/approve'));
+    });
+  });
+
+  describe('an owner decision that is no stage approval', () => {
+    /** An analysis task whose result is published, waiting for the owner to accept it. */
+    const analysisResult = (): TaskState => {
+      const type = typeRegistry(enforce).get('analysis');
+      if (!type) throw new Error('no analysis type');
+      return {
+        ...newTask({ issue: 5, type, summary: 'Look into it', now: '2026-05-30T00:00:00.000Z' }),
+        phase: 'analysis',
+        status: 'paused',
+        waitingOn: 'owner',
+        stages: { analysis: { revision: 1, publishedAt: '2026-05-30T01:00:00.000Z' } },
+        resultPublishedAt: '2026-05-30T01:00:00.000Z',
+      };
+    };
+
+    it('names no stage in the line, and is told "already recorded" without one', async () => {
+      tracker.seedTask(analysisResult());
+
+      const first = await run('claude', 'prompt', { stdin: claudePrompt('/accept') });
+      const again = await run('claude', 'prompt', { stdin: claudePrompt('/accept') });
+
+      expect(contextLines(first.stdout)).toEqual(["sdlc: recorded the owner's accept for #5 from this prompt."]);
+      expect(contextLines(again.stdout)).toEqual(['sdlc: this approval was already recorded for #5.']);
+      expect((await stateOf()).outcomeApproval?.ref).toBe(promptRef('claude', 's1', 'p1', 'accept', '/accept'));
+    });
   });
 
   it('says there is no task for /approve on a branch without one, and records nothing', async () => {
@@ -1198,7 +1296,7 @@ describe('runHook prompt: owner approvals', () => {
 
     const result = await run('claude', 'prompt', { stdin: claudePrompt('/cancel no longer needed') });
 
-    expect(contextLines(result.stdout)).toEqual(["sdlc: recorded the owner's cancel for #5 (planning) from this prompt."]);
+    expect(contextLines(result.stdout)).toEqual(["sdlc: recorded the owner's cancel for #5 from this prompt."]);
     const state = await stateOf();
     expect(state).toMatchObject({ status: 'done', outcome: 'cancelled', cancelReason: 'no longer needed' });
     expect(state.outcomeApproval).toMatchObject({ source: 'prompt', by: 'shop-owner' });
@@ -1310,7 +1408,7 @@ describe('runHook prompt: owner approvals', () => {
       expect(JSON.parse(result.stdout)).toHaveProperty('hookSpecificOutput.hookEventName', 'BeforeAgent');
       expect((await stateOf()).stages.planning?.approval).toMatchObject({
         source: 'prompt',
-        ref: promptRef('gemini', 'g1', '/approve'),
+        ref: promptRef('gemini', 'g1', undefined, 'approve-planning', '/approve'),
       });
     });
   });

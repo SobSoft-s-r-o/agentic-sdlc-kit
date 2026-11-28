@@ -64,6 +64,20 @@ describe('sessionContext', () => {
     expect(lines[2]).toBe(line);
   });
 
+  it.each([
+    [{ outbox: 2, gaps: 0 }, 'Queued for sync: 2 write(s), 0 gap(s); run `sdlc sync`.'],
+    [{ outbox: 1, gaps: 3 }, 'Queued for sync: 1 write(s), 3 gap(s); run `sdlc sync`.'],
+  ])('tells to run `sdlc sync` itself for %j when it could not be started', (queued, line) => {
+    const lines = sessionContext({ cfg: cfg('enforce'), branch: 'task/5-x', task: task(), pending: 0, queued, syncRunning: false });
+
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toBe(line);
+  });
+
+  it('says nothing of the queue when nothing is queued, whether or not sync runs', () => {
+    expect(sessionContext({ cfg: cfg('enforce'), branch: 'task/5-x', task: task(), pending: 0, queued: idle, syncRunning: false })).toHaveLength(1);
+  });
+
   it('points a branch without a task at `sdlc task new` and `sdlc status`', () => {
     expect(sessionContext({ cfg: cfg('enforce'), branch: 'main', pending: 0, queued: idle })).toEqual([
       'sdlc: mode enforce. No task on branch main. New work starts with `sdlc task new`; status questions use `sdlc status`.',
@@ -101,23 +115,42 @@ describe('sessionContext', () => {
 describe('promptRef', () => {
   const sha = (text: string): string => createHash('sha256').update(text).digest('hex');
 
-  it('is prompt:<harness>:<session>:<first 16 hex of the sha-256 of the prompt>', () => {
-    expect(promptRef('claude', 's1', '/approve\nlooks good')).toBe(`prompt:claude:s1:${sha('/approve\nlooks good').slice(0, 16)}`);
+  it('is prompt:<harness>:<session>:<prompt id>:<first 16 hex of the sha-256 of the prompt>', () => {
+    expect(promptRef('claude', 's1', 'p1', 'approve-planning', '/approve\nlooks good')).toBe(
+      `prompt:claude:s1:p1:${sha('/approve\nlooks good').slice(0, 16)}`,
+    );
+  });
+
+  it('uses the fallback key when the harness gives no prompt id (Gemini)', () => {
+    expect(promptRef('gemini', 'g1', undefined, 'approve-planning', '/approve')).toBe(
+      `prompt:gemini:g1:approve-planning:${sha('/approve').slice(0, 16)}`,
+    );
   });
 
   it("uses 'nosession' when the payload has no session id", () => {
-    expect(promptRef('gemini', undefined, '/approve')).toBe(`prompt:gemini:nosession:${sha('/approve').slice(0, 16)}`);
+    expect(promptRef('gemini', undefined, undefined, 'accept', '/accept')).toBe(
+      `prompt:gemini:nosession:accept:${sha('/accept').slice(0, 16)}`,
+    );
   });
 
-  it('differs by prompt, session and harness', () => {
+  it('differs by prompt, session, harness, prompt id and fallback key', () => {
     const refs = new Set([
-      promptRef('claude', 's1', '/approve'),
-      promptRef('claude', 's1', '/approve '),
-      promptRef('claude', 's2', '/approve'),
-      promptRef('codex', 's1', '/approve'),
+      promptRef('claude', 's1', 'p1', 'approve-planning', '/approve'),
+      promptRef('claude', 's1', 'p1', 'approve-planning', '/approve '),
+      promptRef('claude', 's2', 'p1', 'approve-planning', '/approve'),
+      promptRef('codex', 's1', 'p1', 'approve-planning', '/approve'),
+      promptRef('claude', 's1', 'p2', 'approve-planning', '/approve'),
+      promptRef('gemini', 's1', undefined, 'approve-planning', '/approve'),
+      promptRef('gemini', 's1', undefined, 'approve-review', '/approve'),
     ]);
 
-    expect(refs.size).toBe(4);
+    expect(refs.size).toBe(7);
+  });
+
+  it('ignores the fallback key when there is a prompt id', () => {
+    expect(promptRef('claude', 's1', 'p1', 'approve-planning', '/approve')).toBe(
+      promptRef('claude', 's1', 'p1', 'approve-review', '/approve'),
+    );
   });
 });
 
