@@ -28,6 +28,8 @@ const TOOLS: Record<HookHarness, Record<string, ToolSpec>> = {
     NotebookEdit: { kind: 'path', field: 'notebook_path' },
     Bash: { kind: 'shell', fields: ['command'] },
     PowerShell: { kind: 'shell', fields: ['command'] },
+    // The `Bash` matcher also covers Monitor since Claude Code v2.1.314; its input has a `command` too.
+    Monitor: { kind: 'shell', fields: ['command'] },
     Agent: CLAUDE_SUBAGENT,
     Task: CLAUDE_SUBAGENT,
   },
@@ -68,6 +70,13 @@ function text(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
+/** A shell command: a string, or an argv array of strings joined with single spaces. */
+function commandText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && value.every(part => typeof part === 'string')) return value.join(' ');
+  return undefined;
+}
+
 const PATCH_HEADER = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.*)$/;
 
 /**
@@ -104,12 +113,12 @@ function readTool(harness: HookHarness, raw: Fields, cwd: string): ToolCall {
       return { category: 'edit', name, paths: path === undefined ? [] : absolute(cwd, [path]) };
     }
     case 'patch': {
-      const patch = typeof input[spec.field] === 'string' ? (input[spec.field] as string) : '';
-      return { category: 'edit', name, paths: absolute(cwd, patchPaths(patch)) };
+      const patch = input[spec.field];
+      return { category: 'edit', name, paths: typeof patch === 'string' ? absolute(cwd, patchPaths(patch)) : [] };
     }
     case 'shell': {
-      const field = spec.fields.find(candidate => typeof input[candidate] === 'string');
-      return { category: 'shell', name, command: field === undefined ? '' : (input[field] as string) };
+      const command = spec.fields.map(field => commandText(input[field])).find(found => found !== undefined);
+      return { category: 'shell', name, command: command ?? '' };
     }
     case 'subagent': {
       const role = text(input[spec.roleField]);

@@ -58,6 +58,15 @@ describe('normalizePayload: Claude Code', () => {
     });
   });
 
+  it('maps Monitor to a shell call, since the Bash matcher covers it', () => {
+    const raw = { ...fixture('claude-pretool-bash'), tool_name: 'Monitor', tool_input: { command: 'tail -f app.log' } };
+    expect(normalizePayload('claude', 'pre-tool', raw).tool).toEqual({
+      category: 'shell',
+      name: 'Monitor',
+      command: 'tail -f app.log',
+    });
+  });
+
   it('maps Agent to a subagent with its role and model', () => {
     const event = normalizePayload('claude', 'pre-tool', fixture('claude-pretool-agent'));
     expect(event.tool).toEqual({ category: 'subagent', name: 'Agent', role: 'sdlc-reviewer', model: 'sonnet' });
@@ -131,6 +140,22 @@ describe('normalizePayload: Codex CLI', () => {
       name: 'Bash',
       command: 'git status',
     });
+  });
+
+  it('joins a command given as an argv array with single spaces', () => {
+    const raw = { ...fixture('codex-pretool-bash'), tool_input: { command: ['git', 'push', '--force'] } };
+    expect(normalizePayload('codex', 'pre-tool', raw).tool).toEqual({
+      category: 'shell',
+      name: 'Bash',
+      command: 'git push --force',
+    });
+  });
+
+  it('joins a cmd argv array too, and ignores an array with a non-string part', () => {
+    const joined = { ...fixture('codex-pretool-bash'), tool_input: { cmd: ['ls', '-la'] } };
+    expect(normalizePayload('codex', 'pre-tool', joined).tool).toMatchObject({ command: 'ls -la' });
+    const mixed = { ...fixture('codex-pretool-bash'), tool_input: { command: ['ls', 7] } };
+    expect(normalizePayload('codex', 'pre-tool', mixed).tool).toMatchObject({ command: '' });
   });
 
   it('prefers command over cmd', () => {
