@@ -425,7 +425,9 @@ async function checkLegacyHooks(env: DoctorEnv, hooks: Hooks): Promise<Check> {
   const dir = printable(found.dir);
   const own = [...found.chained, ...found.notExecutable];
   if (!hooksActive(hooks)) {
-    const names = own.length > 0 ? `${own.join(', ')} in ${dir}` : `none in ${dir}`;
+    const runnable = found.chained.length > 0 ? found.chained.join(', ') : 'none';
+    const skipped = found.notExecutable.length > 0 ? `; not executable, so skipped: ${found.notExecutable.join(', ')}` : '';
+    const names = `${runnable} in ${dir}${skipped}`;
     return hooks.value === undefined
       ? ok(id, `core.hooksPath is not set, so the sdlc hooks are not active and git runs your own hooks itself (${names}); once it is set, the sdlc hooks run them after their own step`)
       : ok(id, `core.hooksPath is ${printable(hooks.value)}, so git runs the hooks there: neither the sdlc hooks nor your hooks in ${dir} (${own.length > 0 ? own.join(', ') : 'none'}) run; see git.hooksPath`);

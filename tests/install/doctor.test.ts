@@ -710,7 +710,7 @@ describe('runDoctor', () => {
       const check = byId(await runDoctor(h.env, h.cfg), 'git.legacyHooks');
       expect(check.status).toBe('ok');
       expect(check.message).toBe(
-        'core.hooksPath is not set, so the sdlc hooks are not active and git runs your own hooks itself (pre-commit, post-merge in .git/hooks); ' +
+        'core.hooksPath is not set, so the sdlc hooks are not active and git runs your own hooks itself (pre-commit in .git/hooks; not executable, so skipped: post-merge); ' +
           'once it is set, the sdlc hooks run them after their own step',
       );
     });
@@ -1520,6 +1520,18 @@ describe('hookEnvironment', () => {
     );
     expect(env).toEqual({ Path: 'C:\\Windows' });
     expect(stripped).toBe(2);
+  });
+
+  it('on Windows strips the PATH of a case-insensitive environment like the real process.env', () => {
+    const stored: Record<string, string> = { Path: 'C:\\npm-cache\\_npx\\1a\\node_modules\\.bin;C:\\Windows', HOME: 'C:\\h' };
+    const find = (key: string | symbol) => (typeof key === 'string' ? Object.keys(stored).find(k => k.toUpperCase() === key.toUpperCase()) : undefined);
+    const processLike = new Proxy(stored, {
+      get: (target, key) => { const k = find(key); return k === undefined ? undefined : target[k]; },
+      has: (_target, key) => find(key) !== undefined,
+    }) as NodeJS.ProcessEnv;
+    const { env, stripped } = hookEnvironment(processLike, 'win32');
+    expect(env).toEqual({ Path: 'C:\\Windows', HOME: 'C:\\h' });
+    expect(stripped).toBe(1);
   });
 
   it('reads Windows paths too', () => {

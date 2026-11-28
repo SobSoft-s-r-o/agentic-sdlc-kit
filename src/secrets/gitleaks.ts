@@ -14,8 +14,11 @@ export interface ExecResult {
  * often `Path`; `process.env` hides that, but a plain copy of it does not.
  */
 export function envKey(env: NodeJS.ProcessEnv, name: string, platform: NodeJS.Platform = process.platform): string {
-  if (platform !== 'win32' || name in env) return name;
-  return Object.keys(env).find(key => key.toUpperCase() === name.toUpperCase()) ?? name;
+  if (platform !== 'win32') return name;
+  // Look at the stored keys, never `name in env`: the real `process.env` answers `in` case-insensitively
+  // while enumerating the stored spelling, so `in` would return `PATH` for a stored `Path`.
+  const keys = Object.keys(env);
+  return keys.includes(name) ? name : (keys.find(key => key.toUpperCase() === name.toUpperCase()) ?? name);
 }
 
 /** The value of the variable `name` in `env`, found case-insensitively on Windows. */
