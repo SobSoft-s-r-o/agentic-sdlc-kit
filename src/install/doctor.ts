@@ -6,21 +6,18 @@ import { runHook, type HookContext } from '../commands/hook.js';
 import { loadConfigFromString, type Config } from '../config/schema.js';
 import type { Status } from '../core/types.js';
 import { listWorktrees, orphanWorktrees, type OrphanWorktree, type Worktree } from '../git/worktrees.js';
-import { ensureBoard } from '../github/board.js';
-import { GhError, ghJson } from '../github/gh.js';
+import { GhError } from '../github/gh.js';
 import { GitHubTracker } from '../github/githubTracker.js';
 import { readJsonLines } from '../hooks/localLog.js';
 import { EVENT_NAMES } from '../hooks/output.js';
 import { HOOK_EVENTS, HOOK_HARNESSES, type HookHarness } from '../hooks/types.js';
 import { OUTBOX_FAILED_FILE, queuedCounts } from '../outbox/outbox.js';
-import { WORKFLOW_PATH } from '../render/github.js';
 import { HOOK_LAUNCHER, isKitHookItem, NATIVE_EVENT, SETTINGS_FILE } from '../render/hooks.js';
-import { KIT_GIT_URL } from '../render/instructions.js';
 import { mcpEnvVars } from '../render/mcp.js';
 import { scanFileName } from '../secrets/scan.js';
 import type { Tracker } from '../tracker/types.js';
 import { readManifest, type Manifest } from './manifest.js';
-import { HOOKS_PATH, ensureLabels, readPushProtection, type GitRunner } from './provision.js';
+import { HOOKS_PATH, readPushProtection, type GitRunner } from './provision.js';
 import { mcpListArgs, mcpNames, superpowersInstall, superpowersInstalled, superpowersListArgs, graphifyInstall } from './stack.js';
 import {
   readHooks,
@@ -34,6 +31,7 @@ import {
   checkLegacyHooks,
   type Hooks,
 } from './doctor/files.js';
+import { checkKitRef, checkBoard, checkLabels, checkWorkflow, checkActionsSecret } from './doctor/github.js';
 import { ghBlocker, runPreflight } from './doctor/preflight.js';
 import {
   describeError,
@@ -63,88 +61,6 @@ export type { CheckStatus, Check, DoctorEnv, ExecOptions, PreflightOptions } fro
 export { describeError } from './doctor/types.js';
 export { parseTokenScopes, runPreflight } from './doctor/preflight.js';
 export { hookEnvironment } from './doctor/files.js';
-
-const KIT_REF_TIMEOUT_MS = 15_000;
-const COMMIT_SHA = /^[0-9a-f]{7,40}$/;
-
-/** `kit_ref` must exist in the kit's repository: every generated `npx -y github:...#<kit_ref>` command fails otherwise. Network trouble is "cannot verify". */
-async function checkKitRef(env: DoctorEnv, cfg: Config): Promise<Check> {
-  const id = 'kit.ref';
-  const ref = cfg.kitRef;
-  const fix = `set kit_ref in sdlc.config.yaml to a tag or branch of the kit that exists (main until a release tag exists, or the ref you installed from)`;
-  if (COMMIT_SHA.test(ref)) return ok(id, `kit_ref ${ref} looks like a commit; not checked`);
-  let result: Awaited<ReturnType<DoctorEnv['exec']>>;
-  try {
-    result = await env.exec('git', ['ls-remote', '--exit-code', KIT_GIT_URL, ref], {
-      // No prompt for credentials, and no ssh passphrase or host-key prompt when a url.insteadOf rule turns the URL into ssh.
-      env: { ...env.env, GIT_TERMINAL_PROMPT: '0', ...(env.env.GIT_SSH_COMMAND === undefined ? { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' } : {}) },
-      timeoutMs: KIT_REF_TIMEOUT_MS,
-    });
-  } catch (error) {
-    return warn(id, `cannot verify kit_ref ${printable(ref)}: ${describeError(error)}`);
-  }
-  // `--exit-code`: 2 means the repository answered and has no such ref.
-  if (result.code === 2) return warn(id, `kit_ref ${printable(ref)} does not exist in ${KIT_GIT_URL}, so the generated npx commands fail`, fix);
-  if (result.code !== 0) return warn(id, `cannot verify kit_ref ${printable(ref)}: git ls-remote ${failure(result.code, result.stderr)}`);
-  return ok(id, `kit_ref ${printable(ref)} exists in the kit's repository`);
-}
-
-async function checkBoard(env: DoctorEnv, cfg: Config): Promise<Check> {
-  const id = 'board.fields';
-  const result = await ensureBoard(env.run, cfg, { dryRun: true });
-  if (result.wouldCreateProject) return fail(id, 'no board is configured: github.project.number is not set', 'sdlc board ensure');
-  const structure = [
-    ...(result.plan.createFields.length > 0 ? [`missing fields: ${list(result.plan.createFields.map(field => field.name))}`] : []),
-    ...result.plan.addOptions.map(change => `missing options of ${change.fieldName}: ${list(change.missing)}`),
-  ];
-  const views = result.viewsPlanned.length > 0 ? `missing views: ${list(result.viewsPlanned)}` : undefined;
-  if (structure.length > 0) {
-    return fail(id, `board #${result.projectNumber}: ${[...structure, ...(views === undefined ? [] : [views])].join('; ')}`, 'sdlc board ensure');
-  }
-  // Views alone do not stop the workflow, and the API cannot create every kind of view.
-  if (views !== undefined) {
-    return warn(
-      id,
-      `board #${result.projectNumber}: ${views} (run sdlc board ensure; if the API cannot create them, create them manually)`,
-      'sdlc board ensure',
-    );
-  }
-  return ok(id, `board #${result.projectNumber} has every field, option and view`);
-}
-
-async function checkLabels(env: DoctorEnv, cfg: Config): Promise<Check> {
-  const id = 'labels';
-  const { created: missing, existing } = await ensureLabels(env.run, cfg, { dryRun: true });
-  if (missing.length > 0) return fail(id, `missing labels: ${list(missing.map(printable))}`, 'sdlc init');
-  return ok(id, `all ${existing.length} labels exist`);
-}
-
-function checkWorkflow(env: DoctorEnv): Check {
-  const id = 'actions.workflow';
-  if (env.fs.read(WORKFLOW_PATH) !== undefined) return ok(id, `${WORKFLOW_PATH} exists`);
-  return fail(id, `${WORKFLOW_PATH} not found`, 'sdlc init');
-}
-
-const SECRET_NAME = 'SDLC_TOKEN';
-
-async function checkActionsSecret(env: DoctorEnv, cfg: Config): Promise<Check> {
-  const id = 'actions.secret';
-  try {
-    const secrets = await ghJson<Array<{ name?: string }> | undefined>(env.run, ['secret', 'list', '--repo', cfg.github.repo, '--json', 'name']);
-    if ((secrets ?? []).some(secret => secret.name === SECRET_NAME)) return ok(id, `${SECRET_NAME} is set as a repository secret`);
-    return fail(
-      id,
-      `${SECRET_NAME} is not set as a repository secret (organization-level secrets are not visible to this check)`,
-      `gh secret set ${SECRET_NAME}`,
-    );
-  } catch (error) {
-    // Listing secrets needs admin access: without it the secret cannot be told apart from a missing one.
-    if (error instanceof GhError && /\bHTTP 403\b/.test(error.stderr)) {
-      return warn(id, `cannot verify ${SECRET_NAME} (needs admin access to list secrets)`);
-    }
-    return fail(id, `cannot list the repository secrets: ${ghReason(error)}`);
-  }
-}
 
 /** Names only: whether each variable the configured MCP servers read is set, never what it holds. */
 function checkMcpToken(env: DoctorEnv, cfg: Config): Check {
