@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { applyEvent, newTask, TransitionError } from '../../src/core/stateMachine.js';
+import { applyEvent, MAX_GAPS, newTask, TransitionError } from '../../src/core/stateMachine.js';
 import { BUILTIN_TYPES } from '../../src/core/taskTypes.js';
-import type { Approval, TaskEvent, TaskState, TaskTypeDef } from '../../src/core/types.js';
+import type { Approval, Gap, TaskEvent, TaskState, TaskTypeDef } from '../../src/core/types.js';
 
 /** ISO timestamp `n` seconds after a fixed origin; lets tests state ordering explicitly. */
 const ts = (n: number): string => new Date(Date.UTC(2026, 0, 1, 0, 0, n)).toISOString();
@@ -1206,6 +1206,113 @@ describe('checkpoint', () => {
     const next = applyEvent(done, { kind: 'checkpoint' }, feature, ts(3));
     expect(next.status).toBe('done');
     expect(next.updatedAt).toBe(ts(3));
+  });
+});
+
+describe('gap_recorded', () => {
+  const feature = typeDef('feature');
+  const gap = (n: number, overrides: Partial<Gap> = {}): Gap => ({
+    at: ts(n),
+    rule: 'plan-not-approved',
+    text: `edit ${n}`,
+    harness: 'claude',
+    blocked: false,
+    ...overrides,
+  });
+
+  it('appends gaps to a state that has none', () => {
+    const next = applyEvent(fresh('feature'), { kind: 'gap_recorded', gaps: [gap(1), gap(2)] }, feature, ts(5));
+    expect(next.gaps).toEqual([gap(1), gap(2)]);
+  });
+
+  it('appends to the gaps already recorded', () => {
+    const first = applyEvent(fresh('feature'), { kind: 'gap_recorded', gaps: [gap(1)] }, feature, ts(5));
+    const second = applyEvent(first, { kind: 'gap_recorded', gaps: [gap(2), gap(3)] }, feature, ts(6));
+    expect(second.gaps).toEqual([gap(1), gap(2), gap(3)]);
+  });
+
+  it('deduplicates gaps with the same rule and text, keeping the newest at', () => {
+    const first = applyEvent(
+      fresh('feature'),
+      { kind: 'gap_recorded', gaps: [gap(1, { text: 'same' }), gap(2, { text: 'other' })] },
+      feature,
+      ts(5),
+    );
+    const second = applyEvent(
+      first,
+      { kind: 'gap_recorded', gaps: [gap(9, { text: 'same', blocked: true }), gap(3, { text: 'same' })] },
+      feature,
+      ts(10),
+    );
+    expect(second.gaps).toEqual([gap(2, { text: 'other' }), gap(9, { text: 'same', blocked: true })]);
+  });
+
+  it('keeps gaps with the same text but a different rule apart', () => {
+    const next = applyEvent(
+      fresh('feature'),
+      { kind: 'gap_recorded', gaps: [gap(1, { text: 't' }), gap(2, { text: 't', rule: 'task-done' })] },
+      feature,
+      ts(5),
+    );
+    expect(next.gaps).toHaveLength(2);
+  });
+
+  it('keeps only the MAX_GAPS newest', () => {
+    expect(MAX_GAPS).toBe(20);
+    const gaps = Array.from({ length: MAX_GAPS + 5 }, (_, i) => gap(i + 1));
+    const next = applyEvent(fresh('feature'), { kind: 'gap_recorded', gaps }, feature, ts(100));
+    expect(next.gaps).toHaveLength(MAX_GAPS);
+    expect(next.gaps?.[0]).toEqual(gap(6));
+    expect(next.gaps?.at(-1)).toEqual(gap(MAX_GAPS + 5));
+  });
+
+  it('drops the oldest gaps by time, not by position, when the cap is exceeded', () => {
+    const existing = Array.from({ length: MAX_GAPS }, (_, i) => gap(i + 10));
+    const full = applyEvent(fresh('feature'), { kind: 'gap_recorded', gaps: existing }, feature, ts(50));
+    const next = applyEvent(full, { kind: 'gap_recorded', gaps: [gap(1), gap(100)] }, feature, ts(101));
+    expect(next.gaps).toHaveLength(MAX_GAPS);
+    expect(next.gaps).not.toContainEqual(gap(1));
+    expect(next.gaps).not.toContainEqual(gap(10));
+    expect(next.gaps?.at(-1)).toEqual(gap(100));
+  });
+
+  it('changes neither status, phase nor waitingOn, and sets updatedAt to the event time', () => {
+    const inReview = featureInReview(['web']);
+    const next = applyEvent(inReview, { kind: 'gap_recorded', gaps: [gap(1)] }, feature, ts(30));
+    expect(next).toEqual({ ...inReview, gaps: [gap(1)], updatedAt: ts(30) });
+  });
+
+  it('is accepted on a done task and while awaiting deployment', () => {
+    const cancelled = applyEvent(
+      fresh('feature'),
+      { kind: 'cancelled', reason: 'dropped', approval: approval(ts(1)) },
+      feature,
+      ts(2),
+    );
+    const doneGapped = applyEvent(cancelled, { kind: 'gap_recorded', gaps: [gap(3, { rule: 'task-done' })] }, feature, ts(4));
+    expect(doneGapped.status).toBe('done');
+    expect(doneGapped.outcome).toBe('cancelled');
+    expect(doneGapped.gaps).toHaveLength(1);
+
+    const awaiting = drive(feature, featureInReview(['web']), [
+      { kind: 'pr_merged', pr: 11, scope: 'final', mergeSha: 's' },
+      20,
+    ]);
+    expect(awaiting.status).toBe('awaiting_deployment');
+    const gapped = applyEvent(awaiting, { kind: 'gap_recorded', gaps: [gap(21)] }, feature, ts(22));
+    expect(gapped.status).toBe('awaiting_deployment');
+    expect(gapped.pendingTargets).toEqual(awaiting.pendingTargets);
+    expect(gapped.gaps).toHaveLength(1);
+  });
+
+  it('does not mutate the input state or alias the gaps carried by the event', () => {
+    const frozen = deepFreeze(fresh('feature'));
+    const snapshot = structuredClone(frozen);
+    const carried = gap(1);
+    const next = applyEvent(frozen, { kind: 'gap_recorded', gaps: [carried] }, feature, ts(5));
+    expect(frozen).toEqual(snapshot);
+    carried.text = 'changed afterwards';
+    expect(next.gaps?.[0].text).toBe('edit 1');
   });
 });
 

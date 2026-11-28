@@ -1,4 +1,4 @@
-import type { Approval, EndsOn, Phase, PrRecord, TaskEvent, TaskState, TaskTypeDef } from './types.js';
+import type { Approval, EndsOn, Gap, Phase, PrRecord, TaskEvent, TaskState, TaskTypeDef } from './types.js';
 
 export class TransitionError extends Error {
   constructor(message: string) {
@@ -8,6 +8,9 @@ export class TransitionError extends Error {
 }
 
 const ACCEPTANCE_ENDS: readonly EndsOn[] = ['owner_acceptance', 'merge_or_acceptance'];
+
+/** The state is one comment, so it keeps only this many recorded gaps (the newest). */
+export const MAX_GAPS = 20;
 
 export function newTask(input: { issue: number; type: TaskTypeDef; summary: string; now: string }): TaskState {
   return {
@@ -35,6 +38,27 @@ function isAfter(later: string, earlier: string): boolean {
   const a = Date.parse(later);
   const b = Date.parse(earlier);
   return !Number.isNaN(a) && !Number.isNaN(b) && a > b;
+}
+
+/** Milliseconds for ordering gaps; an unreadable `at` sorts as the oldest. */
+function gapTime(gap: Gap): number {
+  const time = Date.parse(gap.at);
+  return Number.isNaN(time) ? Number.NEGATIVE_INFINITY : time;
+}
+
+/**
+ * Merges `incoming` gaps into `existing`: one entry per rule and text (the one with the newest
+ * `at`; the later one wins a tie), oldest first, only the newest `MAX_GAPS` kept.
+ */
+function mergeGaps(existing: readonly Gap[], incoming: readonly Gap[]): Gap[] {
+  const newest = new Map<string, Gap>();
+  for (const gap of [...existing, ...incoming]) {
+    const key = JSON.stringify([gap.rule, gap.text]);
+    const seen = newest.get(key);
+    if (!seen || gapTime(gap) >= gapTime(seen)) newest.set(key, { ...gap });
+  }
+  const merged = [...newest.values()].sort((a, b) => gapTime(a) - gapTime(b));
+  return merged.slice(-MAX_GAPS);
 }
 
 /** De-duplicated concatenation, keeping first-seen order. */
@@ -138,7 +162,13 @@ function assertNever(event: never): never {
  * when the event is not valid for the current state or task type.
  */
 export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef, now: string): TaskState {
-  if (state.status === 'done' && event.kind !== 'reopened' && event.kind !== 'checkpoint') {
+  // A gap is a note about the task, not work on it: it is recorded in any status (an edit on a done task is a gap).
+  if (
+    state.status === 'done' &&
+    event.kind !== 'reopened' &&
+    event.kind !== 'checkpoint' &&
+    event.kind !== 'gap_recorded'
+  ) {
     throw new TransitionError(`cannot apply "${event.kind}" to a done task`);
   }
   if (state.status === 'awaiting_deployment' && BLOCKED_WHILE_AWAITING_DEPLOYMENT.has(event.kind)) {
@@ -325,6 +355,11 @@ export function applyEvent(state: TaskState, event: TaskEvent, type: TaskTypeDef
         if (event.waitingOn !== undefined) next.waitingOn = event.waitingOn;
         if (event.status !== undefined) next.status = event.status;
       }
+      break;
+    }
+
+    case 'gap_recorded': {
+      next.gaps = mergeGaps(state.gaps ?? [], event.gaps);
       break;
     }
 

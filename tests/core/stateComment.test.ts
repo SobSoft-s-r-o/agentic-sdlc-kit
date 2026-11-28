@@ -88,6 +88,42 @@ describe('parseStateComment', () => {
     expect(() => parseStateComment(malformed)).toThrow('invalid "typeChanges"');
   });
 
+  it('round-trips recorded gaps, reads state written before they existed, and refuses a malformed list', () => {
+    const gapped: TaskState = {
+      ...base(),
+      gaps: [
+        { at: '2026-01-02T00:00:00.000Z', rule: 'plan-not-approved', text: 'edit before approval', harness: 'claude', blocked: true },
+        { at: '2026-01-02T00:01:00.000Z', rule: 'admin-merge', text: 'gh pr merge --admin', harness: 'codex', blocked: false },
+      ],
+    };
+    expect(parseStateComment(renderStateComment(gapped))).toStrictEqual(gapped);
+    expect(parseStateComment(renderStateComment(base()))).not.toHaveProperty('gaps');
+    const render = (gaps: unknown): string => renderStateComment({ ...base(), gaps } as unknown as TaskState);
+    expect(() => parseStateComment(render('x'))).toThrow(StateCommentError);
+    expect(() => parseStateComment(render('x'))).toThrow('"gaps"');
+    expect(() => parseStateComment(render({}))).toThrow('"gaps"');
+  });
+
+  it('refuses a gap entry that is not an object with string at, rule, text, harness and boolean blocked', () => {
+    const entry = { at: '2026-01-02T00:00:00.000Z', rule: 'rm-rf', text: 't', harness: 'gemini', blocked: false };
+    const bad: unknown[] = [
+      'x',
+      null,
+      [],
+      { ...entry, at: 5 },
+      { ...entry, rule: undefined },
+      { ...entry, text: null },
+      { ...entry, harness: 1 },
+      { ...entry, blocked: 'yes' },
+      { ...entry, blocked: undefined },
+    ];
+    for (const item of bad) {
+      const body = renderStateComment({ ...base(), gaps: [entry, item] } as unknown as TaskState);
+      expect(() => parseStateComment(body), JSON.stringify(item)).toThrow(StateCommentError);
+      expect(() => parseStateComment(body), JSON.stringify(item)).toThrow('"gaps"');
+    }
+  });
+
   it('round-trips text that contains code fences, markers and markdown', () => {
     const state = { ...base(), summary: 'Use ```json\n{}\n``` and <!-- sdlc:state --> in docs' };
     expect(parseStateComment(renderStateComment(state))).toStrictEqual(state);
