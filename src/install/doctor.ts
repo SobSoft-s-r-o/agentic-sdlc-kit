@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { deadlineOf, isNoTaskError, taskIssueOf } from '../commands/githook.js';
 import { runHook, type HookContext } from '../commands/hook.js';
@@ -12,7 +14,7 @@ import { EVENT_NAMES } from '../hooks/output.js';
 import { HOOK_EVENTS, HOOK_HARNESSES, type HookEventName, type HookHarness } from '../hooks/types.js';
 import { OUTBOX_FAILED_FILE, queuedCounts } from '../outbox/outbox.js';
 import { WORKFLOW_PATH } from '../render/github.js';
-import { HOOK_LAUNCHER, HOOK_MARKER, NATIVE_EVENT, SETTINGS_FILE } from '../render/hooks.js';
+import { HOOK_LAUNCHER, isKitHookItem, NATIVE_EVENT, SETTINGS_FILE } from '../render/hooks.js';
 import { KIT_GIT_URL } from '../render/instructions.js';
 import { mcpEnvVars } from '../render/mcp.js';
 import { envKey, pathDelimiter } from '../secrets/gitleaks.js';
@@ -78,6 +80,11 @@ export interface DoctorEnv {
   makeTracker?: (cfg: Config) => Tracker;
   /** `process.platform` (the hooks of Gemini CLI cannot run under PowerShell, which it uses on Windows). */
   platform?: NodeJS.Platform;
+  /**
+   * The text of a file of the user's home directory, by path relative to it (`undefined` when it
+   * cannot be read); only read, for `hooks.switches`. Defaults to the real home directory.
+   */
+  userFile?: (path: string) => string | undefined;
 }
 
 export interface ExecOptions {
@@ -799,7 +806,8 @@ function launcherState(git: GitRunner): () => Promise<LauncherState> {
     try {
       const inHead = await git(['cat-file', '-e', `HEAD:${HOOK_LAUNCHER}`]);
       if (inHead.code !== 0) return { committed: false, mode: undefined };
-      const listed = await git(['ls-files', '-s', '--', HOOK_LAUNCHER]);
+      // The mode committed in HEAD, which a clone or a new worktree gets; the index may differ from it.
+      const listed = await git(['ls-tree', 'HEAD', '--', HOOK_LAUNCHER]);
       return { committed: true, mode: listed.code === 0 ? /^(\d{6}) /.exec(listed.stdout)?.[1] : undefined };
     } catch {
       return { committed: undefined, mode: undefined };
@@ -809,12 +817,12 @@ function launcherState(git: GitRunner): () => Promise<LauncherState> {
   return () => (known ??= probe());
 }
 
-/** The native event names of `harness` that have no array element calling the launcher (the same test the merge applies: the marker is in the element's JSON). */
+/** The native event names of `harness` that have no array element calling the launcher (the same test the merge applies: `isKitHookItem`). */
 function eventsWithoutHook(settings: unknown, harness: HookHarness): string[] {
   const hooks = isRecord(settings) ? settings.hooks : undefined;
   return HOOK_EVENTS.map(event => NATIVE_EVENT[harness][event]).filter(native => {
     const items = isRecord(hooks) ? hooks[native] : undefined;
-    return !(Array.isArray(items) && items.some(item => JSON.stringify(item).includes(HOOK_MARKER)));
+    return !(Array.isArray(items) && items.some(isKitHookItem));
   });
 }
 
@@ -954,6 +962,101 @@ function roundTripProblem(harness: HookHarness, mode: Config['mode'], output: st
   }
   const fault = mode === 'enforce' ? denyFault(harness, answer) : warnFault(harness, answer);
   return fault === undefined ? undefined : `${harness}: expected ${expected}, got ${quoted(output)} (${fault})`;
+}
+
+/** Reads a file of the real home directory; `undefined` when it is not there or cannot be read. */
+function readHomeFile(path: string): string | undefined {
+  try {
+    return readFileSync(join(homedir(), path), 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/** The JSON object in `text`, or `undefined` (no file, or a file that is not a JSON object: `hooks.<harness>` reports that). */
+function jsonObjectOf(text: string | undefined): Record<string, unknown> | undefined {
+  if (text === undefined) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Claude Code: `disableAllHooks: true` turns every hook off. */
+function claudeSwitch(text: string | undefined): string | undefined {
+  return jsonObjectOf(text)?.disableAllHooks === true ? 'disableAllHooks is true' : undefined;
+}
+
+/** Gemini CLI: `hooksConfig.enabled: false` turns every hook off; `hooksConfig.disabled` lists hooks turned off by name or command. */
+function geminiSwitch(text: string | undefined): string | undefined {
+  const hooksConfig = jsonObjectOf(text)?.hooksConfig;
+  if (!isRecord(hooksConfig)) return undefined;
+  if (hooksConfig.enabled === false) return 'hooksConfig.enabled is false';
+  const disabled = Array.isArray(hooksConfig.disabled)
+    ? hooksConfig.disabled.filter((name): name is string => typeof name === 'string' && (name.startsWith('sdlc-') || name.includes(HOOK_LAUNCHER)))
+    : [];
+  return disabled.length > 0 ? `hooksConfig.disabled lists ${disabled.join(', ')}` : undefined;
+}
+
+/**
+ * Codex: `hooks = false` (or the deprecated `codex_hooks`) in the `[features]` table, or
+ * `features.hooks = false` at the top level, turns every hook off. A line reading, not a TOML parser:
+ * enough for the forms Codex documents.
+ */
+function codexSwitch(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined;
+  let table = '';
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/\s+#.*$/, '').trim();
+    const header = /^\[\s*([^\]]+?)\s*\]$/.exec(line);
+    if (header !== null) {
+      table = header[1] as string;
+      continue;
+    }
+    const setting = /^([A-Za-z0-9_.]+)\s*=\s*false$/.exec(line);
+    if (setting === null) continue;
+    const key = table === '' ? setting[1] : `${table}.${setting[1]}`;
+    if (key === 'features.hooks' || key === 'features.codex_hooks') return `${key} is false`;
+  }
+  return undefined;
+}
+
+/** Where each harness can be switched off: its project files and the user-level file, with the reader of the switch. */
+const HOOK_SWITCHES: Record<HookHarness, { project: string[]; user: string[]; read: (text: string | undefined) => string | undefined }> = {
+  claude: { project: ['.claude/settings.json', '.claude/settings.local.json'], user: ['.claude/settings.json', '.claude/settings.local.json'], read: claudeSwitch },
+  codex: { project: ['.codex/config.toml'], user: ['.codex/config.toml'], read: codexSwitch },
+  gemini: { project: ['.gemini/settings.json'], user: ['.gemini/settings.json'], read: geminiSwitch },
+};
+
+/**
+ * The settings that switch the harness hooks off, for each configured harness. One in the project
+ * fails in enforce (the hooks are the enforcement) and warns in observe; one in the user's own files
+ * only warns, because it is the owner's to keep. Neither trust state nor managed policy can be read.
+ */
+function checkHookSwitches(env: DoctorEnv, cfg: Config): Check {
+  const id = 'hooks.switches';
+  const harnesses = cliHarnesses(cfg);
+  if (harnesses.length === 0) return ok(id, 'no configured harness has hooks; skipped');
+  const userFile = env.userFile ?? readHomeFile;
+  const project: string[] = [];
+  const user: string[] = [];
+  for (const harness of harnesses) {
+    const { read, project: projectFiles, user: userFiles } = HOOK_SWITCHES[harness];
+    for (const file of projectFiles) {
+      const found = read(env.fs.read(file));
+      if (found !== undefined) project.push(`${file}: ${found}`);
+    }
+    for (const file of userFiles) {
+      const found = read(userFile(file));
+      if (found !== undefined) user.push(`~/${file}: ${found}`);
+    }
+  }
+  if (project.length === 0 && user.length === 0) return ok(id, `no setting switches the hooks of ${harnesses.join(', ')} off`);
+  const message = `hooks are switched off: ${[...project, ...user].join('; ')}`;
+  const fix = 'remove the setting, or set it back to its default, so the harness runs the sdlc hooks';
+  return project.length > 0 && cfg.mode === 'enforce' ? fail(id, message, fix) : warn(id, message, fix);
 }
 
 /**
@@ -1186,6 +1289,7 @@ export async function runDoctor(env: DoctorEnv, cfg: Config): Promise<Check[]> {
 
   const launcher = launcherState(env.git);
   for (const harness of HOOK_HARNESSES) await add(isolated(`hooks.${harness}`, () => checkHooksOf(env, cfg, harness, launcher)));
+  await add(isolated('hooks.switches', () => checkHookSwitches(env, cfg)));
   await add(isolated('hooks.roundtrip', () => checkRoundTrip(env, cfg)));
 
   await add(isolated('secrets.guard', () => checkSecretGuard(hooks, onPath.status === 'ok')));

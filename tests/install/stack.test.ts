@@ -103,6 +103,8 @@ describe('superpowersInstalled', () => {
       expect(superpowersInstalled('claude', superpowers({ scope: 'project', enabled: true, projectPath: link }), [repo])).toBe(true);
       expect(superpowersInstalled('claude', superpowers({ scope: 'project', enabled: true, projectPath: repo }), [link])).toBe(true);
       expect(superpowersInstalled('claude', superpowers({ scope: 'project', enabled: true, projectPath: main }), [repo, main])).toBe(true);
+      // a project plugin switched off at the main checkout is not in use there either
+      expect(superpowersInstalled('claude', superpowers({ scope: 'project', enabled: false, projectPath: main }), [repo, main])).toBe(false);
       // a subdirectory is another project
       expect(superpowersInstalled('claude', superpowers({ scope: 'project', enabled: true, projectPath: join(repo, 'sub') }), [repo])).toBe(false);
       // a path that does not exist is compared as written

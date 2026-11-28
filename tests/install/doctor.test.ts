@@ -64,6 +64,7 @@ const INSTALL_IDS = [
   'hooks.claude',
   'hooks.codex',
   'hooks.gemini',
+  'hooks.switches',
   'hooks.roundtrip',
   'secrets.guard',
   'secrets.pushProtection',
@@ -138,7 +139,7 @@ interface GitState {
   version?: string;
   /** Whether the hook launcher is in `HEAD` (default); false is a launcher that was never committed. */
   launcherCommitted?: boolean;
-  /** The mode `git ls-files -s` shows for the launcher; defaults to the executable 100755. `null` makes the call fail. */
+  /** The mode `git ls-tree HEAD` shows for the launcher (the committed one); defaults to the executable 100755. `null` makes the call fail. */
   launcherMode?: string | null;
   /** The output of `git worktree list --porcelain`; defaults to the one main checkout, `/memory`. */
   worktrees?: string;
@@ -167,9 +168,9 @@ function fakeGit(state: GitState = {}): FakeGit {
         ? { stdout: '', code: 128, stderr: "fatal: path '.sdlc/hooks/run.sh' exists on disk, but not in 'HEAD'" }
         : { stdout: '', code: 0, stderr: '' };
     }
-    if (line === 'ls-files -s -- .sdlc/hooks/run.sh') {
-      if (state.launcherMode === null) return { stdout: '', code: 128, stderr: 'fatal: index file corrupt' };
-      return { stdout: `${state.launcherMode ?? '100755'} 0123456789abcdef0123456789abcdef01234567 0\t.sdlc/hooks/run.sh\n`, code: 0, stderr: '' };
+    if (line === 'ls-tree HEAD -- .sdlc/hooks/run.sh') {
+      if (state.launcherMode === null) return { stdout: '', code: 128, stderr: 'fatal: not a tree object' };
+      return { stdout: `${state.launcherMode ?? '100755'} blob 0123456789abcdef0123456789abcdef01234567\t.sdlc/hooks/run.sh\n`, code: 0, stderr: '' };
     }
     if (line === 'worktree list --porcelain') {
       return state.worktreesFail === true
@@ -242,6 +243,8 @@ interface EnvOptions {
   nodeVersion?: string;
   /** The config file's text; `null` is no file. */
   configText?: string | null;
+  /** Files of the home directory, by path relative to it. */
+  userFiles?: Record<string, string>;
 }
 
 interface Harness {
@@ -327,6 +330,7 @@ function harness(options: EnvOptions = {}): Harness {
     ...(options.hookRunner === undefined ? {} : { hookRunner: options.hookRunner }),
     ...(options.makeTracker === undefined ? {} : { makeTracker: options.makeTracker }),
     ...(options.platform === undefined ? {} : { platform: options.platform }),
+    userFile: path => options.userFiles?.[path],
   };
   return { env, gh, git, fs, cfg, execCalls, execEnvs, execOptions, whichEnvs };
 }
@@ -1914,8 +1918,8 @@ describe('hooks.<harness>', () => {
       expect(check.message).toContain('.sdlc/hooks/run.sh is committed with mode 100644, not 100755');
       expect(check.fix).toBe('git update-index --chmod=+x .sdlc/hooks/run.sh');
     }
-    // asked once for all three, and in the form that shows the mode
-    expect(h.git.calls.filter(call => call[0] === 'ls-files' && call[1] === '-s')).toEqual([['ls-files', '-s', '--', '.sdlc/hooks/run.sh']]);
+    // asked once for all three, for the mode committed in HEAD (not the index, which a chmod alone changes)
+    expect(h.git.calls.filter(call => call[0] === 'ls-tree')).toEqual([['ls-tree', 'HEAD', '--', '.sdlc/hooks/run.sh']]);
   });
 
   it('is ok for the executable mode, and does not warn when git cannot say what the mode is', async () => {
@@ -1932,7 +1936,7 @@ describe('hooks.<harness>', () => {
 
     expect(check.message).not.toContain('mode');
     expect(check.fix).toBe('commit .sdlc/hooks/run.sh');
-    expect(h.git.calls.filter(call => call[0] === 'ls-files' && call[1] === '-s')).toEqual([]);
+    expect(h.git.calls.filter(call => call[0] === 'ls-tree')).toEqual([]);
   });
 
   it('gemini on Windows: warns that its hooks run through PowerShell, which sdlc hooks cannot use', async () => {
@@ -1947,6 +1951,81 @@ describe('hooks.<harness>', () => {
 
     const linux = allThree({ platform: 'linux' });
     expect(byId(await runDoctor(linux.env, linux.cfg), 'hooks.gemini').status).toBe('ok');
+  });
+});
+
+describe('hooks.switches', () => {
+  const enforceThree = (): Config => cfgOf(configWith('', '[claude, codex, gemini]').replace('mode: observe', 'mode: enforce'));
+  const setJson = (fs: MemoryFs, path: string, extra: Record<string, unknown>): void => {
+    fs.write(path, JSON.stringify({ ...(JSON.parse(fs.read(path) ?? '{}') as object), ...extra }, null, 2));
+  };
+
+  it('is ok when no switch is set', async () => {
+    const check = byId(await runDoctor(allThree().env, threeHarnesses()), 'hooks.switches');
+    expect(check.status).toBe('ok');
+  });
+
+  it.each([
+    ['.claude/settings.json', { disableAllHooks: true }],
+    ['.claude/settings.local.json', { disableAllHooks: true }],
+    ['.gemini/settings.json', { hooksConfig: { enabled: false } }],
+  ] as const)('fails in enforce and warns in observe when %s switches the hooks off', async (path, extra) => {
+    const enforced = allThree({ cfg: enforceThree() });
+    setJson(enforced.fs, path, extra);
+    const failed = byId(await runDoctor(enforced.env, enforced.cfg), 'hooks.switches');
+    expect(failed.status).toBe('fail');
+    expect(failed.message).toContain(path);
+
+    const observed = allThree();
+    setJson(observed.fs, path, extra);
+    expect(byId(await runDoctor(observed.env, observed.cfg), 'hooks.switches').status).toBe('warn');
+  });
+
+  it('reads the Gemini list of disabled hooks for the sdlc ones', async () => {
+    const h = allThree({ cfg: enforceThree() });
+    setJson(h.fs, '.gemini/settings.json', { hooksConfig: { disabled: ['sdlc-pre-tool'] } });
+    const check = byId(await runDoctor(h.env, h.cfg), 'hooks.switches');
+    expect(check.status).toBe('fail');
+    expect(check.message).toContain('sdlc-pre-tool');
+  });
+
+  it.each([
+    '[features]\nhooks = false\n',
+    '# mine\n[features]\n  hooks=false # off\n',
+    '[features]\ncodex_hooks = false\n',
+    'features.hooks = false\n',
+  ])('fails in enforce when .codex/config.toml has %j', async toml => {
+    const h = allThree({ cfg: enforceThree() });
+    // Before the kit's tables: a top-level key after a table header would belong to that table.
+    h.fs.write('.codex/config.toml', `${toml}\n${h.fs.read('.codex/config.toml') ?? ''}`);
+    const check = byId(await runDoctor(h.env, h.cfg), 'hooks.switches');
+    expect(check.status).toBe('fail');
+    expect(check.message).toContain('.codex/config.toml');
+  });
+
+  it('does not take other Codex settings for the switch', async () => {
+    const h = allThree({ cfg: enforceThree() });
+    h.fs.write('.codex/config.toml', '[features]\nhooks = true\n[other]\nhooks = false\n');
+    expect(byId(await runDoctor(h.env, h.cfg), 'hooks.switches').status).toBe('ok');
+  });
+
+  it('only warns, in enforce too, for a switch in the user-level settings', async () => {
+    for (const [path, text] of [
+      ['.claude/settings.json', '{ "disableAllHooks": true }'],
+      ['.gemini/settings.json', '{ "hooksConfig": { "enabled": false } }'],
+      ['.codex/config.toml', '[features]\nhooks = false\n'],
+    ] as const) {
+      const h = allThree({ cfg: enforceThree(), userFiles: { [path]: text } });
+      const check = byId(await runDoctor(h.env, h.cfg), 'hooks.switches');
+      expect(check.status, path).toBe('warn');
+      expect(check.message).toContain(`~/${path}`);
+    }
+  });
+
+  it('checks only the configured harnesses', async () => {
+    const h = harness();
+    h.fs.write('.gemini/settings.json', '{ "hooksConfig": { "enabled": false } }');
+    expect(byId(await runDoctor(h.env, h.cfg), 'hooks.switches').status).toBe('ok');
   });
 });
 
